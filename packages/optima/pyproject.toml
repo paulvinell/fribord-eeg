@@ -1,0 +1,13 @@
+[project]
+name = "optima"
+version = "0.1.0"
+description = "Neurobit Optima EEG amplifier driver for macOS"
+requires-python = ">=3.12"
+dependencies = ["pyserial>=3.5"]
+
+[project.scripts]
+optima = "optima.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

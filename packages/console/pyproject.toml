@@ -1,0 +1,17 @@
+[project]
+name = "nfb-console"
+version = "0.1.0"
+description = "Operator console for neurofeedback sessions"
+requires-python = ">=3.12"
+dependencies = [
+    "nfb",
+    "flet>=0.86",
+    "sounddevice>=0.5.5",
+]
+
+[project.scripts]
+nfb-console = "nfb_console.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

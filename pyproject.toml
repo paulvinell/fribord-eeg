@@ -1,0 +1,12 @@
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+optima = { workspace = true }
+nfb = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8"]
+# Only for `make shots`, which renders the screens so they can be looked at. Kept out of `dev` because
+# it pulls a browser down and the test suite does not need one.
+shots = ["playwright>=1.40"]
