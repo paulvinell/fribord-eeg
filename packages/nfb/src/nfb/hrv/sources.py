@@ -27,6 +27,11 @@ from .ppg import QUERY_BATTERY, START_PPG, STOP_PPG, USB_BAUD, PpgDecoder
 HR_SERVICE = "0000180d-0000-1000-8000-00805f9b34fb"
 HR_MEASUREMENT = "00002a37-0000-1000-8000-00805f9b34fb"
 
+HELD_MAX = 64
+"""How many RR-bearing packets to hold while the unit resolver decides, at most. The resolver commits in
+a handful of packets; a cap only matters if a device never gives it enough to decide, which must not grow
+the hold without bound."""
+
 FTDI_VID = 0x0403
 """Both this device and the Optima are FTDI USB-serial bridges, which is the whole difficulty in
 `find_usb_port` below."""
@@ -177,16 +182,30 @@ class BleBeats:
                     hr, raw, _contact = parse_hr_raw(packet)
                     self.rr_scale.observe(hr, raw)
                     if self.rr_scale.decided is None:
-                        held.append((time.time(), packet))
+                        # Hold back only RR-bearing packets; a wrong scale corrupts those. An HR-only packet
+                        # has nothing to scale, so emit it now, else a strap with no RR hoards every packet.
+                        if raw:
+                            held.append((time.time(), packet))
+                            del held[:-HELD_MAX]
+                        else:
+                            emit(time.time(), packet)
                         return
                     while held:
                         emit(*held.pop(0))
                     emit(time.time(), packet)
 
                 await client.start_notify(HR_MEASUREMENT, on_notify)
-                while not self._stop.is_set():
-                    await asyncio.sleep(0.2)
-                await client.stop_notify(HR_MEASUREMENT)
+                try:
+                    while not self._stop.is_set():
+                        # A silent disconnect never raises out of the sleep, so without this the loop runs
+                        # for ever and the reader never ends for `HeartRunner._run` to reconnect.
+                        if not client.is_connected:
+                            self.error = "the heart-rate device disconnected"
+                            break
+                        await asyncio.sleep(0.2)
+                finally:
+                    if client.is_connected:
+                        await client.stop_notify(HR_MEASUREMENT)
 
         try:
             asyncio.run(go())
