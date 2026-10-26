@@ -188,7 +188,7 @@ class RrScaleResolver:
         accumulates rather than deciding on one packet — but smoothing biases both hypotheses equally, so
         the *difference* between their errors is still informative.
         """
-        if self.decided is not None or not raw or hr_bpm <= 0:
+        if self.decided is not None or not raw or sum(raw) <= 0 or hr_bpm <= 0:
             return self.scale
         implied = 60.0 / (sum(raw) / len(raw))
         self._err["spec"] += abs(implied * RR_SCALE_SPEC - hr_bpm)

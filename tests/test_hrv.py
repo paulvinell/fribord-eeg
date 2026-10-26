@@ -378,6 +378,17 @@ def test_rr_units_are_detected_rather_than_assumed():
         RrScaleResolver("furlongs")
 
 
+def test_a_zero_interval_does_not_divide_by_zero():
+    """A device glitch can send an RR integer of zero. The resolver guards an empty interval list but used
+    to divide 60 by the mean interval without checking it was non-zero, which raised inside the Bluetooth
+    notify callback. A zero-sum list is now ignored like an empty one."""
+    from nfb.hrv import RrScaleResolver
+
+    resolver = RrScaleResolver()
+    assert resolver.observe(60.0, [0]) == resolver.scale, "a zero interval is ignored, not divided by"
+    assert resolver.decided is None, "a glitch packet carries no evidence either way"
+
+
 def test_an_ectopic_beat_no_longer_moves_the_spectral_peak():
     """We had no artifact rejection at all. One early beat with its compensatory pause is a spike in the
     tachogram, and the spectrum reads it as real — which matters here more than anywhere, because a single
