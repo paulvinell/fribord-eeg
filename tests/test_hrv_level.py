@@ -666,6 +666,33 @@ def test_a_dead_or_silent_beat_source_stops_the_feedback_and_says_so():
         session.stop()
 
 
+def test_a_paused_scale_does_not_grow_and_warms_on_resume():
+    """A paused or pre-start session has a frozen clock, so feeding the rolling scale piles every tick at
+    one instant: the window never evicts, grows without bound, and its warm-up can never advance. The scale
+    is now fed only while running, and warmed from the buffered beats on resume — which is where the
+    'warm before you start' the screen promises actually happens."""
+    session = _session()
+    try:
+        session.set_strategy("rolling_minmax")          # a strategy with a rolling buffer to watch
+        # Beats accrue in the heart while the operator sets up, before play is pressed.
+        t = 1000.0
+        for _ in range(120):
+            t += 1.0
+            session.heart.state = session.heart.processor.push(Beat(t, 60.0, [1.0]))
+        session._strategy.reset()
+        assert session.paused, "a session opens paused"
+
+        for _ in range(200):
+            session.observe()
+        assert len(session._strategy._buf) == 0, "a paused scale is not fed, so it cannot grow unbounded"
+
+        session.toggle_pause()                          # resume: the clock advances again
+        assert len(session._strategy._buf) > 0, "resume warms the scale from the buffered beats"
+        assert session._strategy.warmup > 0.0, "the warmed scale spans real time, so warm-up advances"
+    finally:
+        session.stop()
+
+
 def test_a_strap_that_loses_contact_goes_stale_rather_than_running_the_room():
     """A Bluetooth strap keeps sending notifications after skin contact drops, with the contact bit false.
     The processor discards their intervals, so no new usable data arrives — but `seen_at` used to be

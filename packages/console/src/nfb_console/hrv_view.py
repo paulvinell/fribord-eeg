@@ -557,8 +557,10 @@ class HRVSession:
         still sees the quantity in its own units and its own direction — inverting first would turn a rolling
         minimum into a rolling maximum and make the pane's description of it wrong.
 
-        Measuring while paused is deliberate: the scale wants history, the readout is worth watching before
-        you start, and neither touches the room. Only `_render` does, and it is skipped.
+        Measuring while paused is deliberate: the readout is worth watching before you start, and it does
+        not touch the room — only `_render` does, and it is skipped. The rolling scale is not fed while
+        paused, though: its clock is frozen then, so a push would pile every tick at one instant. It is
+        warmed from the buffered beats on resume instead (`warm_from_history`).
         """
         # A frozen snapshot is not a reading. `state` holds the last beat for ever, so without this
         # gate a dead strap kept driving the volume, the shadow and the clicks indefinitely — and once
@@ -569,12 +571,10 @@ class HRVSession:
             self.release_outputs()
             return
         raw = metric_value(self.metric_spec, self.state)
-        # **The chosen metric's scale is fed whenever it has a value, whether or not it is driving.** It
-        # was fed only once it was already usable, so the stand-in carried the opening and then handed
-        # over to a scale with nothing in it — which gated the level and put "calibrating" on the screen
-        # in the middle of a session that had been running for a minute. Warming and driving are separate
-        # things and only one of them touches the room.
-        scaled = self._strategy.push(raw, self.elapsed) if raw is not None else None
+        # Fed only while running: `elapsed` freezes on a pause, so a push then never evicts and grows
+        # unbounded. Warmed from history on resume instead.
+        scaled = (self._strategy.push(raw, self.elapsed)
+                  if raw is not None and self.running else None)
         # **The stand-in covers absence, not roughness.** It used to hold the level until the scale was
         # a quarter full, on the reasoning that a scale built from two readings is not worth following.
         # That is a settling time, and this screen has now spent three rounds learning that a settling
@@ -706,13 +706,16 @@ class HRVSession:
 
     def toggle_pause(self) -> None:
         """Pause and resume, **and let go of every output while paused** — `TrainingSession`'s rule,
-        reimplemented here because this session does not inherit it. The draw loop skips `observe()`
-        while paused, which stops the outputs being *updated*, not being *held*: the display stayed
-        dimmed, the volume stayed where the signal left it, and the tone sang on. Resuming needs no
-        restart — every mechanism owns its take/follow/release lifecycle inside `apply`."""
+        reimplemented here because this session does not inherit it. `observe()` still runs while paused
+        for the readout, but it does not drive the room and does not feed the rolling scale. Resuming
+        warms the scale from the buffered beats and needs no restart — every mechanism owns its
+        take/follow/release lifecycle inside `apply`."""
         if self.paused:
             self.paused = False
             self._resumed_at = time.monotonic()
+            # The clock advances again: replay the buffered beats onto it to warm the scale, since nothing
+            # fed it while paused. This is where "warm before you start" actually happens.
+            self.warm_from_history()
         else:
             self._accumulated = self.elapsed
             self._resumed_at = None
