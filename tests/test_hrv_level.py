@@ -666,6 +666,40 @@ def test_a_dead_or_silent_beat_source_stops_the_feedback_and_says_so():
         session.stop()
 
 
+def test_a_strap_that_loses_contact_goes_stale_rather_than_running_the_room():
+    """A Bluetooth strap keeps sending notifications after skin contact drops, with the contact bit false.
+    The processor discards their intervals, so no new usable data arrives — but `seen_at` used to be
+    refreshed on every notification, so `stale` never fired and the room ran on the frozen snapshot. Now
+    only a beat with usable data refreshes it, so a run of no-contact beats lets the runner go stale."""
+    from nfb_console.heart import HeartRunner
+
+    class Source:
+        def __init__(self, beats):
+            self._beats = beats
+
+        def beats(self):
+            yield from self._beats
+
+        def close(self):
+            pass
+
+        def describe(self):
+            return "test strap"
+
+    runner = HeartRunner()
+    runner._stop.clear()
+    # A good beat is news; its arrival time is recorded.
+    runner.source = Source([Beat(1000.0, 60.0, [1.0], contact=True)])
+    runner._read_once()
+    assert runner.seen_at is not None, "a beat with a real interval is fresh news"
+
+    # A run of no-contact beats carries no usable interval, so it must not refresh the freshness clock.
+    was = runner.seen_at
+    runner.source = Source([Beat(1001.0 + i, 60.0, [], contact=False) for i in range(5)])
+    runner._read_once()
+    assert runner.seen_at == was, "no-contact beats are not news and must not hold off staleness"
+
+
 def test_the_invented_simulator_is_handed_back_switched_off():
     """The simulator default is this screen's, not the app's: the runner is shared with CFC, and one
     visit to HRV used to leave the app-wide choice pointing at the simulator — CFC then drew invented

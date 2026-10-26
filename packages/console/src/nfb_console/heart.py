@@ -125,7 +125,10 @@ class HeartRunner:
                 if self._stop.is_set():
                     return None
                 self.state = self.processor.push(beat)
-                self.seen_at = time.monotonic()
+                # Only a beat with usable data is news: a strap that lost contact keeps notifying with
+                # intervals the processor discards, and refreshing on those stops `stale` ever firing.
+                if beat.contact is not False and beat.rr_intervals:
+                    self.seen_at = time.monotonic()
             why = getattr(self.source, "error", None) or "the beat source stopped delivering"
         except Exception as exc:
             why = f"{type(exc).__name__}: {exc}"
