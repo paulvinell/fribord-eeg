@@ -8,6 +8,7 @@ state nobody can produce on demand is a detector nobody has tested.
 from __future__ import annotations
 
 import math
+import random
 
 import numpy as np
 import pytest
@@ -239,6 +240,33 @@ def test_implausible_intervals_are_dropped():
         processor.push(Beat(t + i, 60.0, [1.0]))
     state = processor.push(Beat(t + 30, 60.0, [0.05, 4.0, 1.0]))
     assert state.beats == 31, "only the plausible one was kept"
+
+
+def test_rmssd_survives_bluetooth_arrival_jitter():
+    """A Bluetooth strap stamps each beat at its packet's arrival, which the operating system jitters by a
+    few milliseconds, while the reported RR interval is exact. RMSSD and pNN50 used to reconstruct which
+    beats were neighbours from the arrival spacing, so any jitter made every pair look non-adjacent and the
+    numbers collapsed to zero on real hardware — while a test with clean timestamps passed. Adjacency now
+    rides with the beat, so the exact intervals drive the metric and jitter changes nothing."""
+    from nfb.hrv import Beat
+
+    rng = random.Random(3)
+    rrs = [0.80 + 0.04 * (-1) ** i for i in range(60)]        # 760/840 ms, so RMSSD is a clean 80 ms
+
+    def run(jitter: float) -> float:
+        proc = HRVProcessor(reject_artifacts=False)
+        t = 1000.0
+        state = None
+        for rr in rrs:
+            t += rr
+            arrival = t + (rng.uniform(-jitter, jitter) if jitter else 0.0)
+            state = proc.push(Beat(t=arrival, hr_bpm=60.0 / rr, rr_intervals=[rr]))
+        return state.rmssd_ms
+
+    clean = run(0.0)
+    jittered = run(0.015)
+    assert clean > 30.0, f"the clean RMSSD should be about 80 ms, got {clean:.1f}"
+    assert abs(jittered - clean) < 1.0, f"arrival jitter collapsed RMSSD: {jittered:.1f} vs {clean:.1f}"
 
 
 def test_batched_intervals_are_spread_backwards_in_time():

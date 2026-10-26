@@ -524,7 +524,10 @@ class HRVProcessor:
         self.target_hz = TARGET_HZ
         self.narrow_half_hz = NARROW_HALF_HZ
         self.set_target(target_hz, narrow_half_hz)
-        self._beats: deque[tuple[float, float]] = deque()      # (beat time, rr seconds), accepted only
+        # (beat time, rr seconds, contiguous), accepted only. `contiguous` rides with the beat so it
+        # evicts in the same popleft and cannot desync from the array. See push() for what sets it.
+        self._beats: deque[tuple[float, float, bool]] = deque()
+        self._gap = False     # a beat has been dropped since the last accepted one
         # **The live readouts do not wait for the artifact filter, and that is not a shortcut.** The filter
         # holds each beat until its successor arrives, because the ectopic test needs it — about a second at
         # resting rates. That latency is invisible in a spectrum and fatal in the breathing cue: the whole
@@ -577,6 +580,7 @@ class HRVProcessor:
 
     def reset(self) -> None:
         self._beats.clear()
+        self._gap = False
         self._live.clear()
         self._cue_up = False
         self._cue_ref = None
@@ -612,7 +616,7 @@ class HRVProcessor:
                              narrow_half_hz=self.narrow_half_hz)
         out: list[BeatState] = []
         sampled_at = beats[0][0] - step_s
-        for bt, rr in beats:
+        for bt, rr, _ in beats:
             state = clone.push(Beat(t=bt, hr_bpm=60.0 / rr, rr_intervals=[rr]))
             if bt - sampled_at >= step_s:
                 sampled_at = bt
@@ -639,6 +643,8 @@ class HRVProcessor:
         # must not train on it. The hole this leaves is a dropout, which the spectrum's gap handling
         # (`GAP_FACTOR`) already knows how to refuse.
         intervals = beat.rr_intervals if beat.contact is not False else []
+        if not intervals:
+            self._gap = True        # a no-contact or HR-only packet is a hole between accepted beats
         for rr in intervals:
             offset -= rr                            # decremented first, and outside any validity check
             bt = t - offset
@@ -648,6 +654,7 @@ class HRVProcessor:
             # transport artifact, not a heartbeat; it is skipped, and the interval it carried is simply
             # a slightly longer hole for the interpolation to span.
             if self._last_t is not None and bt <= self._last_t:
+                self._gap = True
                 continue
             # One range gate, the artifact filter's own (333-2000 ms). There used to be a second,
             # wider one here (250-2500 ms), and the seam between them was a hole: a 4 s missed-beat
@@ -659,18 +666,20 @@ class HRVProcessor:
                 self._live.append((bt, rr))
                 self._update_cue(bt, 60.0 / rr)
                 if self.artifacts is None:
-                    self._beats.append((bt, rr))
+                    self._beats.append((bt, rr, not self._gap))
+                    self._gap = False
                     continue
             elif self.artifacts is None:
+                self._gap = True
                 continue
-            # One beat of latency: the ectopic test needs the *following* interval, because a real ectopic
-            # comes early and is followed by a compensatory pause. Nothing downstream needs to know — the
-            # beats simply arrive a beat late, which at resting rates is about a second. Out-of-range
-            # intervals go through too: the filter rejects them itself, counts them, and settles its
-            # pending beat, all of which the old pre-gate silently skipped.
+            # One beat of latency: the ectopic test needs the following interval. Out-of-range intervals
+            # go through the filter too, so it counts them rather than a pre-gate dropping them unseen.
             for verdict in self.artifacts.push(bt, rr):
                 if verdict.accepted:
-                    self._beats.append((verdict.t, verdict.rr))
+                    self._beats.append((verdict.t, verdict.rr, not self._gap))
+                    self._gap = False
+                else:
+                    self._gap = True        # a withheld beat breaks the next pair's adjacency
         while self._beats and self._beats[0][0] < t - self.buffer_seconds:
             self._beats.popleft()
         return self._state(t, beat)
@@ -762,18 +771,14 @@ class HRVProcessor:
         window = live_hr[-self.smoothing_beats:]
 
         # Windowed, from accepted beats only: an ectopic moves the spectral peak and wrecks RMSSD.
-        times = np.asarray([bt for bt, _ in self._beats])
-        rr = np.asarray([r for _, r in self._beats])
+        times = np.asarray([bt for bt, _, _ in self._beats])
+        rr = np.asarray([r for _, r, _ in self._beats])
         hr = 60.0 / rr if rr.size else np.zeros(0)
         if rr.size > 1:
-            # Successive differences between *adjacent* beats only. The buffer holds accepted beats,
-            # so a withheld ectopic closes the array up and a bare np.diff produces a difference
-            # between two intervals that were never neighbours — withholding is right for the
-            # spectrum, which interpolates over absolute times, and it inflated the time-domain
-            # numbers built here: pNN50 measured at 2.4× its clean value purely from the seams. Two
-            # beats are adjacent exactly when the later one's interval spans the gap between them.
-            adjacent = np.abs(np.diff(times) - rr[1:]) < 1e-3
-            diffs = (np.diff(rr) * 1000.0)[adjacent]
+            # Successive differences between adjacent beats only. `contiguous` marks each beat that
+            # followed its predecessor directly; arrival times cannot tell on a BLE strap. See push().
+            contiguous = np.asarray([c for _, _, c in self._beats], dtype=bool)
+            diffs = (np.diff(rr) * 1000.0)[contiguous[1:]]
         else:
             diffs = np.zeros(0)
         return BeatState(

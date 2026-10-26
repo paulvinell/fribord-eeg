@@ -726,7 +726,7 @@ def test_a_fresh_source_starts_a_fresh_record(monkeypatch):
         # slept a fifth of a second first so that there would be real beats to compare against, which
         # made the scheduler part of the assertion.
         assert all(bt > 1e6 for bt, _ in runner.processor._live), "old beats survived the attach"
-        assert all(bt > 1e6 for bt, _ in runner.processor._beats)
+        assert all(bt > 1e6 for bt, _, _ in runner.processor._beats)
     finally:
         runner.release()
 
