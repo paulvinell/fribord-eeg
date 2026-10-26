@@ -163,13 +163,19 @@ class PeakDetector:
     Simpler than the textbook detectors (Pan-Tompkins and its relatives) on purpose. Those were built for
     ECG, where the QRS complex is sharp enough to reward an explicit derivative and integrator. A pulse
     wave is smooth, and a local maximum with a refractory period is enough.
+
+    **The signal-to-noise gate stops a flat line from manufacturing beats.** Every gate above is relative
+    to accepted beats, so a constant or near-flat input seeds the reference at ~zero and fires beats at the
+    refractory cadence over a trace with no pulse. The guard is a ratio: a candidate's height above
+    baseline must exceed a multiple of the waveform's own jitter. A pulse stands many times its noise
+    floor; noise stands a few; a flat line none. A ratio names no device and survives a gain change.
     """
 
     def __init__(self, rate_hz: float = PPG_RATE_HZ, baseline_tau_s: float = 1.5,
                  dwell_s: float = 0.18, refractory_s: float = 0.45, floor_frac: float = 0.35,
                  refractory_frac: float = 0.6, refractory_min_s: float = 0.35,
                  refractory_max_s: float = 0.60, overdue_factor: float = 1.4,
-                 floor_relax_halflife_s: float = 0.4, amp_beats: int = 4):
+                 floor_relax_halflife_s: float = 0.4, amp_beats: int = 4, min_snr: float = 5.0):
         self.rate_hz = rate_hz
         dt = 1.0 / rate_hz
         self.baseline_alpha = 1.0 - math.exp(-dt / baseline_tau_s)
@@ -181,9 +187,11 @@ class PeakDetector:
         self.refractory_max_s = refractory_max_s
         self.overdue_factor = overdue_factor
         self.floor_relax_halflife_s = floor_relax_halflife_s
+        self.min_snr = min_snr
 
         self._baseline: float | None = None
         self._window: deque[tuple[float, float]] = deque()
+        self._recent: deque[int] = deque(maxlen=max(3, int(rate_hz)))    # raw, for the noise floor
         self._last_beat: float | None = None
         self._amps: deque[float] = deque(maxlen=max(1, amp_beats))
         self._intervals: deque[float] = deque(maxlen=8)
@@ -191,6 +199,7 @@ class PeakDetector:
     def push(self, t: float, sample: int) -> tuple[float, float | None] | None:
         """One sample in; `(beat_time, interval_seconds)` on a beat, and the interval is None on the
         first one, which has nothing to be measured from."""
+        self._recent.append(sample)
         if self._baseline is None:
             self._baseline = float(sample)
             return None
@@ -203,6 +212,11 @@ class PeakDetector:
 
         centre_t, centre = self._window[self.dwell // 2]
         if any(centre < x for _, x in self._window):
+            return None
+        # The candidate must stand clear of the waveform's own noise floor, or a flat/weak trace with no
+        # pulse in it seeds the relative gates at ~zero and fires beats at the refractory cadence. Gated
+        # here, before the first beat may seed `_amps`, so the degenerate case cannot start.
+        if centre < self.min_snr * self._noise_floor():
             return None
 
         elapsed = None if self._last_beat is None else centre_t - self._last_beat
@@ -218,6 +232,16 @@ class PeakDetector:
         if elapsed is not None:
             self._intervals.append(elapsed)
         return centre_t, elapsed
+
+    def _noise_floor(self) -> float:
+        """The waveform's sample-to-sample jitter, as the median absolute first difference of recent raw
+        samples. The median is robust to the few steep samples of a real upstroke, so the slow pulse adds
+        almost nothing. Floored at half a count — the quantisation limit — so a flat line reads as noise,
+        not zero, and the ratio gate rejects it."""
+        if len(self._recent) < 3:
+            return 0.5
+        steps = sorted(abs(self._recent[i] - self._recent[i - 1]) for i in range(1, len(self._recent)))
+        return max(steps[len(steps) // 2], 0.5)
 
     def _mean_interval(self) -> float | None:
         return sum(self._intervals) / len(self._intervals) if self._intervals else None

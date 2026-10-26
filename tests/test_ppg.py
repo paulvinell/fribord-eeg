@@ -184,12 +184,35 @@ def test_baseline_drift_does_not_move_the_beats():
     assert missed < 0.05 and spurious < 0.05
 
 
+def test_a_flat_or_noise_only_trace_makes_no_beats():
+    """A sensor off the body, disconnected, or saturated gives a constant or near-constant trace. The
+    relative gates calibrate to it and manufacture beats at the refractory cadence — 10 s of flat input
+    gave about 26 — which then enter heart-rate training. The signal-to-noise gate rejects a trace whose
+    peaks do not stand clear of its own jitter, so there is no pulse and no beat."""
+    detector = PeakDetector(rate_hz=FS)
+    flat = [detector.push(i / FS, 2000) for i in range(int(10 * FS))]
+    assert all(r is None for r in flat), "a constant trace has no beats"
+
+    rng = random.Random(7)
+    detector = PeakDetector(rate_hz=FS)
+    noise = [detector.push(i / FS, 2000 + rng.randint(-1, 1)) for i in range(int(10 * FS))]
+    assert all(r is None for r in noise), "a trace of one-count noise has no beats"
+
+
+def test_a_weak_but_real_pulse_still_gives_beats():
+    """The noise gate must not reject a living pulse. A quarter-height pulse (100 counts against the
+    detector's 400-count reference) stands far above the noise floor, so every beat is kept."""
+    samples, truth = waveform(seconds=60.0, hr=60.0, amp=100.0)
+    missed, spurious = score(samples, truth)
+    assert missed < 0.05 and spurious < 0.05, f"missed {missed:.1%}, {spurious:.1%} spurious"
+
+
 # --- the decoder -----------------------------------------------------------------------------
 
 def test_beats_come_out_of_a_byte_stream_at_the_rate_that_went_in():
     """End to end without a device: build the waveform, frame it as the device would, and feed it in
     chunks that do not respect frame boundaries."""
-    samples, truth = waveform(seconds=40.0, hr=66.0)
+    samples, truth = waveform(seconds=60.0, hr=66.0)
     decoder = PpgDecoder(warm_up_samples=0)
     stream = b"".join(ppg_frame(samples[i:i + 16]) for i in range(0, len(samples) - 15, 16))
 
