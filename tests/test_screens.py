@@ -1411,6 +1411,74 @@ def test_back_from_the_device_screen_returns_to_the_screen_you_opened_it_from():
         console.device.close()
 
 
+def _live_console(monkeypatch, channels: int = 2, protocol: str = "AMP"):
+    import optima
+
+    from test_device import FakeOptima
+    from nfb_console.app import Console, build_parser
+
+    fake = FakeOptima()
+    monkeypatch.setattr(optima, "Optima", lambda *a, **k: fake)
+    args = build_parser().parse_args(["--live", "--channels", str(channels)])
+    console = Console(StubPage(), args)
+    console.pick(BY_CODE[protocol])
+    return console, fake
+
+
+def test_selecting_the_amplifier_does_not_reopen_the_recording():
+    """`_pick` branched session creation on the startup `--live` flag, which never changes, not on the live
+    input choice. So after starting in replay mode and selecting the amplifier, picking a protocol reopened
+    the old recording instead of going live."""
+    from nfb import WaitingSource
+
+    console = _console()                            # started from a file
+    try:
+        assert console.source_label().startswith("file:")
+        console.inputs.kind, console.inputs.path = "amplifier", ""
+        console.pick(BY_CODE["AMP"])
+        assert console.source_label() == "", "the amplifier announces no file"
+        assert isinstance(console.session.source, WaitingSource), \
+            "a live session waits on the device, not the recording"
+    finally:
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
+def test_reconfiguring_on_the_device_screen_rebuilds_the_session(monkeypatch):
+    """`resume` rebuilt only the view, never the estimators. After changing the rate on the device screen the
+    session fed a 1000 Hz stream into filters built for the old rate, so rebuild on a real settings mismatch."""
+    console, _ = _live_console(monkeypatch)
+    try:
+        first = console.session
+        assert first is not None and first.rate == 1000.0
+        console.show_device(return_to=BY_CODE["AMP"])       # suspends, stops the device
+        assert console.session is first and first.suspended
+        console.device.reconfigure(hz=250.0)
+        console.resume(BY_CODE["AMP"])
+        assert console.session is not first, "a new rate must rebuild, not reuse 1000 Hz estimators"
+        assert console.session.rate == 250.0
+    finally:
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
+def test_a_contact_check_with_no_reconfigure_returns_to_the_same_session(monkeypatch):
+    """The rebuild is only on a real mismatch: looking at electrodes and coming back must keep the session,
+    its clock and its calibration, exactly as leaving it does today."""
+    console, _ = _live_console(monkeypatch)
+    try:
+        first = console.session
+        console.show_device(return_to=BY_CODE["AMP"])
+        console.resume(BY_CODE["AMP"])
+        assert console.session is first, "no reconfigure, so the session carries on"
+    finally:
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
 def test_the_device_chip_from_the_launcher_still_goes_back_to_the_launcher():
     """The same control, and it has to remember two different origins."""
     import argparse

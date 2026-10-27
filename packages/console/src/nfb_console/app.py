@@ -48,6 +48,8 @@ class Console:
         self.inputs = InputChoice(
             kind="amplifier" if args.live else "file",
             path="" if args.live else (args.file or args.path), loop=True)
+        # The device settings a live session was built against; `resume` compares them to the current ones.
+        self._built_settings: Settings | None = None
         if args.live and not self.device.connect():
             # On the terminal as well as on the chip. `--live` is asked for explicitly, so a connection
             # that failed is news, and the person who typed it is looking at a terminal.
@@ -304,10 +306,9 @@ class Console:
 
     def source_label(self) -> str:
         """What the samples are coming from, when it is not the amplifier. Empty for a live session."""
-        if self.args.live and not self.inputs.from_file:
-            return ""
-        path = (self.inputs.path if self.inputs.from_file else None) or self.args.file or self.args.path
-        return f"file: {Path(path).name}" if path else "no input"
+        if self.inputs.from_file:
+            return f"file: {Path(self.inputs.path).name}"
+        return "" if self.inputs.kind == "amplifier" else "no input"
 
     @staticmethod
     def screen_for(protocol: Protocol):
@@ -328,6 +329,12 @@ class Console:
         screen = self.screen_for(protocol)
         if session is None or not session.suspended or screen is None or self.protocol is not protocol:
             self.pick(protocol)             # nothing to come back to
+            return
+        if (not self.inputs.from_file and self._built_settings is not None
+                and self.device.status.settings != self._built_settings):
+            # Reconfigured on the device screen: the estimators are built for the old rate, so rebuild.
+            # Only on a real mismatch, so an ordinary contact check still returns to the same session.
+            self.pick(protocol)
             return
         self.protocol = protocol
         session.rearm()
@@ -371,6 +378,10 @@ class Console:
         if previous is not None:
             previous.stop()
         self.protocol = protocol
+        # The current input choice, not the startup flag: selecting the amplifier on the device screen
+        # after starting in replay mode must build a live session, not reopen the old recording.
+        live = not self.inputs.from_file
+        self._built_settings = self.device.status.settings if live else None
         source = self.inputs.open(self.device) if self.inputs.from_file else None
         # Say so in the toolbar for as long as it lasts. A replayed capture drew a screen identical to a
         # live one, and if the capture was made with an empty amplifier then every channel in it truthfully
@@ -382,8 +393,8 @@ class Console:
         if screen is not None:
             self.session = screen.session_for(
                 protocol,
-                None if self.args.live else self.args.path,
-                device=self.device if self.args.live else None,
+                None if live else self.inputs.path,
+                device=self.device if live else None,
                 source=source,
                 channels=self.channels,
                 heart_choice=self.heart_choice,
@@ -407,8 +418,8 @@ class Console:
             return
         self.session = session_view.Session(
             protocol,
-            None if self.args.live else self.args.path,
-            device=self.device if self.args.live else None,
+            None if live else self.inputs.path,
+            device=self.device if live else None,
             source=source,
             channels=self.channels,
         )
