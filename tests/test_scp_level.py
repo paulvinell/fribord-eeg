@@ -82,6 +82,34 @@ def _releases(session) -> list[str]:
 
 # --- the level -------------------------------------------------------------------------------
 
+def test_a_rejected_block_is_marked_invalid_to_the_trial_engine():
+    """An artifact-rejected block arrives as a held stand-in whose device state is still valid, so SCP used
+    to feed it to the trial engine as a genuine reading — a run of blinks (which land exactly in the SCP
+    band) scored as a valid baseline and shift. The reading is now marked invalid when the block was not
+    accepted, so the engine counts it toward voiding the trial rather than scoring it."""
+    session = _session()
+    try:
+        session.toggle_pause()
+        nxt = _drive(session, 3.0, uv=lambda _s: 0.0)        # warm the metric past the 2 s settle
+        assert session.settled
+
+        captured: list[bool] = []
+        original = session.trials.feed
+
+        def spy(t, value, valid=True):
+            captured.append(valid)
+            return original(t, value, valid=valid)
+
+        session.trials.feed = spy
+        spec = session.specs[session.channel]
+        session._accepted[session.channel] = False           # as feed_block records for a held block
+        session.consume(Block(spec.index, nxt, tuple([0] * 8), spec))
+        assert captured and all(v is False for v in captured), \
+            "a rejected block feeds the trial engine an invalid reading, not a valid one"
+    finally:
+        session.stop()
+
+
 def test_nothing_is_fed_back_before_the_metric_settles():
     """The filter needs two seconds, and a reading that is still a transient would go into a baseline and
     then be subtracted from six seconds of real signal. **Nothing**, not zero: a mechanism handed zero

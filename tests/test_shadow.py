@@ -423,3 +423,41 @@ def test_outputs_can_be_switched_off_for_a_whole_process(monkeypatch):
 
     monkeypatch.delenv("NFB_NO_OUTPUTS")
     assert not shadow.muted()
+
+
+def test_a_summed_target_is_not_trained_while_a_contributor_is_held():
+    """The summed target used to be gated by whichever channel's block completed the aligned run, so an
+    artifact held on one channel still trained the sum when a different channel's block arrived last — the
+    accept/reject state of every non-completing contributor was discarded. The sum is now trained only when
+    every contributing channel's last block was accepted."""
+    import numpy as np
+
+    from nfb.dsp import Band
+    from nfb.stream import Block
+    from nfb_console import amplitude_view as av
+    from nfb_console.protocols import BY_CODE
+    from nfb_console.targets import PAIR
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], path=str(BENCH), channels=2)
+    try:
+        tgt = session.add_target(PAIR, Band(8.0, 12.0, ""), "increase")
+        key = session.key_for(tgt)
+        s0, s1 = session.specs[0], session.specs[1]
+        wave = (np.sin(2 * np.pi * 10.0 * np.arange(1200) / session.rate) * 20 / s0.scale).astype(int)
+
+        def feed_run(accepted: dict, base: int) -> set:
+            seen: set = set()
+            for i in range(0, 1200 - 7, 8):
+                session._accepted = dict(accepted)
+                samples = tuple(int(v) for v in wave[i:i + 8])
+                session.consume(Block(0, base + i, samples, s0))
+                seen |= session.consume(Block(1, base + i, samples, s1))
+            return seen
+
+        held = feed_run({0: False, 1: True}, 0)
+        assert key not in held, "a held contributor must stop the summed target training"
+
+        ok = feed_run({0: True, 1: True}, 2000)
+        assert key in ok, "with every contributor accepted, the sum trains"
+    finally:
+        session.stop()

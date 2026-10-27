@@ -420,6 +420,9 @@ class TrainingSession:
         self._seen: dict[int, int] = {}
         self._states: dict[tuple[int, int], int] = {}
         self._skipped = 0
+        # Each channel's last artifact-acceptance verdict (see feed_block): a summed metric must gate on
+        # every contributor's acceptance, not only the block whose arrival completed the run.
+        self._accepted: dict[int, bool] = {}
         self.feeding = False
         """Whether a feed thread is currently consuming the source. False for a session that has been
         suspended for a trip to the device screen, which is what tells the app to re-arm rather than build a
@@ -1634,6 +1637,7 @@ class TrainingSession:
         # filters, re-running the whole settling time per blink; see the hold note in
         # `nfb.dsp.artifact`. What a rejection excludes is *training*: below, a block that was
         # not accepted observes no target, advances no level, and fires no reward.
+        self._accepted[item.channel] = judged.accepted
         fresh = self.consume(judged.fed)
         if self.paused or not judged.accepted:
             return

@@ -358,15 +358,19 @@ class SCPSession(TrainingSession):
         if metric is None or block.channel != self.channel:
             return set()
         fresh: set = set()
+        # A held stand-in keeps a valid device state, so mark a rejected block invalid for the trial
+        # engine, or a run of blinks scores as a valid baseline and shift.
+        accepted = self._accepted.get(block.channel, True)
         for r in metric.feed(block):
             self.raw_shift = r.value
             self.amplitudes[("scp",)] = r.value
             if metric.warmup < 1.0 or self.paused:
                 continue
-            for event in self.trials.feed(r.t, r.value, valid=r.valid):
+            valid = r.valid and accepted
+            for event in self.trials.feed(r.t, r.value, valid=valid):
                 self._sound(event)
             shift = self.trials.shift
-            driving = self.trials.feedback_live and r.valid and shift is not None
+            driving = self.trials.feedback_live and valid and shift is not None
             if driving:
                 # Oriented, so that the level always rises toward the direction that was asked for. Every
                 # mechanism reads one number and none of them knows which way this trial goes, so the

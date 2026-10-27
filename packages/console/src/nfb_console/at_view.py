@@ -438,6 +438,9 @@ class ATSession(TrainingSession):
         # against each other by up to a frame.
         self.sites = tuple(self.specs)
         self.site = next(iter(self.specs), 0)         # whose spec the summed signal borrows
+        # A sum aligns by sample index, so the channels must share a rate — same index, same time.
+        if self.sites and len({self.specs[c].rate_hz for c in self.sites}) > 1:
+            raise ValueError("Alpha-Theta sums the channels and needs them at one sample rate")
         self.aligner = ChannelAligner(self.sites) if self.sites else None
         self.traces = {i: TraceBuffer(320, TRACE_SECONDS, s.rate_hz)
                        for i, s in self.specs.items()}
@@ -975,10 +978,13 @@ class ATSession(TrainingSession):
         worst = OK if all(self.state.get(c) is not False for c in self.sites) else NO_SIGNAL
         summed = Block(self.site, start, tuple(int(round(v)) for v in counts), spec, state=worst)
         self.sum_ring.push(np.asarray(summed.values))
+        # Trained only when every contributor was accepted, not just the block that completed the run.
+        summed_ok = all(self._accepted.get(c, True) for c in self.sites)
         for key, metric in list(self.metrics.items()):
             for r in metric.feed(summed):
                 self.amplitudes[key] = r.value
-                fresh.add(key)
+                if summed_ok:
+                    fresh.add(key)
         return fresh
 
     sum_spectrum_leads = True

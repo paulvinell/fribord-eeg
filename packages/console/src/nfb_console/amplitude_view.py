@@ -221,6 +221,9 @@ class AmplitudeSession(TrainingSession):
         #
         # The *spectrum* is the other way round. A sum spectrum beside a single channel's is the same
         # picture twice, offered as though it were a choice, so that one still needs two.
+        # A sum aligns by sample index, so the channels must share a rate — same index, same time.
+        if self.sites and len({self.specs[c].rate_hz for c in self.sites}) > 1:
+            raise ValueError("a summed target needs every channel at the same sample rate")
         self.aligner = ChannelAligner(self.sites) if self.sites else None
         self.display_aligner = ChannelAligner(self.sites) if len(self.sites) > 1 else None
         # Offered in the Spectrum tab as well as measured, since it is the same signal a summed target is
@@ -553,9 +556,14 @@ class AmplitudeSession(TrainingSession):
                     continue
                 if combo not in combined:
                     combined[combo] = self._combined(paired, combo)
+                contributors = (self.summed_sites() if combo == SUM_KEY
+                                else tuple(c for c, _s in combo[1]))
                 for r in metric.feed(combined[combo]):
                     self.amplitudes[mkey] = r.value
-                    fresh.add(mkey)
+                    # The metric advances on the contiguous stand-in, but the target observes only when
+                    # every contributing channel was accepted — not just the block that completed the run.
+                    if all(self._accepted.get(c, True) for c in contributors):
+                        fresh.add(mkey)
         for mkey, metric in list(self.metrics.items()):
             if mkey[0] == ch:
                 for r in metric.feed(block):
