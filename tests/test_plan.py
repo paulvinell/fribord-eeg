@@ -100,6 +100,8 @@ def test_the_session_fires_cues_through_a_swappable_player(monkeypatch):
     import nfb_console.amplitude_view as av
     from nfb_console.protocols import BY_CODE
 
+    import types
+
     session = av.AmplitudeSession.__new__(av.AmplitudeSession)
     session.plan = SessionPlan()
     session.protocol = BY_CODE["AMP"]
@@ -107,6 +109,12 @@ def test_the_session_fires_cues_through_a_swappable_player(monkeypatch):
     session.paused = False
     session._accumulated = 0.0
     session._resumed_at = None
+    # Completion now hands the outputs back (it did not before), so the hand-built session needs the
+    # output objects and pump handle `_outputs_off` touches.
+    session._output_thread = None
+    session._output_state = None
+    for _name in ("display", "output_volume", "music"):
+        setattr(session, _name, types.SimpleNamespace(release=lambda: None, apply=lambda *a, **k: None))
     played: list[str] = []
     session.cue = played.append
 
