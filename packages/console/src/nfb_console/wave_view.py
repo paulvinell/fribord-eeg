@@ -627,12 +627,16 @@ class WaveSession(TrainingSession):
         if metric is None or block.channel != self.channel:
             return set()
         fresh: set = set()
+        # Resolved state decides whether to steer (the operator override, not the raw device flag);
+        # calibration also needs acceptance, so a rail or clip cannot set the range.
+        usable = self.state.get(self.channel) is not False
+        accepted = self._accepted.get(self.channel, True)
         for r in metric.feed(block):
             self.raw_wave = r.value
             self.amplitudes[("wave",)] = r.value
-            if not r.valid:
+            if not usable:
                 continue
-            if not self.calibrated:
+            if not self.calibrated and accepted:
                 self._observe_calibration(r.value)
             signal = self._strategy.push(r.value, r.t)
             if self.inverts:

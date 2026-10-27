@@ -361,12 +361,13 @@ class SCPSession(TrainingSession):
         # A held stand-in keeps a valid device state, so mark a rejected block invalid for the trial
         # engine, or a run of blinks scores as a valid baseline and shift.
         accepted = self._accepted.get(block.channel, True)
-        for r in metric.feed(block):
+        usable = self.state.get(self.channel) is not False     # resolved state (the operator override), not
+        for r in metric.feed(block):                           # the raw device flag, which ignores the override
             self.raw_shift = r.value
             self.amplitudes[("scp",)] = r.value
             if metric.warmup < 1.0 or self.paused:
                 continue
-            valid = r.valid and accepted
+            valid = usable and accepted
             for event in self.trials.feed(r.t, r.value, valid=valid):
                 self._sound(event)
             shift = self.trials.shift
