@@ -122,6 +122,10 @@ class SleepSession(TrainingSession):
             self._lost_seconds[ch] = self._lost_seconds.get(ch, 0.0) + seconds
         if ch == self.focus:
             self.night_seconds += seconds
+        # Before the pause guard: the night records while paused. The base feed_block's call is a
+        # rate-limited no-op at the same signal time, so nothing double-counts.
+        if self.band_trends is not None:
+            self.band_trends.tick(self.spectrum_sources(), block.end_index / block.spec.rate_hz)
 
     def usable_fraction(self, channel: int) -> float | None:
         """How much of the night this channel was usable, 0…1, or None before anything arrived."""
@@ -154,17 +158,30 @@ class SleepSession(TrainingSession):
             n += 1
         return n
 
+    def adopt_view(self, previous) -> None:
+        """Carry the alarm across a same-protocol restart. The base adopt skips the sentry, so stopping and
+        re-entering Sleep reset it to its loud defaults — which a later stop would then save over the good
+        values. These are the operator's settings, like a volume, not the session's history."""
+        super().adopt_view(previous)
+        prev = getattr(previous, "sentry", None)
+        if prev is not None:
+            s = self.sentry
+            s.audible = prev.audible
+            s.alarm_seconds = prev.alarm_seconds
+            s.repeat_seconds = prev.repeat_seconds
+            s.volume = prev.volume
+
     def push_display(self, now: float) -> None:
         """One cascade row per interval, from the draw loop — a time axis has to advance at its own
         rate however the blocks arrive, the same rule the CFC cascade states."""
         if now - self._spectrogram_at < self.spectrogram.interval:
             return
-        self._spectrogram_at = now
         ring = self.rings.get(self.focus)
         if ring is None:
             return
         row = ring.spectrum()
         if row.size:
+            self._spectrogram_at = now      # advance only on a real row; an empty first tick must not count
             self.spectrogram.push(row[:self.spectrogram.bins])
 
 

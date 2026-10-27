@@ -154,3 +154,49 @@ def _all_text(root) -> str:
 
     walk(root)
     return " · ".join(out)
+
+def test_the_alarm_survives_a_same_protocol_restart():
+    """A restart takes the adopt path, which skipped the sentry and reset it to its loud defaults — which a
+    later stop would then save over the good values. `adopt_view` carries the alarm across now."""
+    first = sleep_session()
+    first.sentry.audible = False
+    first.sentry.alarm_seconds = 120.0
+    first.sentry.volume = 40.0
+    second = sleep_session()
+    try:
+        second.adopt(first)                         # same protocol, so the adopt path runs
+        assert second.sentry.audible is False
+        assert second.sentry.alarm_seconds == 120.0
+        assert second.sentry.volume == 40.0
+    finally:
+        first.stop()
+        second.stop()
+
+
+def test_sleep_collects_band_history_while_paused():
+    """The night records whether or not anyone pressed play, so the Night graph and Trends tab must fill
+    while paused — the default state. Band collection ran after the pause guard and stayed empty. A looping
+    source gives more than the 10 s trend cadence of signal; indices stay continuous across the loop."""
+    session = sleep_session(source=replay(loop=True))
+    try:
+        sleep_view.view(StubPage(), session, toolbar(), lambda: None)   # builds band_trends
+        assert session.paused, "a session opens paused"
+        pump(session, until=lambda: bool(session.band_trends and session.band_trends.labels()))
+        assert session.band_trends.labels(), "band history fills while paused, not only when playing"
+    finally:
+        session.stop()
+
+
+def test_the_first_cascade_row_does_not_wait_a_whole_interval():
+    """push_display stamped the interval before checking a row existed, so an empty first tick burned the
+    180 s interval and the first row landed that late. The stamp advances only on a real row now."""
+    session = sleep_session()
+    try:
+        assert session._spectrogram_at == 0.0
+        session.push_display(1e9)                   # far past the interval, but the ring has no spectrum yet
+        assert session._spectrogram_at == 0.0, "an empty tick must not consume the interval"
+        pump(session)                               # now the ring holds a spectrum
+        session.push_display(2e9)
+        assert session._spectrogram_at == 2e9, "a real row advances the clock"
+    finally:
+        session.stop()
