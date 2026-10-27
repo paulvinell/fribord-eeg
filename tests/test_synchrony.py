@@ -75,6 +75,37 @@ def test_lockin_band_power_reanchors_after_an_index_reset():
     assert out[0].t == pytest.approx(0.0, abs=1e-6), "the first reading carries the new epoch's time"
 
 
+def test_lockin_band_power_ignores_a_block_from_another_channel():
+    """The single-channel estimator had no channel guard its three siblings have, so fed a stream it would
+    mix channels into one lock-in. A block for another channel is now ignored."""
+    from nfb.dsp import Band, LockinBandPower
+
+    lb = LockinBandPower(spec(0), Band(8.0, 12.0), output_hz=20.0)
+    other = Block(1, 0, tuple(range(8)), spec(1))
+    assert lb.feed(other) == [], "a block for ch1 is not processed by a ch0 estimator"
+
+
+def test_two_flat_channels_do_not_read_a_perfect_phase_lock():
+    """An amplitude-free sample's phase is 0 on both channels, which used to vote a perfect lock, so two
+    zero channels read plv 1. Such samples now cast no vote, so the plv stays near zero."""
+    zero = np.zeros(int(25 * RATE))
+    metric, _ = final(Reward(10.0, 1.0, "plv"), zero, zero)
+    assert metric.plv < 0.1, f"two flat channels must not lock, got plv {metric.plv:.3f}"
+
+
+def test_a_plv_metric_admits_its_long_smoothing_window_in_the_latency():
+    """The Metric contract is latency = delay + smoothing; a plv configuration averages phase over tens of
+    seconds, which latency_seconds omitted."""
+    m = SynchronyMetric(SPECS, (0, 1), Reward(10.0, 1.0, "plv"))
+    assert m.smoothing_seconds > 0
+    assert m.latency_seconds == pytest.approx(m.delay_seconds + m.smoothing_seconds)
+
+
+def test_a_synchrony_pair_needs_two_different_channels():
+    with pytest.raises(ValueError, match="two different channels"):
+        SynchronyMetric(SPECS, (0, 0), Reward(10.0, 1.0))
+
+
 def test_the_lockin_recovers_peak_amplitude():
     lock = Lockin(10.0, 1.0, RATE)
     z = lock.process(sine(10.0, 20.0, amp=25.0))

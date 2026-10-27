@@ -65,6 +65,7 @@ MEASURES = {
 DEFAULT_WIDTH_HZ = 0.2
 DEFAULT_POLES = 2
 PLV_CYCLES = 8.0        # coherence times to average phase over; see the note in the module docstring
+PLV_MIN_AMP = 1e-9      # µV; below this the analytic phase is a numeric artifact, not a measurement
 
 
 def bandwidth_tau(width_hz: float, poles: int = DEFAULT_POLES) -> float:
@@ -267,6 +268,8 @@ class SynchronyMetric:
                  output_hz: float = 20.0):
         if pair[0] not in specs or pair[1] not in specs:
             raise ValueError(f"channels {pair} are not both in this session")
+        if pair[0] == pair[1]:
+            raise ValueError(f"a synchrony pair needs two different channels, got {pair}")
         rates = {specs[c].rate_hz for c in pair}
         if len(rates) != 1:
             raise ValueError("a synchrony pair needs both channels at the same sample rate")
@@ -353,7 +356,7 @@ class SynchronyMetric:
 
     @property
     def latency_seconds(self) -> float:
-        return self.delay_seconds
+        return self.delay_seconds + self.smoothing_seconds      # plv adds its long phase window
 
     def feed(self, block: Block) -> list[Reading]:
         paired = self.aligner.push(block)
@@ -369,8 +372,13 @@ class SynchronyMetric:
         # much longer than the band's own constant, or it reads near 1 for anything (see the module
         # docstring). One control still sets both timescales, since the width is in the denominator.
         unit = np.exp(1j * (np.angle(za) - np.angle(zb)))
+        mag = np.minimum(np.abs(za), np.abs(zb))
         p, alpha = self._phasor, self._alpha
-        for value in unit:
+        for value, m in zip(unit, mag):
+            # An amplitude-free sample's phase is a numeric artifact (0 on both channels), not a
+            # measurement; letting it vote makes two flat channels read a perfect lock.
+            if m < PLV_MIN_AMP:
+                continue
             p += alpha * (value - p)
         self._phasor = p
         self.plv = float(min(1.0, abs(p)))
@@ -449,6 +457,8 @@ class LockinBandPower:
         return self.delay_seconds
 
     def feed(self, block: Block) -> list[Reading]:
+        if block.channel != self.spec.index:
+            return []           # one channel's estimator, same guard the sibling band estimators have
         # `Block.values` are already scaled to µV — every estimator scales exactly once, either here
         # via `values` or from `samples` with an explicit `* spec.scale`, never both.
         values = np.asarray(block.values, dtype=float)

@@ -97,6 +97,8 @@ codebase, and below it a flank measures the electrode settling rather than a nei
 
 MIN_DELAY_SECONDS = 0.05
 
+LOCK_MIN_AMP = 1e-9     # µV; below this an analytic phase is a numeric artifact, not a measurement
+
 
 @dataclass(frozen=True)
 class Coupling:
@@ -233,7 +235,8 @@ class CouplingMetric:
 
     def __init__(self, specs: dict[int, ChannelSpec], coupling: Coupling,
                  measure: str = "modulation", window_seconds: float = DEFAULT_WINDOW_SECONDS,
-                 output_hz: float = 10.0, delay_seconds: float = 0.1):
+                 output_hz: float = 10.0, delay_seconds: float = 0.1,
+                 drift_hz: float | None = None):
         missing = [c for c in coupling.channels if c not in specs]
         if missing:
             raise ValueError(f"channel {missing[0]} is not in this session")
@@ -254,9 +257,11 @@ class CouplingMetric:
         # The same designed delay on both bands, so the phase and the amplitude describe the same moment.
         self.delay = max(MIN_DELAY_SECONDS, float(delay_seconds))
         self.aligner = ChannelAligner(coupling.channels)
-        self.slow = CFIREnvelope(coupling.slow, self.rate_hz, delay_seconds=self.delay)
-        self.fast = CFIREnvelope(coupling.fast, self.rate_hz, delay_seconds=self.delay)
-        self.flanks = [CFIREnvelope(band, self.rate_hz, delay_seconds=self.delay)
+        # Same drift conditioning on every band, so peak_ratio stays comparable (a standing offset
+        # otherwise leaks into the slow band at the device's low corner).
+        self.slow = CFIREnvelope(coupling.slow, self.rate_hz, delay_seconds=self.delay, drift_hz=drift_hz)
+        self.fast = CFIREnvelope(coupling.fast, self.rate_hz, delay_seconds=self.delay, drift_hz=drift_hz)
+        self.flanks = [CFIREnvelope(band, self.rate_hz, delay_seconds=self.delay, drift_hz=drift_hz)
                        for band in self._flank_bands()]
 
         dt = 1.0 / self.rate_hz
@@ -379,6 +384,10 @@ class CouplingMetric:
 
         slow = self.slow.analytic(phase_in)
         fast = np.abs(self.fast.analytic(amplitude_in))
+        # Advance the flanks every block, like slow/fast: running them only on accepted blocks spliced
+        # their input across a rejection and desynced peak_ratio, the rhythm gate.
+        flank = (np.mean([np.abs(f.analytic(phase_in)) for f in self.flanks], axis=0)
+                 if self.flanks else None)
         phase = np.angle(slow)
         bins = np.minimum(((phase + np.pi) / (2 * np.pi) * PHASE_BINS).astype(int),
                           PHASE_BINS - 1)
@@ -399,12 +408,12 @@ class CouplingMetric:
                 shifted = history[len(history) - len(fast) - lag:len(history) - lag]
                 surrogate.push(bins, shifted, phase)
             self._filled += len(fast)
-            self._push_powers(np.abs(slow), phase_in, len(fast))
+            self._push_powers(np.abs(slow), flank, len(fast))
+            self.seconds += len(fast) / self.rate_hz    # settled counts accepted signal only, as locking does
         self._history = history[-(max(self._lags) + 1):] if self._lags else history[:0]
 
         if self._next_index is None:
             self._next_index = start
-        self.seconds += len(fast) / self.rate_hz
         out: list[Reading] = []
         for offset in range(len(fast)):
             index = start + offset
@@ -417,12 +426,13 @@ class CouplingMetric:
                                channel=self.coupling.channels, unit="", valid=block.valid))
         return out
 
-    def _push_powers(self, slow_amplitude: np.ndarray, raw: np.ndarray, n: int) -> None:
+    def _push_powers(self, slow_amplitude: np.ndarray, flank: np.ndarray | None, n: int) -> None:
+        # `flank` is pre-computed in feed every block (so the flank filters never splice their input); the
+        # power is accumulated here only for accepted blocks.
         block = self._decay ** n
         weights = self._decay ** np.arange(n - 1, -1, -1)
         self._slow_power = self._slow_power * block + float(np.sum(slow_amplitude * weights))
-        if self.flanks:
-            flank = np.mean([np.abs(f.analytic(raw)) for f in self.flanks], axis=0)
+        if flank is not None:
             self._flank_power = self._flank_power * block + float(np.sum(flank * weights))
 
 
@@ -496,7 +506,7 @@ class LockingMetric:
 
     def __init__(self, specs: dict[int, ChannelSpec], locking: Locking,
                  window_seconds: float = 5.0, output_hz: float = 10.0,
-                 delay_seconds: float = 0.1):
+                 delay_seconds: float = 0.1, drift_hz: float | None = None):
         missing = [c for c in locking.pair if c not in specs]
         if missing:
             raise ValueError(f"channel {missing[0]} is not in this session")
@@ -513,7 +523,8 @@ class LockingMetric:
         self.window_seconds = float(window_seconds)
         self.delay = max(MIN_DELAY_SECONDS, float(delay_seconds))
         self.aligner = ChannelAligner(locking.pair)
-        self.filters = {c: CFIREnvelope(locking.band, self.rate_hz, delay_seconds=self.delay)
+        self.filters = {c: CFIREnvelope(locking.band, self.rate_hz, delay_seconds=self.delay,
+                                        drift_hz=drift_hz)
                         for c in locking.pair}
 
         dt = 1.0 / self.rate_hz
@@ -632,12 +643,15 @@ class LockingMetric:
         a, b = (self.filters[c].analytic(v) for c, v in zip(self.locking.pair, runs))
         phase_a, phase_b = np.angle(a), np.angle(b)
         unit = np.exp(1j * (phase_a - phase_b))
+        # An amplitude-free sample's phase is a numeric artifact (0 on both), not a measurement; weighting
+        # it zero stops two flat channels reading a perfect lock.
+        good = np.minimum(np.abs(a), np.abs(b)) >= LOCK_MIN_AMP
 
         # The *second channel's phase*, not the difference — see the class docstring.
         history = np.concatenate(self._history + [phase_b]) if self._history else phase_b
         if count and block.valid:
             n = len(unit)
-            weights = self.decay ** np.arange(n - 1, -1, -1)
+            weights = (self.decay ** np.arange(n - 1, -1, -1)) * good
             block_decay = self.decay ** n
             self._phasor = self._phasor * block_decay + complex(np.sum(unit * weights))
             # Which *side* of zero the lag falls on, which is all `lagged` needs — see below.

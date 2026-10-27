@@ -68,6 +68,43 @@ def test_a_coupled_signal_reads_far_above_its_own_floor_and_an_uncoupled_one_sit
     assert strong.modulation > 20 * none.modulation
 
 
+def test_drift_conditioning_makes_the_coupling_ignore_a_standing_offset():
+    """At the amplifier's low high-pass corner a DC offset leaks into the slow band and moves the coupling.
+    CFC and the amplitude screen condition for it; PAC could not pass the parameter. With drift_hz set the
+    coupling is offset-invariant; without it, a 300 µV offset substantially changes the reading."""
+    x = coupled(120, 0.9)
+
+    def run(offset: float, drift):
+        m = CouplingMetric({0: SPEC}, Coupling(SLOW, FAST), window_seconds=20.0, drift_hz=drift)
+        for i in range(0, len(x), 250):
+            m.feed(Block(0, i, np.asarray(x[i:i + 250]) + offset, SPEC))
+        return m.modulation
+
+    assert run(300.0, 0.05) == pytest.approx(run(0.0, 0.05), rel=0.02), "drift makes it offset-invariant"
+    assert run(300.0, None) < 0.5 * run(0.0, None), "without drift, an offset moves the coupling a lot"
+
+
+def test_coupling_emits_at_its_configured_output_rate():
+    """The metric defaulted to 10 readings/s while pac_view told the targets ~20, so calibration windows
+    needed twice the signal. pac_view now passes output_hz=METRIC_HZ; this pins that the metric honours it."""
+    m = CouplingMetric({0: SPEC}, Coupling(SLOW, FAST), window_seconds=20.0, output_hz=20.0)
+    x = coupled(10, 0.9)
+    readings = []
+    for i in range(0, len(x), 250):
+        readings += m.feed(Block(0, i, np.asarray(x[i:i + 250]), SPEC))
+    assert len(readings) / 10.0 == pytest.approx(20.0, rel=0.1), "emits at the configured rate, not half it"
+
+
+def test_a_window_of_rejected_data_does_not_count_as_complete():
+    """settled advanced on wall time whether or not a block was accepted, so a rejected opening flipped the
+    window complete with an empty histogram. It now counts accepted signal only, as locking already did."""
+    m = CouplingMetric({0: SPEC}, Coupling(SLOW, FAST), window_seconds=5.0)
+    x = coupled(10, 0.9)
+    for i in range(0, len(x), 250):
+        m.feed(Block(0, i, np.asarray(x[i:i + 250]), SPEC), count=False)
+    assert not m.settled, "a run of rejected blocks is not a complete window"
+
+
 def test_the_index_falls_as_the_coupling_weakens():
     readings = [feed(coupled(120, depth)).modulation for depth in (0.9, 0.5, 0.2, 0.0)]
     assert readings == sorted(readings, reverse=True), readings
@@ -282,6 +319,14 @@ def feed_locking(a, b, window: float = 5.0, size: int = 250):
         metric.feed(Block(channel=1, start_index=i, samples=np.asarray(b[i:i + size]),
                           spec=LOCK_SPECS[1]))
     return metric
+
+
+def test_two_flat_channels_do_not_read_a_perfect_lock():
+    """An amplitude-free sample's phase is 0 on both channels, which used to vote a perfect lock, so two
+    zero channels read locked 1 — a reward paid on a dead signal. Such samples now cast no vote."""
+    zero = np.zeros(int(30 * RATE))
+    metric = feed_locking(zero, zero)
+    assert metric.locked < 0.1, f"two flat channels must not lock, got {metric.locked:.3f}"
 
 
 def test_the_plain_locking_value_is_biased_and_the_bias_is_the_window_not_the_signal():

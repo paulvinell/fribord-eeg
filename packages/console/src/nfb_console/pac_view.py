@@ -432,7 +432,8 @@ class CouplingSession(TrainingSession):
 
     def add_coupling(self, coupling: Coupling, role: str = "reward") -> Target | None:
         try:
-            metric = CouplingMetric(self.specs, coupling, window_seconds=self.window_seconds)
+            metric = CouplingMetric(self.specs, coupling, window_seconds=self.window_seconds,
+                                    output_hz=METRIC_HZ, drift_hz=self.drift_hz)
         except ValueError:
             return None
         key = self.coupling_key(coupling)
@@ -465,7 +466,8 @@ class CouplingSession(TrainingSession):
 
     def add_locking(self, locking: Locking) -> Target | None:
         try:
-            metric = LockingMetric(self.specs, locking, window_seconds=self.lock_window_seconds)
+            metric = LockingMetric(self.specs, locking, window_seconds=self.lock_window_seconds,
+                                   output_hz=METRIC_HZ, drift_hz=self.drift_hz)
         except ValueError:
             return None
         key = self.locking_key(locking)
@@ -579,7 +581,8 @@ class CouplingSession(TrainingSession):
             want = Coupling(slow or old.coupling.slow, fast or old.coupling.fast,
                             phase_channel=(old.coupling.phase_channel if channel is None
                                            else channel))
-            metric = CouplingMetric(self.specs, want, window_seconds=self.window_seconds)
+            metric = CouplingMetric(self.specs, want, window_seconds=self.window_seconds,
+                                    output_hz=METRIC_HZ, drift_hz=self.drift_hz)
         except ValueError:
             return None
         at = self.targets.index(tgt)
@@ -604,7 +607,8 @@ class CouplingSession(TrainingSession):
             return None
         try:
             want = Locking(band or old.locking.band, tuple(pair or old.locking.pair))
-            metric = LockingMetric(self.specs, want, window_seconds=self.lock_window_seconds)
+            metric = LockingMetric(self.specs, want, window_seconds=self.lock_window_seconds,
+                                   output_hz=METRIC_HZ, drift_hz=self.drift_hz)
         except ValueError:
             return None
         at = self.targets.index(tgt)
@@ -1005,7 +1009,8 @@ def view(page: ft.Page, session: CouplingSession, toolbar: chrome.Toolbar,
         session.window_seconds = seconds
         for key, metric in list(session.couplings.items()):
             session.couplings[key] = CouplingMetric(session.specs, metric.coupling,
-                                                    window_seconds=seconds)
+                                                    window_seconds=seconds,
+                                                    output_hz=METRIC_HZ, drift_hz=session.drift_hz)
         session.amplitudes = {k: v for k, v in session.amplitudes.items() if k[0] != "pac"}
         build_window_pills()
 
