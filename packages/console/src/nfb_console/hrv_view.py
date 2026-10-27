@@ -476,9 +476,10 @@ class HRVSession:
     def set_strategy(self, strategy_id: str, **params) -> None:
         if strategy_id not in normalise.STRATEGIES:
             return
-        self.strategy_id = strategy_id
+        strategy = normalise.build(strategy_id, **params)   # build first: a bad range raises before any
+        self.strategy_id = strategy_id                      # stored state can drift from the live strategy
         self.strategy_params = dict(params)
-        self._strategy = normalise.build(strategy_id, **params)
+        self._strategy = strategy
         self.warm_from_history()
         self.signal_target.reset_stats()
         self.signal_target._settled = True
