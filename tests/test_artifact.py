@@ -36,6 +36,17 @@ def run(gate, x):
     return [gate.feed(b) for b in blocks(x)]
 
 
+def test_a_non_finite_block_does_not_latch_the_level_to_nan():
+    """Samples are integers from the decoder, so NaN cannot arrive in normal use — this is defensive only.
+    But a non-finite reading must not latch the gate's running level to NaN, which would poison the level
+    readout for the rest of the session. The level stays finite whether the block is clean or rejected."""
+    gate = ArtifactGate(SPEC)
+    gate.feed(Block(SPEC.index, 0, (float("nan"),) * 8, SPEC, state=0))
+    assert np.isfinite(gate.level), "a non-finite block must not latch the level to NaN"
+    gate.feed(Block(SPEC.index, 8, (float("nan"),) * 8, SPEC, state=0))
+    assert np.isfinite(gate.level), "and it stays finite across further non-finite input"
+
+
 def test_a_clean_signal_is_not_rejected():
     # 40 µV peak alpha is a large but entirely ordinary EEG amplitude
     judged = run(ArtifactGate(SPEC), sine(10.0, 20.0, 40.0))

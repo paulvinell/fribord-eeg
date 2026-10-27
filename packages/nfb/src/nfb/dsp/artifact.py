@@ -224,11 +224,12 @@ class ArtifactGate:
 
         judged = np.abs(self._band_limited(values))
         if not self._primed:
-            # Start from what the channel is actually doing rather than from zero. Warming up from zero
-            # means the threshold sits on its floor for the first several seconds, which rejects
-            # ordinary EEG on anyone whose amplitude is above it.
-            self.level = float(judged.mean())
-            self._primed = True
+            # Start from what the channel is actually doing rather than from zero, or the threshold sits on
+            # its floor for seconds and rejects ordinary EEG. A non-finite mean does not prime.
+            mean = float(judged.mean())
+            if np.isfinite(mean):
+                self.level = mean
+                self._primed = True
 
         threshold = min(policy.ceiling_uv, max(policy.floor_uv, policy.tolerance * self.level))
         self.threshold = threshold
@@ -253,7 +254,7 @@ class ArtifactGate:
             kept_n, kept_mean = kept.size, float(kept.mean())
         else:
             kept_n, kept_mean = 0, 0.0
-        if kept_n:
+        if kept_n and np.isfinite(kept_mean):
             tau = max(1e-6, policy.tau_seconds)
             step = min(1.0, (kept_n / self.spec.rate_hz) / tau)
             self.level += step * (kept_mean - self.level)
