@@ -500,6 +500,21 @@ def test_a_full_calibration_samples_every_point_and_saves_a_model(tmp_path, monk
     assert cal.load_model("UNIT1") == b"A-REAL-MODEL", "kept under the home directory"
 
 
+def test_a_calibration_save_failure_still_finishes(tmp_path, monkeypatch):
+    """Compute applies the model live, so a failed write only means it is not kept for next time — the
+    calibration is done for this session. A save that raised used to leave the screen stuck on 'Saving'
+    for ever, because `done` was set only after the write."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cal, "save_model", boom)
+    c = _run_calibration(CalLink(retrieve=b"A-REAL-MODEL"))
+    assert c.done and not c.failed, "a save failure must not leave the calibration unfinished"
+    assert "not" in c.message.lower() and "saved" in c.message.lower()
+
+
 def test_a_calibration_with_no_tracked_eye_fails_after_its_attempts(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
 

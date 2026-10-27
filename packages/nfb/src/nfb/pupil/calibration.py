@@ -245,12 +245,16 @@ class Calibrator:
         self._leave()
         self.applied = True
         self.blob = self.session.ask(OP_RETRIEVE, session_payload(), optional=True, timeout_s=5.0)
+        saved = False
         if self.blob:
-            save_model(self.serial, self.blob)
-            self.message = "calibration done and saved — look around, the dot follows your eyes"
-        else:
-            self.message = ("calibration done — look around, the dot follows your eyes. It was not "
-                            "saved, so it must be run again next time")
+            try:
+                save_model(self.serial, self.blob)
+                saved = True
+            except OSError:
+                pass            # the model is already live for this session; a failed write only loses it
+        self.message = ("calibration done and saved — look around, the dot follows your eyes" if saved
+                        else "calibration done — look around, the dot follows your eyes. It was not "
+                             "saved, so it must be run again next time")
         self.done = True
 
     def refresh_gaze(self) -> None:
