@@ -357,9 +357,7 @@ class AmplitudeSession(TrainingSession):
         against a thirty-second window, and a `redefine` afterwards is available for anyone who wants the
         threshold re-derived from data the new filter actually produced.
         """
-        conventions = {"rms": 1 / np.sqrt(2.0), "meanabs": 2.0 / np.pi}  # of peak, for a sine
-        before = self.filter_for(tgt)
-        was = conventions.get("" if before[0] == "cfir" else before[-1], 1.0)
+        was = self.filter_convention_factor(self.filter_for(tgt))
         if kind is not None:
             tgt.filter_kind = kind
         if order is not None:
@@ -368,12 +366,16 @@ class AmplitudeSession(TrainingSession):
             tgt.cfir_delay = round(max(0.02, min(1.0, cfir_delay)), 3)
         if ripple is not None:
             tgt.filter_ripple = round(max(0.05, min(6.0, ripple)), 2)
-        after = self.filter_for(tgt)
-        now = conventions.get("" if after[0] == "cfir" else after[-1], 1.0)
+        now = self.filter_convention_factor(self.filter_for(tgt))
         if was != now:
             tgt.threshold *= now / was
             tgt.rescale_history(now / was)
         self._ensure_metrics(tgt)
+        self._drop_unused_metrics()
+
+    def retune_estimators(self) -> None:
+        for tgt in self.targets:
+            self._ensure_metrics(tgt)
         self._drop_unused_metrics()
 
     def _drop_unused_metrics(self) -> None:

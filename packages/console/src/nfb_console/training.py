@@ -119,6 +119,9 @@ DEFAULT_FILTER = {"reward": "elliptic", "inhibit": "cfir", "monitor": "elliptic"
 CFIR_DELAY = {"reward": 0.1, "inhibit": 0.3, "monitor": 0.1}
 DEFAULT_ORDER = 2                # the conventional realtime choice; two biquads
 DEFAULT_RIPPLE = ELLIPTIC_RIPPLE_DB
+
+# Peak amplitude times this gives RMS or mean-abs of a sine; cFIR reports peak, so it is neutral at 1.0.
+CONVENTION_RATIO = {"rms": 1.0 / np.sqrt(2.0), "meanabs": 2.0 / np.pi}
 """dB, elliptic only. Taken from `nfb.dsp` rather than restated, because it was restated and the two copies
 disagreed the moment one of them was corrected."""
 
@@ -1821,6 +1824,37 @@ class TrainingSession:
         convention = self.feedback.envelope_convention or "rms"
         return (kind, tgt.filter_order or DEFAULT_ORDER, round(smoothing, 3), round(ripple, 2),
                 convention)
+
+    def filter_convention_factor(self, design: tuple) -> float:
+        """The sine ratio a `filter_for` design measures in. cFIR (peak) is neutral at 1.0."""
+        return CONVENTION_RATIO.get("" if design[0] == "cfir" else design[-1], 1.0)
+
+    def set_convention(self, convention: str) -> None:
+        """Change the amplitude convention for every target, carrying each settled threshold across.
+
+        The ratio per target must be read before the convention moves. `retune_filter` cannot stand in
+        here: it reads the convention back through `filter_for`, which would already show the new one, so
+        the switch would silently leave every threshold ~29% wrong against the new estimator.
+        """
+        before = {id(tgt): self.filter_convention_factor(self.filter_for(tgt)) for tgt in self.targets}
+        self.feedback.envelope_convention = convention
+        for tgt in self.targets:
+            was = before[id(tgt)]
+            now = self.filter_convention_factor(self.filter_for(tgt))
+            if was != now:
+                tgt.threshold *= now / was
+                self._carry_stats_across_convention(tgt, now / was)
+        self.retune_estimators()
+
+    def _carry_stats_across_convention(self, tgt: Target, factor: float) -> None:
+        """What a screen does with its collected readings when the convention changes under them. The
+        amplitude screen rescales them into the new unit; the alpha-theta screen restarts them."""
+        tgt.rescale_history(factor)
+
+    def retune_estimators(self) -> None:
+        """Rebuild the estimators the targets now ask for and drop the ones nothing uses. Each screen keys
+        its metrics differently, so each overrides this."""
+        raise NotImplementedError
 
     @property
     def drift_hz(self) -> float | None:

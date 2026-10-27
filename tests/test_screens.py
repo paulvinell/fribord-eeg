@@ -17,6 +17,7 @@ to any test here, and the rule that prevents it is that every UI mutation runs o
 
 from __future__ import annotations
 
+import math
 import re
 import time
 
@@ -2048,6 +2049,54 @@ def test_changing_a_filter_converts_the_history_rather_than_starting_a_new_calib
         assert tgt.threshold > threshold, "the threshold is in the new convention"
         assert tgt.recent_percent() == settled, "and the readings came with it, so the score is unchanged"
         assert tgt.session_average == pytest.approx(10.0 * tgt.threshold / threshold, rel=1e-6)
+    finally:
+        session.stop()
+
+
+def test_the_convention_pill_carries_the_threshold_across():
+    """Changing the amplitude convention from the signal pane used to set the field first and rebuild the
+    estimators after, so `retune_filter`'s before/after snapshot read the same convention and the rescale
+    never ran. A settled reward then sat ~10% wrong against meanabs until someone pressed redefine."""
+    from nfb_console import amplitude_view as av
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
+    try:
+        tgt = session.targets[0]
+        assert session.filter_for(tgt)[0] != "cfir", "the default target runs an IIR estimator"
+        for _ in range(int(35 * 20)):
+            tgt.observe(10.0, 20.0)
+        tgt.redefine()
+        settled, threshold = tgt.recent_percent(), tgt.threshold
+
+        session.set_convention("meanabs")
+        ratio = (2.0 / math.pi) / (1.0 / math.sqrt(2.0))
+        assert session.feedback.envelope_convention == "meanabs"
+        assert tgt.threshold == pytest.approx(threshold * ratio, rel=1e-6), "the threshold moved to the unit"
+        assert tgt.recent_percent() == settled, "and the readings came with it, so the score is unchanged"
+        assert not tgt.calibrating, "the card does not go back to waiting"
+    finally:
+        session.stop()
+
+
+def test_the_alpha_theta_convention_pill_carries_the_threshold_and_restarts():
+    """Alpha-theta carries the threshold like the amplitude screen, but restarts its statistics rather than
+    rescaling them, because the difference window is too short to hold a converted history."""
+    from nfb_console import at_view
+
+    session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
+    try:
+        tgt = next(t for t in session.targets
+                   if t is not session.difference and session.filter_for(t)[0] != "cfir")
+        for _ in range(int(35 * 20)):
+            tgt.observe(10.0, 20.0)
+        tgt.redefine()
+        threshold = tgt.threshold
+        assert tgt.total > 0
+
+        session.set_convention("meanabs")
+        ratio = (2.0 / math.pi) / (1.0 / math.sqrt(2.0))
+        assert tgt.threshold == pytest.approx(threshold * ratio, rel=1e-6), "the threshold moved to the unit"
+        assert tgt.total == 0, "the collected readings restart"
     finally:
         session.stop()
 

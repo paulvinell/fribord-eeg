@@ -508,11 +508,14 @@ class SignalPane:
         self.rebuild()
 
     def _set_field(self, attr: str, value) -> None:
+        # The convention carries each settled threshold into the new unit, so it goes through
+        # `set_convention`, not a bare setattr. The envelope constant only rebuilds estimators.
+        if attr == "envelope_convention":
+            self.session.set_convention(value)
+            self.rebuild()
+            return
         setattr(self.fb, attr, value)
-        # The envelope constant and convention are part of an estimator's identity, so changing either
-        # has to build the new ones and drop the old — unlike everything else here, which only affects
-        # how scores are combined.
-        if attr in ("envelope_seconds", "envelope_convention"):
+        if attr == "envelope_seconds":
             for tgt in self.session.targets:
                 self.session.retune_filter(tgt)
         self.rebuild()

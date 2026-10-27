@@ -764,7 +764,8 @@ class ATSession(TrainingSession):
         return True
 
     def retune(self, tgt: Target, low: float | None = None, high: float | None = None) -> None:
-        tgt.set_band(low, high)
+        if tgt.band is not None:
+            tgt.set_band(low, high)     # the difference target has no band; set_band would raise on it
         self._ensure_metric(tgt)
         wanted = {self.key_for(x) for x in self.targets}
         for key in [k for k in self.metrics if k not in wanted]:
@@ -773,12 +774,9 @@ class ATSession(TrainingSession):
 
     def retune_filter(self, tgt: Target, kind: str | None = None, order: int | None = None,
                       cfir_delay: float | None = None, ripple: float | None = None) -> None:
-        # The convention rescale, exactly as `AmplitudeSession.retune_filter` argues it: switching
-        # between cFIR (peak) and the IIR kinds (rms / meanabs) changes what the numbers mean by a fixed
-        # sine ratio, so a settled fixed threshold is carried across and the statistics restart.
-        conventions = {"rms": 1 / np.sqrt(2.0), "meanabs": 2.0 / np.pi}
-        before = self.filter_for(tgt)
-        was = conventions.get("" if before[0] == "cfir" else before[-1], 1.0)
+        # Switching cFIR (peak) against the IIR kinds changes the unit by a fixed sine ratio, so the
+        # threshold is carried across; the statistics restart (see `set_convention`).
+        was = self.filter_convention_factor(self.filter_for(tgt))
         if kind is not None:
             tgt.filter_kind = kind
         if order is not None:
@@ -787,12 +785,18 @@ class ATSession(TrainingSession):
             tgt.cfir_delay = round(max(0.02, min(1.0, cfir_delay)), 3)
         if ripple is not None:
             tgt.filter_ripple = round(max(0.05, min(6.0, ripple)), 2)
-        after = self.filter_for(tgt)
-        now = conventions.get("" if after[0] == "cfir" else after[-1], 1.0)
+        now = self.filter_convention_factor(self.filter_for(tgt))
         if was != now:
             tgt.threshold *= now / was
             tgt.reset_stats()
         self.retune(tgt)
+
+    def _carry_stats_across_convention(self, tgt: Target, factor: float) -> None:
+        tgt.reset_stats()       # a short difference window holds too little to rescale; restart it
+
+    def retune_estimators(self) -> None:
+        for tgt in self.targets:
+            self.retune(tgt)
 
     def key_for(self, tgt: Target):
         if tgt is self.difference:
