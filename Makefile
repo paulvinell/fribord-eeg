@@ -46,8 +46,11 @@ RECORD_TO = $(if $(filter command line,$(origin SESSION)),$(SESSION),sessions/$(
 record:  ## record a session to sessions/<timestamp>.jsonl.gz (SESSION= to name it)
 	@mkdir -p $(dir $(RECORD_TO))
 	uv run nfb record $(RECORD_TO) --seconds $(SECONDS) --channels $(CHANNELS) --hz $(HZ) --reference $(REFERENCE) --mains $(MAINS) --high-pass $(HIGHPASS)
-	@ln -sf $(notdir $(RECORD_TO)) sessions/latest.jsonl.gz
-	@echo "recorded to $(RECORD_TO) — sessions/latest.jsonl.gz now points at it"
+	@case "$(RECORD_TO)" in \
+	  sessions/latest.jsonl.gz) echo "recorded to $(RECORD_TO) (it is the latest pointer; not repointed)" ;; \
+	  sessions/*) ln -sf $(notdir $(RECORD_TO)) sessions/latest.jsonl.gz; echo "recorded to $(RECORD_TO) — sessions/latest.jsonl.gz now points at it" ;; \
+	  *) echo "recorded to $(RECORD_TO) (outside sessions/, latest not repointed)" ;; \
+	esac
 
 sessions:  ## list the recordings, newest first
 	@ls -lht sessions/ 2>/dev/null || echo "no recordings yet"

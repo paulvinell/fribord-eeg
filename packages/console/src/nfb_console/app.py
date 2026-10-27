@@ -193,7 +193,7 @@ class Console:
         self.toolbar.set_record_supported(supported)
         if supported and self.protocol is not None and prefs.record_default(
                 self.protocol.code, getattr(session, "records_by_default", False)):
-            self._start_recording()
+            self._start_recording(session)
             # The sentry watches the recording it is defending: a disk that fills at 3 a.m. is an
             # alarm, not a toolbar footnote.
             watcher = getattr(session, "sentry", None)
@@ -206,14 +206,13 @@ class Console:
             prefs.set_record_where(vars(self.record_settings))
         record_dialog.show(self.page, self.record_settings, remember, self._record_picker)
 
-    def _start_recording(self) -> None:
-        # The companion is read from whatever session is current at the time of writing, not captured
-        # here: a recorder outlives none of them, but the snapshot must be the live one.
+    def _start_recording(self, session) -> None:
+        # Bind the companion to this session, captured now: reading live `self.session` at write time
+        # overwrote the old recording's companion with the next session's on a protocol switch.
         rec = Recorder(self.device, self.record_settings.resolve(),
                        note=self.protocol.code if self.protocol else "",
                        fmt=self.record_settings.fmt,
-                       companion=lambda: (self.session.companion()
-                                          if hasattr(self.session, "companion") else {}))
+                       companion=lambda s=session: (s.companion() if hasattr(s, "companion") else {}))
         try:
             rec.start()
         except (RuntimeError, OSError) as exc:
@@ -235,7 +234,7 @@ class Console:
             self._end_recording()
             return
         prefs.set_record_default(self.protocol.code, True)
-        self._start_recording()
+        self._start_recording(self.session)
         if self.session is not None:
             self.session.sentry.recorder = self.recorder
 

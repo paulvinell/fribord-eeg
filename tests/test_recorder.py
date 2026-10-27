@@ -156,6 +156,39 @@ def test_a_failed_start_releases_the_subscription(monkeypatch, tmp_path):
     device.close()
 
 
+def test_the_companion_is_bound_to_the_recorded_session_not_the_live_one(monkeypatch, tmp_path):
+    """The companion is written at finalize, after the recorder thread joins. On a protocol switch the new
+    session is installed before the old recorder is joined, so reading the live `self.session` wrote the
+    new session's empty snapshot onto the old recording — deterministic companion loss on every switch.
+    The companion is now bound to the session that was recorded, captured when the recorder is armed."""
+    import types
+
+    from nfb_console import app as app_mod
+
+    captured = {}
+
+    class FakeRec:
+        def __init__(self, device, path, note="", fmt="nfb", companion=None):
+            captured["companion"] = companion
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "Recorder", FakeRec)
+    recorded = types.SimpleNamespace(companion=lambda: {"session": {"who": "recorded"}})
+    console = types.SimpleNamespace(
+        device=object(),
+        record_settings=types.SimpleNamespace(resolve=lambda: tmp_path / "c.jsonl.gz", fmt="nfb"),
+        protocol=types.SimpleNamespace(code="AMP"),
+        session=recorded, recorder=None,
+        toolbar=types.SimpleNamespace(recording=None))
+
+    app_mod.Console._start_recording(console, recorded)
+    console.session = types.SimpleNamespace(companion=lambda: {"session": {"who": "next"}})   # a switch
+    assert captured["companion"]()["session"]["who"] == "recorded", \
+        "the companion follows the recorded session, not whatever is current at finalize"
+
+
 def test_a_name_is_kept_a_format_names_the_suffix_and_a_clash_is_never_overwritten(tmp_path):
     from nfb.recorder import timestamped_path, unique_path
 
