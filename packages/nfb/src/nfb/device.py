@@ -364,6 +364,13 @@ class Device:
             self.status.remedy = "plug the device in and switch it on"
         else:
             self.status.remedy = "check the device is on; replug the cable if it persists"
+        if self._restore_channels is not None:
+            # A contact check narrowed the channel count and `stop` hands it back, but a disconnect bypasses
+            # stop. Put it back now, so a reconnect does not come up measuring one channel of four.
+            self.status.settings = Settings(**{**vars(self.status.settings),
+                                               "channels": self._restore_channels})
+            self._restore_channels = None
+            self.excluded = []
 
     @staticmethod
     def _text(info: bytes, frame_offset: int, length: int = 24) -> str:
@@ -391,9 +398,18 @@ class Device:
             problems = optima.validate_config(merged.build())
             if problems:
                 raise ValueError("; ".join(problems))
-            self.status.settings = merged
             if self._dev is not None:
-                self._write_config()
+                # Write to the device before committing the settings on the host, so a rejected write keeps
+                # host and hardware agreeing on the old rate rather than disagreeing.
+                blob = merged.build()
+                self._dev.write_config(blob)
+                self.config = blob
+                self.status.settings = merged
+                self.status.epoch += 1
+                for sub in list(self._subs):
+                    sub._end_epoch()
+            else:
+                self.status.settings = merged
 
     def _write_config(self, for_contact_check: bool = False) -> None:
         self.config = self.status.settings.build()
@@ -485,13 +501,19 @@ class Device:
             self.status.epoch += 1
             for sub in list(self._subs):
                 sub._drain()
-            if mode is Mode.TESTING:
-                self._write_config(for_contact_check=True)
-            self._dev.set_notifications(optima.NOTIF_ENABLE)
-            if mode is Mode.TESTING:
-                self._dev.request(optima.CMD["START_TEST"])
-            else:
-                self._dev.start_measurement()
+            try:
+                if mode is Mode.TESTING:
+                    self._write_config(for_contact_check=True)
+                self._dev.set_notifications(optima.NOTIF_ENABLE)
+                if mode is Mode.TESTING:
+                    self._dev.request(optima.CMD["START_TEST"])
+                else:
+                    self._dev.start_measurement()
+            except Exception:
+                # The device never entered the mode, so the host must not claim it did: the mode guard
+                # above would then make the next start a no-op and leave the device stranded with no reader.
+                self.status.mode = Mode.IDLE
+                raise
             # A fresh Event per reader, not a cleared shared one: a reader that outlived its join must not
             # be un-cancelled and allowed to publish into this new epoch.
             self._stop = threading.Event()
@@ -557,6 +579,21 @@ class Device:
                 return             # stopped while the read was in flight: do not publish into a new epoch
             for sub in list(self._subs):
                 sub._offer(msg.code, msg.payload)
+            if msg.code == optima.NOT_EVENT and msg.payload:
+                # The device can end the stream itself, or report a fault. Act on it in the reader, not via
+                # stop(), which would join this very thread and deadlock.
+                event = msg.payload[0]
+                if event == optima.EVENT_STOPPED:
+                    self.status.mode = Mode.IDLE
+                    for sub in list(self._subs):
+                        sub._end_epoch()
+                    return
+                if event in (optima.EVENT_HARDWARE, optima.EVENT_LINK_ERROR):
+                    name = optima.EVENT_NAME.get(event, f"event 0x{event:02x}")
+                    self._fail(optima.ProtocolError(f"device reported {name}"))
+                    for sub in list(self._subs):
+                        sub._end_epoch()
+                    return
             if testing and msg.code == optima.NOT_DATA:
                 self._note_impedance(msg.payload, plan)
 

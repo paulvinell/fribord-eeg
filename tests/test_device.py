@@ -228,6 +228,81 @@ def test_a_read_failure_stops_cleanly_rather_than_spinning(monkeypatch):
     assert list(sub.blocks(timeout=0.2)) == [], "epoch must end so the consumer stops"
 
 
+def test_a_failed_start_does_not_leave_a_false_running_mode(monkeypatch):
+    """The mode was set before the start commands, so a command that raised (the device switched off between
+    connect and start) left the mode measuring with no reader, and the next start no-opped on the mode guard."""
+    d, fake = connected(monkeypatch)
+    off = [True]
+    real = fake.start_measurement
+
+    def flaky():
+        if off[0]:
+            raise optima.ProtocolError("device off")
+        real()
+
+    fake.start_measurement = flaky
+    with pytest.raises(optima.ProtocolError):
+        d.start_measurement()
+    assert d.status.mode is Mode.IDLE, "a start that never happened must not read as measuring"
+    off[0] = False
+    d.start_measurement()                   # the retry must not no-op on a stale mode
+    assert d.status.mode is Mode.MEASURING
+    d.stop()
+    d.close()
+
+
+def test_a_device_stop_event_ends_acquisition(monkeypatch):
+    """The device can end the stream itself. The reader forwarded the event but never acted on it, so the
+    mode stayed measuring and the subscribers' streams stayed open after samples had stopped."""
+    d, fake = connected(monkeypatch)
+    sub = d.subscribe("feed")
+    stopping = [False]
+
+    def read():
+        if stopping[0]:
+            return optima.Message(optima.NOT_EVENT, bytes([optima.EVENT_STOPPED]))
+        raise TimeoutError("idle")
+
+    fake.read_message = read
+    d.start_measurement()
+    assert d.status.mode is Mode.MEASURING
+    stopping[0] = True
+    waitfor(lambda: d.status.mode is Mode.IDLE, what="the stop event did not end the mode")
+    assert list(sub.blocks(timeout=0.5)) == [], "epoch must end so the consumer stops"
+    d.close()
+
+
+def test_a_rejected_reconfigure_leaves_host_and_hardware_in_step(monkeypatch):
+    """Committing the host settings before the device write meant a refused write left the host at the new
+    rate while the hardware kept the old one — a decoder rate that did not match the stream."""
+    d, fake = connected(monkeypatch)
+    before, before_cfg = d.status.settings, d.config
+
+    def refuse(blob):
+        raise optima.ProtocolError("write refused")
+
+    fake.write_config = refuse
+    with pytest.raises(optima.ProtocolError):
+        d.reconfigure(hz=250.0)
+    assert d.status.settings == before, "host settings must not move when the device refused the write"
+    assert d.config == before_cfg
+    d.close()
+
+
+def test_a_disconnect_during_a_contact_check_restores_the_channel_count(monkeypatch):
+    """A contact check narrows the channel count and `stop` hands it back, but a disconnect reaches `_fail`
+    and bypassed the restore — so a reconnect wrote the narrowed count and measured one channel of four."""
+    d, _ = connected(monkeypatch)
+    assert d.status.settings.channels == 4
+    d.reconfigure(channels=1)               # as narrow_to_wired does, with the count to restore held aside
+    d._restore_channels = 4
+    d.excluded = [1, 2, 3]
+    d._fail(optima.ProtocolError("cable pulled during the check"))
+    assert d.status.mode is Mode.DISCONNECTED
+    assert d.status.settings.channels == 4, "the operator's channel count comes back on a disconnect"
+    assert d._restore_channels is None and d.excluded == []
+
+
 def test_impedance_readings_are_available_without_subscribing(monkeypatch):
     d, _ = connected(monkeypatch)
     d.start_impedance()
