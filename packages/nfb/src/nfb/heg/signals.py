@@ -39,6 +39,11 @@ class HegState:
     samples_seen: int = 0
     gate_fraction: float = 0.0
     temp_c: float = 0.0
+    windowed_ready: bool = False
+    """Whether the stability and trend windows actually hold enough points to measure. False right after a
+    long motion hold or a reconnect gap trims them, where the variability and slope read a false 0.0 — which,
+    inverted, is the best-possible score. The windowed metrics gate their readiness on this, not on
+    `samples_seen`, which counts motion-held frames that never entered a window."""
 
 
 def _trim(buf: deque, cutoff_t: float) -> None:
@@ -109,10 +114,13 @@ class SignalProcessor:
                 den = float(((ts - ts.mean()) ** 2).sum())
                 slope = num / den if den > 1e-9 else 0.0
 
+        windowed_ready = (len(self._stab) >= 2 and len(self._oxy_stab) >= 2
+                          and len(self._trend) >= 2)
         state = HegState(t=t, hbo=sample.hbo, hbr=sample.hbr, raw_ir=sample.raw_ir,
                          quality=sample.quality, smoothed_hbo=smoothed_hbo,
                          smoothed_hbr=smoothed_hbr, hbo_std_short=hbo_std,
                          oxy_std_short=oxy_std, hbo_slope=slope, samples_seen=self._n,
-                         gate_fraction=gate_fraction, temp_c=sample.temp_c)
+                         gate_fraction=gate_fraction, temp_c=sample.temp_c,
+                         windowed_ready=windowed_ready)
         self._last = state
         return state

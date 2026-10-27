@@ -108,9 +108,21 @@ def test_a_metric_reports_nothing_rather_than_zero_before_it_can_speak():
     assert metric_value(HEG_METRICS["oxy_index"], None) is None
 
     settled = HegState(t=10.0, samples_seen=200, smoothed_hbo=120.0, smoothed_hbr=-30.0,
-                       hbo_std_short=2.0, oxy_std_short=3.0, hbo_slope=0.4)
+                       hbo_std_short=2.0, oxy_std_short=3.0, hbo_slope=0.4, windowed_ready=True)
     for metric_id in HEG_METRICS:
         assert metric_value(HEG_METRICS[metric_id], settled) is not None
+
+
+def test_a_windowed_metric_stays_silent_until_its_window_is_filled():
+    """After a long motion hold or a reconnect gap the stability and trend windows are trimmed to one point,
+    so the variability and slope read a false 0.0 — which, inverted, is the best-possible score. Those
+    metrics gate on the window being filled, not on the motion-held sample count."""
+    thin = HegState(t=10.0, samples_seen=200, smoothed_hbo=120.0, smoothed_hbr=-30.0,
+                    hbo_std_short=0.0, oxy_std_short=0.0, hbo_slope=0.0, windowed_ready=False)
+    for metric_id in ("hbo_variability", "oxy_variability", "hbo_trend"):
+        assert metric_value(HEG_METRICS[metric_id], thin) is None, f"{metric_id} spoke on a thin window"
+    # the level metrics do not read the windows, so they still speak
+    assert metric_value(HEG_METRICS["oxy_index"], thin) is not None
 
 
 def test_the_metrics_that_are_better_low_say_so():
@@ -336,7 +348,7 @@ def test_a_dead_or_silent_headband_stops_the_feedback_and_says_so():
 
         runner.source = Ends()
         runner._stop.clear()
-        runner._run()                        # the generator ends on its own
+        runner._run(runner._generation)      # the generator ends on its own
         assert runner.error, "an end nobody asked for is a fault, not a silence"
 
         applied, _ = _spy_outputs(session)

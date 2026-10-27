@@ -31,6 +31,13 @@ def _ready(n: int) -> Callable[[object], bool]:
     return lambda s: bool(getattr(s, "samples_seen", 0) >= n)
 
 
+def _ready_windowed(n: int) -> Callable[[object], bool]:
+    """For the metrics read off the stability and trend windows. `samples_seen` counts motion-held frames
+    that never entered those windows, so after a long hold or a reconnect gap it climbs past the floor while
+    the window holds one point and the std reads a false 0.0. Gate on the window actually being filled."""
+    return lambda s: bool(getattr(s, "samples_seen", 0) >= n and getattr(s, "windowed_ready", False))
+
+
 HEG_METRICS: dict[str, MetricSpec] = {
     "hbo": MetricSpec(
         id="hbo", label="HbO (smoothed)", unit="",
@@ -73,7 +80,7 @@ HEG_METRICS: dict[str, MetricSpec] = {
                 "The meditation, flow and deep-work metric. **Low is the good end**, so it defaults "
                 "to decrease; motion artifacts spike it, which is what the motion gate is for."),
         extract=lambda s: s.hbo_std_short, invert=True,
-        ready=_ready(150),
+        ready=_ready_windowed(150),
         strategies=("zscore", "rolling_minmax", "fixed_range"),
     ),
     "oxy_variability": MetricSpec(
@@ -84,7 +91,7 @@ HEG_METRICS: dict[str, MetricSpec] = {
                 "noise than plain HbO variability — two streams' worth — but the noise kept is more "
                 "diagnostic. **Low is the good end.**"),
         extract=lambda s: s.oxy_std_short, invert=True,
-        ready=_ready(150),
+        ready=_ready_windowed(150),
         strategies=("zscore", "rolling_minmax", "fixed_range"),
     ),
     "hbo_trend": MetricSpec(
@@ -94,7 +101,7 @@ HEG_METRICS: dict[str, MetricSpec] = {
                 "not level. Catches the moment of re-engaging after zoning out, and the start of a "
                 "slow drift down. Under z-score, the middle means flat. The noisiest metric here — "
                 "slopes amplify whatever jitter the smoothing left."),
-        extract=lambda s: s.hbo_slope, ready=_ready(150),
+        extract=lambda s: s.hbo_slope, ready=_ready_windowed(150),
         strategies=("zscore", "tanh", "rolling_minmax", "fixed_range"),
     ),
 }
