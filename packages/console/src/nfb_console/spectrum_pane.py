@@ -56,7 +56,7 @@ TILE_BANDS = (DELTA, THETA, ALPHA, SMR, Band(15, 20, "beta1"), Band(20, 30, "bet
               Band(38, 42, "gamma"))
 
 SPECTRUM_HELP = (
-    "This shows the frequency content of the last second, in 1 Hz bins. Both axes have a number.\n\n"
+    "This shows the frequency content of the last two seconds, in 1 Hz bins. Both axes have a number.\n\n"
     "Each bin is centred on its frequency and takes its colour from that frequency. A band shows the "
     "same colour here as on its card and in the tiles below.\n\n"
     "auto follows the signal. Use it before you know the range. It falls slowly on purpose, because an "
@@ -244,7 +244,7 @@ class SpectrumPane:
                 f"0–{fmt_amplitude(top, unit, True)} "
                 f"{'full scale' if session.spectrum_scale else 'auto scale'} · "
                 f"peak {values.max():.1f} {unit} at "
-                f"{ring.lo_hz + values.argmax() * ring.bin_hz:.0f} Hz · 1 s window"
+                f"{ring.lo_hz + values.argmax() * ring.bin_hz:.0f} Hz · 2 s window"
                 + ("" if ring.top_hz >= ring.hi_hz
                    else f" · capped at Nyquist for {ring.rate_hz:g} sps"))
         else:

@@ -29,6 +29,7 @@ class TraceBuffer:
 
     def __init__(self, columns: int, seconds: float, rate_hz: float):
         self.columns = columns
+        self.rate_hz = rate_hz
         self.per_column = max(1, int(round(seconds * rate_hz / columns)))
         self._cols: deque[tuple[float, float]] = deque([(0.0, 0.0)] * columns, maxlen=columns)
         self._marks: deque[bool] = deque([False] * columns, maxlen=columns)
@@ -43,8 +44,10 @@ class TraceBuffer:
         show *which* part of the window was thrown away. A column is marked if any block feeding it
         was rejected — a blink is shorter than a column, and the excursion is the thing to point at."""
         self.valid = valid
-        self._marked = self._marked or not accepted
         for v in values:
+            # Per sample, not once per block: clearing the flag on the first completed column left the rest
+            # of a multi-column rejected stretch unmarked.
+            self._marked = self._marked or not accepted
             if v < self._lo:
                 self._lo = v
             if v > self._hi:
@@ -55,6 +58,11 @@ class TraceBuffer:
                 self._marks.append(self._marked)
                 self._lo, self._hi, self._count, self._marked = (
                     float("inf"), float("-inf"), 0, False)
+
+    def window_seconds(self) -> float:
+        """The duration actually retained, which rounding the samples-per-column moves off the requested
+        value — a 2 s view at 250 Hz holds 2.56 s. This is the number a caption must state."""
+        return self.per_column * self.columns / self.rate_hz
 
     def marks(self) -> np.ndarray:
         """Per column: was anything feeding it rejected. Same length as the envelope."""

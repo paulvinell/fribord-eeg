@@ -89,6 +89,15 @@ class QualityLog:
     def seconds(self, channel: int) -> float:
         return len(self.series(channel)) * CELL_SECONDS
 
+    def tip(self, channel: int) -> int:
+        """The absolute slot index of the latest cell. Monotonic, so a redraw key built on it keeps
+        changing after the cell count saturates at the 14-hour cap, where `seconds` stops moving."""
+        acc = self._acc.get(channel)
+        if acc is not None:
+            return int(acc[0])
+        cells = self._cells.get(channel)
+        return len(cells) - 1 if cells else -1
+
     def totals(self, channel: int, span_seconds: float = 0.0) -> tuple[float, float, float]:
         """`(rejected, unusable, missing)` as fractions of the span — the whole log for 0."""
         cells = self.series(channel)
@@ -110,8 +119,10 @@ class QualityLog:
         cells = self.series(channel)
         if len(cells) < 2:
             return None
-        arr = np.nan_to_num(np.asarray(cells, dtype=float), nan=1.0)
+        arr = np.asarray(cells, dtype=float)
+        missing = np.isnan(arr[:, 0])
         bad = arr[:, 0] + arr[:, 1]
+        bad[missing] = 1.0          # a missing second is wholly bad once, not 1.0 in each of the two columns
         width = min(len(bad), int(60.0 / CELL_SECONDS))
         window = np.convolve(bad, np.ones(width), mode="valid") / width
         at = int(np.argmax(window))

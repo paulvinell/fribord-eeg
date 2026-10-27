@@ -148,8 +148,15 @@ class TraceRows:
         # channel survives, and only when it is worth acting on.
         tight = [(c, room) for c in sorted(session.specs)
                  if (room := session.headroom_uv(c)) is not None and room < HEADROOM_VISIBLE_UV]
+        # The window the buffer actually holds, shown only when rounding moved it materially (a 2 s view is
+        # 2.56 s at 250 Hz). Focus channel wins on a mixed-rate stack.
+        focus_buf = session.traces.get(getattr(session, "focus", None))
+        buf = focus_buf if focus_buf is not None else next(iter(session.traces.values()), None)
+        true_window = buf.window_seconds() if buf is not None else window_seconds
+        shown = (true_window if abs(true_window - window_seconds) > 0.05 * max(window_seconds, 1e-9)
+                 else window_seconds)
         self.caption.value = (
-            f"{window_seconds:g} s across · ±{session.gain_uv:g} µV full scale · "
+            f"{shown:g} s across · ±{session.gain_uv:g} µV full scale · "
             f"drawn {session.DISPLAY_FLOOR_HZ:g}–{session.DISPLAY_LIMIT_HZ:g} Hz"
             + "".join(f" · {clause}" for clause in extra if clause)
             + (" · " + ", ".join(forced) if forced else "")

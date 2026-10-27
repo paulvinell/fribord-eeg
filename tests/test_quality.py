@@ -72,6 +72,31 @@ def test_the_worst_minute_says_where_to_look():
     assert bad > 0.8
 
 
+def test_the_worst_minute_counts_a_missing_second_once():
+    """A hole scored 1.0 in each of the two bad columns, summing to 2.0, so a window of mostly-missing data
+    reported a bad fraction above 1.0 — '164% bad' on screen. A missing second is wholly bad, counted once."""
+    log = QualityLog()
+    feed(log, 0, 2)
+    feed(log, 0, 2, start=30)               # a long hole between the clean stretches
+    at, bad = log.worst_minute(0)
+    assert bad > 0.5, "the hole is the worst stretch"
+    assert bad <= 1.0, f"a bad fraction over 1.0 is impossible, got {bad}"
+
+
+def test_the_timeline_tip_advances_past_the_fourteen_hour_cap():
+    """The redraw key was the cell count, which saturates at the cap, so a session past fourteen hours froze
+    the picture while fresh rejections kept arriving. The tip is the absolute slot and keeps advancing."""
+    from nfb_console.quality import LIMIT_CELLS
+
+    log = QualityLog()
+    feed(log, 0, LIMIT_CELLS + 50)
+    capped = len(log.series(0))
+    before = log.tip(0)
+    feed(log, 0, 10, start=LIMIT_CELLS + 50)
+    assert len(log.series(0)) == capped, "the cell count is capped"
+    assert log.tip(0) > before, "but the tip still advances, so the redraw key changes"
+
+
 def test_the_picture_is_one_image_however_long_the_night():
     """The whole reason this is a PNG: a night is 28800 cells per channel, and cells as canvas shapes
     would be serialised to the client on every frame."""
@@ -103,6 +128,31 @@ def test_the_trace_marks_which_columns_were_thrown_away_and_costs_one_shape_per_
     assert len(shapes) == 2, "two contiguous runs, not three columns"
     assert mark_shapes(np.zeros(20, dtype=bool), 200.0, 90.0, "#a66306") == [], \
         "a clean trace draws nothing at all"
+
+
+def test_a_rejected_block_wider_than_one_column_marks_every_column():
+    """A rejected block marked only its first completed column, so a block spanning several columns left
+    the rest of the rejected stretch unmarked. Every column the block feeds is now marked."""
+    from nfb_console.traces import TraceBuffer
+
+    buf = TraceBuffer(columns=20, seconds=1.0, rate_hz=200.0)      # 10 samples per column
+    buf.push(np.zeros(5), accepted=True)                          # half-fill the first column, clean
+    buf.push(np.zeros(35), accepted=False)                        # one rejected block across four columns
+    buf.push(np.zeros(60), accepted=True)                        # clean afterwards
+    marks = buf.marks()
+    assert marks.sum() == 4, "all four columns the rejected block fed are marked, not just the first"
+    assert not marks[-1], "a column fed only by the clean block is not marked"
+
+
+def test_the_trace_caption_states_the_duration_actually_retained():
+    """Rounding samples-per-column moves the retained window off the requested value; the caption stated the
+    requested one. A 2 s view at 250 Hz holds 2.56 s, so the buffer reports its true window."""
+    from nfb_console.traces import TraceBuffer
+
+    buf = TraceBuffer(columns=250, seconds=2.0, rate_hz=250.0)
+    assert buf.per_column == 2 and buf.window_seconds() == pytest.approx(2.0, abs=0.01)
+    narrow = TraceBuffer(columns=320, seconds=2.0, rate_hz=250.0)
+    assert narrow.window_seconds() == pytest.approx(2.56, abs=0.01), "rounding up to 2 samples/column"
 
 
 def test_the_log_runs_on_signal_time_so_a_replay_repeats_exactly():

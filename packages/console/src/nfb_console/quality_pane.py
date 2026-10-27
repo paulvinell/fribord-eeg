@@ -68,8 +68,9 @@ class QualityPane:
         log = self.session.quality
         channels = [c for c in self.session.specs if c in log.channels()]
         width = int(self.width(90))
-        # Rebuilt when a cell lands, not per frame — what makes this affordable at 10 Hz.
-        key = (tuple(int(log.seconds(c)) for c in channels), width)
+        # Rebuilt when a cell lands, not per frame. Keyed on the monotonic tip, not the length, which stops
+        # growing once the 14-hour cap is reached.
+        key = (tuple(log.tip(c) for c in channels), width)
         if key == self._drawn:
             return
         self._drawn = key
