@@ -72,6 +72,22 @@ def test_ragged_rows_are_padded_rather_than_shifting_channels(tmp_path):
     assert got == {0: [1.0, 3.0], 1: [2.0, 0.0]}
 
 
+def test_a_missing_leading_cell_is_an_error_not_a_channel_shift(tmp_path):
+    """Stripping the whole line ate the empty first field, so ch1's value slid into ch0 and the row read as
+    one channel short. The leading tab is kept now, so the empty cell is seen and the row is rejected."""
+    path = write(tmp_path, "Sampling rate: 100\n1.0\t2.0\n\t5.0\n")
+    with pytest.raises(ValueError, match="non-numeric cell"):
+        SampleFileSource(path, loop=False, realtime=False)
+
+
+def test_a_corrupt_sample_cell_is_an_error_not_a_dropped_row(tmp_path):
+    """A data row with one bad cell was dropped as if it were prose, so later samples took earlier times with
+    no gap — time silently compressed. A multi-column row that does not parse is now a loud error."""
+    path = write(tmp_path, "Sampling rate: 100\n1.0\t2.0\n3.0\tbad\n")
+    with pytest.raises(ValueError, match="non-numeric cell"):
+        SampleFileSource(path, loop=False, realtime=False)
+
+
 def test_indices_stay_monotonic_across_a_loop_seam(tmp_path):
     """A loop is not a dropped sample, so no Gap — but the index must never rewind."""
     path = write(tmp_path, "Sampling rate: 100\n" + "".join(f"{i}.0\n" for i in range(20)))

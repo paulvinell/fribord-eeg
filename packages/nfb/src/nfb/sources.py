@@ -20,6 +20,14 @@ from .record import SessionHeader, SessionReader, SessionWriter
 from .stream import NO_SIGNAL, OK, Block, ChannelSpec, Gap
 
 
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
 class OptimaSource:
     """A live Optima session: configure, start, and stream blocks until closed.
 
@@ -165,27 +173,43 @@ class ReplaySource:
     def blocks(self) -> Iterator[Block | Gap]:
         t0 = time.monotonic()
         played = 0.0                     # seconds of material already played, across loops
+        rate = next((s.rate_hz for s in self.channels().values()), 0.0)
         while not self._stop:
             last = 0.0
+            prev = 0.0
+            gaps: list[float] = []
+            first_index: int | None = None
+            last_index = 0
             produced = False
             for code, payload, elapsed in self.reader.frames():
                 if self._stop:
                     return
                 produced = True
                 if elapsed is not None:
-                    last = elapsed
+                    if elapsed > prev:
+                        gaps.append(elapsed - prev)
+                    prev = last = elapsed
                     if self.realtime:
                         behind = played + elapsed - (time.monotonic() - t0)
                         if behind > 0:
                             time.sleep(behind)
-                yield from self.decoder.feed(code, payload)
+                for block in self.decoder.feed(code, payload):
+                    if isinstance(block, Block):
+                        if first_index is None:
+                            first_index = block.start_index
+                        last_index = block.end_index
+                    yield block
             if not self.loop or not produced:
                 return          # a header-only recording has no frames; looping it would spin forever
-            played += last
-            # A loop is a splice, not a hole: without the rebase the recording's phase counter
-            # restarting reads as a gap of ~63k groups, and every filter downstream resets and
-            # re-runs its settling time once per loop. `SampleFileSource` documents the same
-            # contract for itself below.
+            # Advance past the final frame's own interval, or a short capture plays a frame early each loop.
+            if gaps:
+                interval = sorted(gaps)[len(gaps) // 2]
+            elif rate and first_index is not None:
+                interval = (last_index - first_index) / rate
+            else:
+                interval = 0.0
+            played += last + interval
+            # A loop is a splice, not a hole: the rebase keeps the phase-counter restart from reading as a gap.
             self.decoder.rebase()
             self.reader = SessionReader(self.path)
 
@@ -245,17 +269,23 @@ class SampleFileSource:
         rows: list[list[float]] = []
         header_rate: float | None = None
         with self.path.open() as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
+            for raw in fh:
+                line = raw.rstrip("\r\n")           # keep leading tabs: a missing ch0 is an empty first field,
+                if not line.strip():                # and stripping it would shift ch1 into ch0's place
                     continue
                 fields = line.replace(",", ".").split("\t")
                 try:
                     rows.append([float(x) for x in fields])
+                    continue
                 except ValueError:
-                    if header_rate is None and "rate" in line.lower():
-                        header_rate = self._rate_from(line)
-                    continue        # any other prose is a header we do not need
+                    pass
+                # Not every cell parsed. A multi-column row is a corrupt sample, not a header — dropping it
+                # silently would give later samples earlier timestamps with no gap, so say so loudly.
+                if len(fields) > 1 and any(_is_number(x) for x in fields):
+                    raise ValueError(f"{self.path}: a sample row has a non-numeric cell: {line!r}")
+                if header_rate is None and "rate" in line.lower():
+                    header_rate = self._rate_from(line)
+                # any other prose is a header we do not need
         if not rows:
             raise ValueError(f"{self.path} holds no sample rows")
 
