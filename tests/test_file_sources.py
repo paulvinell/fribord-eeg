@@ -88,6 +88,17 @@ def test_a_corrupt_sample_cell_is_an_error_not_a_dropped_row(tmp_path):
         SampleFileSource(path, loop=False, realtime=False)
 
 
+def test_a_low_rate_text_file_keeps_its_block_within_a_metric_stride(tmp_path):
+    """A fixed 8-sample block at a low rate spans more than one 20 Hz decimation stride, so the feed's
+    one-reading-per-block step dropped readings and calibration depended on input packaging. The block is
+    capped to a device frame's span, so at a low rate it shrinks below the stride."""
+    rows = "".join(f"{i}.0\n" for i in range(40))
+    low = SampleFileSource(write(tmp_path, "Sampling rate: 100\n" + rows), realtime=False)
+    assert low.block_size <= round(100 / 20.0), "a 100 Hz block must stay within one metric stride"
+    high = SampleFileSource(write(tmp_path, "Sampling rate: 250\n" + rows), realtime=False)
+    assert high.block_size == 8, "at the amplifier's own rate the block is a full device frame"
+
+
 def test_indices_stay_monotonic_across_a_loop_seam(tmp_path):
     """A loop is not a dropped sample, so no Gap — but the index must never rewind."""
     path = write(tmp_path, "Sampling rate: 100\n" + "".join(f"{i}.0\n" for i in range(20)))

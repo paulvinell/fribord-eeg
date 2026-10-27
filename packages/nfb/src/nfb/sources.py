@@ -258,6 +258,12 @@ class SampleFileSource:
 
     NANOVOLT = 1e-3        # microvolts per stored count
 
+    DEVICE_BLOCK_SECONDS = 8 / 250.0
+    """A real amplifier block is 8 samples and the device runs at 250 Hz or more, so a live block never spans
+    more than this. A text file can name any rate, and a fixed 8-sample block at a low one spans far longer —
+    coarse enough that the feed's one-reading-per-block step would drop readings. The block is capped to a
+    device frame's span so a replay is as fine-grained in time as the amplifier it stands in for."""
+
     def __init__(self, path: str | Path, rate_hz: float | None = None, loop: bool = True,
                  realtime: bool = True, block_size: int = 8):
         self.path = Path(path)
@@ -292,6 +298,8 @@ class SampleFileSource:
         self.rate_hz = rate_hz or header_rate
         if self.rate_hz is None:
             raise ValueError(f"{self.path} has no sampling-rate line; pass rate_hz")
+        # Shrink the block at low rates so its span never exceeds a device frame's — see DEVICE_BLOCK_SECONDS.
+        self.block_size = max(1, min(self.block_size, round(self.rate_hz * self.DEVICE_BLOCK_SECONDS)))
 
         width = max(len(r) for r in rows)
         self.data = [[(r[c] if c < len(r) else 0.0) for r in rows] for c in range(width)]

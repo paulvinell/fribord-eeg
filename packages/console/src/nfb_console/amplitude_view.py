@@ -549,10 +549,12 @@ class AmplitudeSession(TrainingSession):
 
         **Contract: production blocks carry at most one reading per metric.** `feed_block` observes each
         target once per block, so a block spanning more than one decimation stride would collapse several
-        readings into one observation and make calibration depend on how the input was packaged. Every
-        production source — the device, the two replay sources — emits blocks no longer than a stride, so the
-        collapse never happens live. Tests may feed larger blocks for speed, where the signal is uniform and
-        the collapse is harmless; that is why this is a documented contract rather than a runtime assert.
+        readings into one observation and make calibration depend on how the input was packaged. The device
+        and the frame replay run at 250 Hz or more, where an 8-sample frame is well inside a stride; the text
+        replay caps its block to a device frame's span for the same reason (`SampleFileSource`). So no
+        production source crosses a stride. Tests may feed larger blocks for speed, where the signal is
+        uniform and the collapse is harmless — which is why this is a documented contract, not a runtime
+        assert that those blocks would trip.
         """
         ch = block.channel
         fresh: set = set()
