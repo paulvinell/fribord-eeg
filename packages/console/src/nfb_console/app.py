@@ -8,6 +8,7 @@ the same property that makes the DSP testable — and `--live` uses the device.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 import threading
 import time
@@ -50,6 +51,8 @@ class Console:
             path="" if args.live else (args.file or args.path), loop=True)
         # The device settings a live session was built against; `resume` compares them to the current ones.
         self._built_settings: Settings | None = None
+        # Bumped by every navigation, so a slow `_pick` can abandon a build another navigation superseded.
+        self._generation = 0
         if args.live and not self.device.connect():
             # On the terminal as well as on the chip. `--live` is asked for explicitly, so a connection
             # that failed is news, and the person who typed it is looking at a terminal.
@@ -80,7 +83,11 @@ class Console:
         # One recorder at a time, owned here like the device: recording is acquisition, not a property
         # of whichever protocol screen is showing. See `_maybe_record` for when one is armed.
         self.recorder: Recorder | None = None
-        self.record_settings = record_dialog.RecordSettings(**prefs.record_where())
+        # Only the fields the dataclass declares: an older or hand-edited file with a stray key would
+        # otherwise crash the whole console at startup on the keyword it does not accept.
+        known = {f.name for f in dataclasses.fields(record_dialog.RecordSettings)}
+        self.record_settings = record_dialog.RecordSettings(
+            **{k: v for k, v in prefs.record_where().items() if k in known})
         self._record_picker = ft.FilePicker()
         page.services.append(self._record_picker)
         self.toolbar.bind_record(lambda _e: self.toggle_record(),
@@ -135,6 +142,7 @@ class Console:
             self.show_launcher()
 
     def show_launcher(self) -> None:
+        self._generation += 1           # cancel any build in flight, so it does not show over the launcher
         self.toolbar.set_source(self.source_label())
         self.toolbar.set_channels_visible(True)
         self.protocol = None
@@ -241,6 +249,7 @@ class Console:
             self.session.sentry.recorder = self.recorder
 
     def show_device(self, return_to: Protocol | None = None, device_tab: int = 0) -> None:
+        self._generation += 1           # cancel any build in flight, so it does not show over the device screen
         # The feed has to stop — impedance testing and measuring are exclusive device modes, and a session
         # holds the device measuring even while paused. But **the session is kept alive**, because checking
         # contact mid-session is an ordinary thing to do: you pause, look at the electrodes, come back and
@@ -327,7 +336,12 @@ class Console:
         """
         session = self.session
         screen = self.screen_for(protocol)
-        if session is None or not session.suspended or screen is None or self.protocol is not protocol:
+        # A live session comes back suspended; a replay session keeps feeding (paused) and is retained, not
+        # rebuilt, or its targets reset. See `live` below.
+        live = session is not None and session.device is not None
+        retainable = (session is not None and screen is not None and self.protocol is protocol
+                      and not session._stop and (session.suspended or not live))
+        if not retainable:
             self.pick(protocol)             # nothing to come back to
             return
         if (not self.inputs.from_file and self._built_settings is not None
@@ -337,9 +351,10 @@ class Console:
             self.pick(protocol)
             return
         self.protocol = protocol
-        session.rearm()
-        threading.Thread(target=session.run, daemon=True,
-                         name=f"{protocol.code.lower()}-feed").start()
+        if live:
+            session.rearm()                 # device back to measuring, and a fresh feed thread
+            threading.Thread(target=session.run, daemon=True,
+                             name=f"{protocol.code.lower()}-feed").start()
         self._maybe_record(session)
         self.show(screen.view(self.page, session, self.toolbar, self.restart))
 
@@ -369,11 +384,13 @@ class Console:
         if not self._picking.acquire(blocking=False):
             return
         try:
+            self._generation += 1
             self._pick(protocol)
         finally:
             self._picking.release()
 
     def _pick(self, protocol: Protocol) -> None:
+        gen = self._generation          # if Home or the device screen bumps this mid-build, abandon it
         previous = self.session
         if previous is not None:
             previous.stop()
@@ -382,14 +399,16 @@ class Console:
         # after starting in replay mode must build a live session, not reopen the old recording.
         live = not self.inputs.from_file
         self._built_settings = self.device.status.settings if live else None
-        source = self.inputs.open(self.device) if self.inputs.from_file else None
-        # Say so in the toolbar for as long as it lasts. A replayed capture drew a screen identical to a
-        # live one, and if the capture was made with an empty amplifier then every channel in it truthfully
-        # reports no signal — so the screen blamed the electrodes, correctly, about a file from days ago.
+        # Name the source in the toolbar: a replayed capture draws a screen identical to a live one, and an
+        # empty-amplifier capture would otherwise look like the electrodes are off now.
         self.toolbar.set_source(self.source_label())
         # Back on by default; a screen with no amplifier channels hides it in its own `view`.
         self.toolbar.set_channels_visible(True)
         screen = self.screen_for(protocol)
+        # Open the replay file only for the screens that read it. HRV, HEG and Pupil take their own inputs
+        # and discard this one, so opening a missing file crashed them before they ever ran.
+        wants_eeg = getattr(screen, "EEG_SOURCE", True)
+        source = self.inputs.open(self.device) if self.inputs.from_file and wants_eeg else None
         if screen is not None:
             self.session = screen.session_for(
                 protocol,
@@ -411,10 +430,18 @@ class Console:
                 # A switch to another protocol: `adopt` carries only same-protocol state, so restore the
                 # new protocol's own saved settings. Without this gate the switch came up on raw defaults.
                 prefs.restore(protocol.code, self.session)
+            if self._generation != gen:
+                self.session.stop()     # superseded before it started; release the device and do not show
+                return
             threading.Thread(target=self.session.run, daemon=True,
                              name=f"{protocol.code.lower()}-feed").start()
             self._maybe_record(self.session)
+            if self._generation != gen:
+                self.session.stop()
+                return
             self.show(screen.view(self.page, self.session, self.toolbar, self.restart))
+            return
+        if self._generation != gen:
             return
         self.session = session_view.Session(
             protocol,
@@ -424,6 +451,9 @@ class Console:
             channels=self.channels,
         )
         self.session.start()
+        if self._generation != gen:
+            self.session.stop()
+            return
         self.show(session_view.view(self.page, self.session, self.show_launcher,
                                     lambda: self.show_device(protocol),
                                     self.args.benchmark))

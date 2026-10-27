@@ -35,6 +35,7 @@ from .trials import (ACTIVE, BASELINE, CUE, CUED, ITI, NEGATIVE, POSITIVE, RESUL
 from .widgets import button, help_button, labelled, num_box, panel, pill, test_button
 
 HANDLES = ("PUPIL",)
+EEG_SOURCE = False      # takes its own input; the replay EEG file is not opened for it
 
 SIDE_W = 360
 CIRCLE_SIDE = 280

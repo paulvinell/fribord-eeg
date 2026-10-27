@@ -56,9 +56,11 @@ which is the swallowed-refusal shape, in a file."""
 
 def _load() -> dict:
     try:
-        return json.loads(PATH.read_text())
+        data = json.loads(PATH.read_text())
     except Exception:
         return {}
+    # Valid JSON of the wrong shape (a list, a string) is as unusable as a parse error; treat it as absent.
+    return data if isinstance(data, dict) else {}
 
 
 def _save(data: dict) -> None:
@@ -162,13 +164,17 @@ def set_record_where(values: dict) -> None:
 
 
 def record_default(code: str, fallback: bool = False) -> bool:
-    value = _load().get(RECORD, {}).get(code)
+    table = _load().get(RECORD, {})
+    value = table.get(code) if isinstance(table, dict) else None
     return value if isinstance(value, bool) else fallback
 
 
 def set_record_default(code: str, on: bool) -> None:
     data = _load()
-    data.setdefault(RECORD, {})[code] = bool(on)
+    table = data.get(RECORD)
+    if not isinstance(table, dict):
+        table = data[RECORD] = {}
+    table[code] = bool(on)
     _save(data)
 
 

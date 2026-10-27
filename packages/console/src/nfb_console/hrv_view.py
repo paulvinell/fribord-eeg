@@ -82,6 +82,7 @@ from .targets import Target
 from .widgets import help_button, labelled, num_box, panel, pill
 
 HANDLES = ("HRV",)
+EEG_SOURCE = False      # takes its own input; the replay EEG file is not opened for it
 
 SIDE_W = 330
 RING_SIDE = 112         # the breathing cue, at the top of an inhale

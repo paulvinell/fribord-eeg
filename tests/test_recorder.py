@@ -219,6 +219,33 @@ def test_the_record_default_is_per_protocol_and_the_protocol_speaks_until_the_op
     assert prefs.record_default("A-T") is False, "one protocol's choice stays its own"
 
 
+def test_a_malformed_preferences_file_does_not_take_startup_down():
+    """Pref loading handled bad JSON syntax but not valid JSON of the wrong shape: a list where a dict was
+    expected crashed every reader. It is now tolerated as if the file were absent."""
+    from nfb_console import prefs
+
+    prefs.PATH.write_text("[1, 2, 3]")              # valid JSON, wrong shape
+    assert prefs._load() == {}
+    assert prefs.record_where() == {}
+    assert prefs.record_default("AMP", fallback=True) is True
+    prefs.set_record_default("AMP", False)          # must not raise on the list-shaped file
+    assert prefs.record_default("AMP") is False
+
+
+def test_an_unexpected_recording_key_does_not_crash_record_settings():
+    """An older or hand-edited file with a stray recording-settings key used to TypeError the dataclass at
+    startup. The console keeps only the fields the dataclass declares."""
+    import dataclasses
+
+    from nfb_console import prefs, record_dialog
+
+    prefs.set_record_where({"directory": "nights", "fmt": "edf", "legacy": "drop me"})
+    known = {f.name for f in dataclasses.fields(record_dialog.RecordSettings)}
+    settings = record_dialog.RecordSettings(
+        **{k: v for k, v in prefs.record_where().items() if k in known})
+    assert settings.directory == "nights" and settings.fmt == "edf"
+
+
 def test_the_record_options_resolve_to_the_file_you_will_actually_get(tmp_path):
     """The dialog's whole job: three fields whose only real question is "what file am I about to
     get", answered with the resolved path — clash suffix included, since a reused name must keep

@@ -1479,6 +1479,37 @@ def test_a_contact_check_with_no_reconfigure_returns_to_the_same_session(monkeyp
         console.device.close()
 
 
+def test_returning_from_the_device_screen_keeps_a_replay_session():
+    """A replay session has no device to stop, so it keeps feeding (paused) through the device-screen visit
+    and `resume` rebuilt it — resetting every target. It is retained now, like a live suspended one."""
+    console = _console(protocol="AMP")          # file-backed, from the bench recording
+    try:
+        first = console.session
+        console.show_device(return_to=BY_CODE["AMP"])
+        console.resume(BY_CODE["AMP"])
+        assert console.session is first, "a replay session is retained across the device screen, not rebuilt"
+    finally:
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
+def test_a_missing_recording_does_not_block_the_hrv_screen():
+    """Protocol selection opened the replay file before choosing the screen, so an absent recording crashed
+    HRV, HEG and Pupil — which read their own inputs and never touch it."""
+    from nfb_console.app import Console, build_parser
+
+    args = build_parser().parse_args(["/does/not/exist.jsonl.gz"])
+    console = Console(StubPage(), args)
+    try:
+        console.pick(BY_CODE["HRV"])
+        assert console.session is not None, "HRV takes its own input; the missing EEG file must not block it"
+    finally:
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
 def test_the_device_chip_from_the_launcher_still_goes_back_to_the_launcher():
     """The same control, and it has to remember two different origins."""
     import argparse
