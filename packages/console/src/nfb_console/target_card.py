@@ -334,9 +334,13 @@ class TargetCard:
             f"You set the aim behind the gear icon. The aim places the threshold: the line sits where "
             f"that share of your readings falls on the wanted side. Changing the aim moves the "
             f"threshold.\n\n"
-            f"Keep the aim away from both ends. An aim near 100% puts the threshold below everything the "
-            f"signal does. An aim near 0% puts it above everything. At either end, the target stops "
-            f"showing anything, and the sound and brightness that follow it stop moving.\n\n"
+            f"Keep the aim away from both ends. "
+            + (f"An aim near 100% puts the threshold below everything the signal does. An aim near 0% puts "
+               f"it above everything. " if tgt.wants_above else
+               f"An aim near 100% puts the threshold above everything the signal does. An aim near 0% puts "
+               f"it below everything. ")
+            + f"At either end, the target stops showing anything, and the sound and brightness that follow "
+            f"it stop moving.\n\n"
             f"fixed — one number for the whole session, calculated from the first "
             f"{tgt.calibration_seconds:g} s of your signal. {redefine} calculates it again from the last "
             f"{tgt.calibration_seconds:g} s, whenever you press it.\n"

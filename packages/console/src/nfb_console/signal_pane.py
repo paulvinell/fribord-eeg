@@ -371,7 +371,9 @@ class SignalPane:
         # being output reads as "doing terribly" when it means "nothing is connected".
         live = arriving and bool(active)
         level = session.level if live else 0.0
-        met = fb.on_target(active)
+        # The readout must show the condition the output follows: channel_targets(CONDITION), which on
+        # Alpha-Theta is the difference objective and inhibits, not every active target.
+        met = fb.on_target(session.channel_targets(CONDITION))
         anything_on = any(m.enabled for m in fb.mechanisms.values())
         for strip in self._strips:
             strip["fill"].width = SIGNAL_BAR_W * level if live else 0
