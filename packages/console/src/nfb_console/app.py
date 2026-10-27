@@ -336,23 +336,19 @@ class Console:
         """
         session = self.session
         screen = self.screen_for(protocol)
-        # A live session comes back suspended; a replay session keeps feeding (paused) and is retained, not
-        # rebuilt, or its targets reset. See `live` below.
-        live = session is not None and session.device is not None
-        retainable = (session is not None and screen is not None and self.protocol is protocol
-                      and not session._stop and (session.suspended or not live))
-        if not retainable:
+        if session is None or screen is None or self.protocol is not protocol or session._stop:
             self.pick(protocol)             # nothing to come back to
             return
-        if (not self.inputs.from_file and self._built_settings is not None
-                and self.device.status.settings != self._built_settings):
-            # Reconfigured on the device screen: the estimators are built for the old rate, so rebuild.
-            # Only on a real mismatch, so an ordinary contact check still returns to the same session.
+        if self._built_settings is not None and self.device.status.settings != self._built_settings:
+            # The amplifier was reconfigured, so a live session's estimators are stale. Rebuild — but only on
+            # a real mismatch, so a plain contact check still returns to the session.
             self.pick(protocol)
             return
         self.protocol = protocol
-        if live:
-            session.rearm()                 # device back to measuring, and a fresh feed thread
+        # Did the feed stop during the visit? If so, re-arm; if it kept feeding (a replay or its own
+        # source) only re-show, since rebuilding resets its history. Uniform across every screen.
+        if session.suspended:
+            session.rearm()
             threading.Thread(target=session.run, daemon=True,
                              name=f"{protocol.code.lower()}-feed").start()
         self._maybe_record(session)

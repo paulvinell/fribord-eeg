@@ -1494,6 +1494,23 @@ def test_returning_from_the_device_screen_keeps_a_replay_session():
         console.device.close()
 
 
+def test_resuming_hrv_heg_or_pupil_does_not_crash():
+    """`resume` reached for `session.device` — the EEG amplifier, which only the EEG screens hold. HRV, HEG
+    and Pupil run their own hardware and are not TrainingSessions, so that attribute does not exist and the
+    back-crumb handler crashed. `resume` now keys on `suspended`, which every screen answers. The camera
+    round trip on the Pupil screen is this exact path."""
+    for code in ("PUPIL", "HRV", "HEG"):
+        console = _console(protocol=code)
+        try:
+            console.show_device(return_to=BY_CODE[code])
+            console.resume(BY_CODE[code])       # the back-crumb path; must not raise
+            assert console.session is not None and console.protocol.code == code
+        finally:
+            if console.session is not None:
+                console.session.stop()
+            console.device.close()
+
+
 def test_a_missing_recording_does_not_block_the_hrv_screen():
     """Protocol selection opened the replay file before choosing the screen, so an absent recording crashed
     HRV, HEG and Pupil — which read their own inputs and never touch it."""
