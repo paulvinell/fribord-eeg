@@ -81,6 +81,8 @@ class MendiRunner:
         self.seen_at: float | None = None    # monotonic arrival of the last frame, written by _run only
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # See `PupilRunner`: a stale reader stuck past its join must not write onto a healthy replacement.
+        self._generation = 0
 
     @property
     def stale(self) -> bool:
@@ -134,26 +136,29 @@ class MendiRunner:
         self.seen_at = None
         self.error = None
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="mendi")
+        self._generation += 1
+        gen = self._generation
+        self._thread = threading.Thread(target=self._run, args=(gen,), daemon=True, name="mendi")
         self._thread.start()
         return True
 
-    def _run(self) -> None:
+    def _run(self, gen: int) -> None:
         try:
             for frame in self.source.frames():
-                if self._stop.is_set():
+                if self._stop.is_set() or gen != self._generation:
                     return
                 self.state = self.signal.push(self.processor.process(frame),
                                               self.processor.gate_fraction)
                 self.seen_at = time.monotonic()
         except Exception as exc:
-            self.error = f"{type(exc).__name__}: {exc}"
+            if gen == self._generation:
+                self.error = f"{type(exc).__name__}: {exc}"
             return
         # The generator ending is how `LiveMendi` reports its BLE worker dying — the connection dropped,
         # the headband switched off, bleak raised inside the asyncio thread. An end nobody asked for is a
         # fault and has to say so, or `state` freezes on the last frame and the feedback runs on it
         # indefinitely. The source's own `error` is preferred because it knows what actually happened.
-        if not self._stop.is_set() and self.error is None:
+        if gen == self._generation and not self._stop.is_set() and self.error is None:
             source = self.source
             self.error = (getattr(source, "error", None) if source is not None else None) \
                 or "the headband stopped delivering frames"

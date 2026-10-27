@@ -468,3 +468,25 @@ def test_the_feedback_circle_draws_direction_arrows():
     pts = [e for sh in shrink if isinstance(sh, cv.Path)
            for e in sh.elements if hasattr(e, "x")]
     assert pts and all(0 <= e.x <= 280 and 0 <= e.y <= 280 for e in pts)
+
+
+def test_a_stale_pupil_reader_does_not_silence_its_replacement():
+    """An old handshake can outlive its 2 s join and fail after a healthy reader has taken over. Its error
+    must not land on the shared runner and silence feedback. Each reader carries the generation it began in."""
+    from nfb_console.pupil import PupilRunner
+
+    runner = PupilRunner()
+    stale_gen = 1
+    runner._generation = 2          # a newer reader has since started
+
+    class Boom:
+        def samples(self):
+            raise RuntimeError("handshake timed out")
+
+        def close(self):
+            pass
+
+    runner.source = Boom()
+    runner._stop.clear()
+    runner._run(stale_gen)          # the stale reader finally fails, after the generation moved on
+    assert runner.error is None, "a stale reader's failure does not overwrite the live runner's state"

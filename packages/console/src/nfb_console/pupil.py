@@ -28,6 +28,9 @@ class PupilRunner:
         self.seen_at: float | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Each reader carries its generation, so a stale one that outlived its join cannot write onto a
+        # healthy replacement (a handshake can block past the stop event).
+        self._generation = 0
 
     @property
     def running(self) -> bool:
@@ -70,22 +73,25 @@ class PupilRunner:
         self.seen_at = None
         self.error = None
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="pupil")
+        self._generation += 1
+        gen = self._generation
+        self._thread = threading.Thread(target=self._run, args=(gen,), daemon=True, name="pupil")
         self._thread.start()
         return True
 
-    def _run(self) -> None:
+    def _run(self, gen: int) -> None:
         try:
             for sample in self.source.samples():
-                if self._stop.is_set():
+                if self._stop.is_set() or gen != self._generation:
                     return
                 self.sample = sample
                 self.state = self.processor.push(sample)
                 self.seen_at = time.monotonic()
         except Exception as exc:
-            self.error = f"{type(exc).__name__}: {exc}"
+            if gen == self._generation:
+                self.error = f"{type(exc).__name__}: {exc}"
             return
-        if not self._stop.is_set() and self.error is None:
+        if gen == self._generation and not self._stop.is_set() and self.error is None:
             self.error = getattr(self.source, "error", None) or "the source stopped sending readings"
 
     def release(self) -> None:
