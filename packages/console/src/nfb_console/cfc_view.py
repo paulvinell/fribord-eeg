@@ -661,7 +661,12 @@ class CFCSession(TrainingSession):
         total all the 'per cent above' values in figure 3 you get about 30%. This means that about 30% of
         the time the feedback will either pause or set off an auditory alert."
         """
-        return sum(100.0 - (t_.recent_percent() or 100.0) for t_ in self.bin_targets)
+        # None (no window yet) counts as fully met; 0.0 (met 0% of the time) must not — it is the worst bin.
+        total = 0.0
+        for t_ in self.bin_targets:
+            met = t_.recent_percent()
+            total += 100.0 - (100.0 if met is None else met)
+        return total
 
     @property
     def total_ready(self) -> bool:

@@ -815,13 +815,20 @@ class Target:
         shortens it, so the calibration would have counted down to a number it could never reach. Grown
         once, on the first reading, since the rate is not known before then.
         """
-        need = int((self.settle_seconds + self.calibration_seconds) * self._rate_hz) + 1
+        # Also size for the automatic tracking window, not just calibration: a longer window was silently
+        # truncated while window_remaining still counted the full span down to complete.
+        span = max(self.settle_seconds + self.calibration_seconds, self.window)
+        need = int(span * self._rate_hz) + 1
         if need > (self._recent.maxlen or 0):
             self._recent = deque(self._recent, maxlen=need)
             self._hits = deque(self._hits, maxlen=need)
 
     def observe(self, value: float, rate_hz: float) -> None:
-        if rate_hz != self._rate_hz or self.calibration_seconds > CALIBRATION_SECONDS:
+        # Also re-fit when the buffer is too small for the window at this rate — a fresh target at the
+        # default rate never changed it, so a long automatic window stayed truncated.
+        want = int(max(self.settle_seconds + self.calibration_seconds, self.window) * rate_hz) + 1
+        if (rate_hz != self._rate_hz or self.calibration_seconds > CALIBRATION_SECONDS
+                or want > (self._recent.maxlen or 0)):
             self._rate_hz = rate_hz
             self._fit_window()
         self.value = value

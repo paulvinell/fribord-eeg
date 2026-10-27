@@ -712,3 +712,34 @@ def test_a_down_trained_reward_still_cannot_earn_on_a_dead_channel():
     inhibit = Target(0, ALPHA, "increase", role="inhibit", threshold=10.0, signal_floor=1.0)
     inhibit.value = 0.2
     assert inhibit.wanted, "an inhibit is still exempt — below the floor is the most inhibited state"
+
+
+def test_a_long_automatic_window_retains_its_whole_span():
+    """The recent-values buffer was sized from calibration only, so an automatic window longer than it (and
+    longer than the default ~200 s deque) was silently truncated while window_remaining still counted the
+    full span down to complete. The buffer now grows to the window."""
+    tgt = Target(0, ALPHA, "increase", mode="automatic", window_seconds=600.0)
+    feed(tgt, 600.0)
+    held = len(tgt._window(tgt.window))
+    assert held >= 600 * RATE * 0.95, f"only {held} samples of a 600 s window were retained"
+    assert tgt.window_remaining == pytest.approx(0.0, abs=1.0), "and it reports itself complete"
+
+
+def test_cfc_total_above_does_not_hide_an_always_hot_bin():
+    """total_above treated a bin met 0% of the time (sustained above threshold — the worst) the same as a
+    bin with no window yet, because `0.0 or 100.0` is 100.0. None still counts as fully met; 0.0 does not."""
+    import types
+
+    from nfb_console.cfc_view import CFCSession
+
+    class _Bin:
+        def __init__(self, pct):
+            self._pct = pct
+
+        def recent_percent(self):
+            return self._pct
+
+    stub = types.SimpleNamespace(bin_targets=[_Bin(0.0), _Bin(None), _Bin(100.0)])
+    total = CFCSession.total_above.fget(stub)
+    # met 0% → 100 above (the hot bin, now counted); no window → 0; met 100% → 0
+    assert total == pytest.approx(100.0)
