@@ -151,6 +151,21 @@ def test_nothing_claims_to_be_settled_before_the_de_trender_is():
     assert metric.warmup == 1.0
 
 
+def test_the_reported_delay_includes_the_de_trend_stages():
+    """delay_seconds reported only the lowpass group delay and omitted the two de-trend high-pass stages, so
+    at 0.05 Hz it claimed about 2.65 s against the chain's real 3.43 s. Each stage adds its own group delay,
+    tau/(1+(w*tau)^2) at the centre, not its bare follower tau (which is the settling time, tens of seconds)."""
+    on = SignedWave(SPEC, 0.05)                         # de-trend on by default
+    off = SignedWave(SPEC, 0.05, detrend=False)
+    assert off.delay_seconds == off.filter.latency_seconds, "no de-trend, no extra delay"
+    assert on.delay_seconds > off.delay_seconds + 0.5, "the de-trend stages add a material delay"
+
+    omega = 2 * np.pi * 0.05
+    extra = sum(f.tau / (1 + (omega * f.tau) ** 2) for f in on.trend_filters)
+    assert on.delay_seconds == pytest.approx(off.delay_seconds + extra, rel=1e-6)
+    assert all(f.tau > 10.0 for f in on.trend_filters), "the follower tau itself is tens of seconds"
+
+
 def test_a_gap_resets_the_filters_rather_than_smearing_it_forward():
     """A hole in the stream is not a step in the signal, and the drift follower is where that matters most:
     carrying its state across missing samples would subtract a drift measured before an unknown interval.

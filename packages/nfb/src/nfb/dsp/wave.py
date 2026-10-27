@@ -177,7 +177,10 @@ class SignedWave:
 
     @property
     def delay_seconds(self) -> float:
-        return self.filter.latency_seconds
+        # A one-pole de-trend stage adds group delay tau/(1+(w*tau)^2) at w, not its bare follower tau.
+        omega = 2.0 * np.pi * self.centre_hz
+        detrend = sum(f.tau / (1.0 + (omega * f.tau) ** 2) for f in self.trend_filters)
+        return self.filter.latency_seconds + detrend
 
     @property
     def smoothing_seconds(self) -> float:
