@@ -127,6 +127,22 @@ def test_collection_is_rate_limited_and_needs_a_second_of_signal():
     assert starved.window("ch0", 0.0) == [], "no spectral window yet means no sample, not a zero"
 
 
+def test_collection_resumes_after_a_device_epoch_restarts_signal_time():
+    """A contact check or reconfigure restarts sample indices, so signal time jumps back toward zero while
+    the collector (held across the device trip) keeps its old time cursor. The one-sided rate-limit used to
+    reject every point until time climbed back past the pre-restart value, stalling trend history for most
+    of the resumed session. The backward jump now collects instead of being dropped."""
+    trends = BandTrends()
+    source = SpectrumSource("ch0", ring_with(10.0))
+    now = ticked(trends, source, 5, start=300.0)         # five samples deep into the session
+    collected = len(trends.window("ch0", 0.0))
+    assert collected == 5
+
+    trends.tick([source], 0.0)                            # the epoch restarts: signal time resets to 0
+    assert len(trends.window("ch0", 0.0)) == collected + 1, \
+        "the first point after the restart is collected, not dropped until time catches up"
+
+
 def test_the_pane_collects_whether_or_not_its_tab_was_ever_opened():
     """The session average must not depend on when the operator first clicked Trends, so the sampling is
     driven from the screen's draw loop, not from the pane being visible."""

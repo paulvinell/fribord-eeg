@@ -89,7 +89,9 @@ class BandTrends:
         """Sample every ring that has a second of data. `now` is signal time, so a replay reproduces a
         live session exactly. Rate-limited here rather than by the caller, because the caller is a draw
         loop and how often screens draw is not a property of the history."""
-        if self._last is not None and now - self._last < self.update_seconds:
+        # The `0 <=` also collects when now < self._last, i.e. after an epoch restart resets signal time;
+        # without it no point lands until time climbs back. Matches the target trend sampler.
+        if self._last is not None and 0 <= now - self._last < self.update_seconds:
             return
         self._last = now
         for source in sources:
