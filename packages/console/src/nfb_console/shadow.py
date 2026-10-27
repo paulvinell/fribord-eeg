@@ -211,13 +211,19 @@ def _log(display: int, level: float) -> None:
         pass                    # diagnostics must never take a session down
 
 
-def set(display: int, level: float) -> None:
-    """Set brightness, clamped to [HARD_FLOOR, 1]. The clamp is here, at the boundary, so no caller can
-    route around it."""
+def _write(display: int, level: float) -> None:
+    """Write a brightness, clamped only to [0, 1]. The restore path uses this to give the display back
+    exactly as found; `set` floors on top so no feedback caller can drive it to black."""
     _log(display, level)
     if _ds is None or muted():
         return
-    _ds.DisplayServicesSetBrightness(display, c_float(min(1.0, max(HARD_FLOOR, level))))
+    _ds.DisplayServicesSetBrightness(display, c_float(min(1.0, max(0.0, level))))
+
+
+def set(display: int, level: float) -> None:
+    """Set brightness, clamped to [HARD_FLOOR, 1]. The clamp is here, at the boundary, so no caller can
+    route around it."""
+    _write(display, min(1.0, max(HARD_FLOOR, level)))
 
 
 class DisplayShadow:
@@ -279,7 +285,10 @@ class DisplayShadow:
     def release(self) -> None:
         """Give the display back at the brightness we found it. Safe to call repeatedly."""
         if self.display is not None and self.initial is not None:
-            set(self.display, self.initial)
+            # Restore what we found, not the floored value. Only a captured black (0.0) is floored (a
+            # session cannot leave the screen dark); a low-but-lit brightness restores as-is.
+            restore = self.initial if self.initial > 0.0 else HARD_FLOOR
+            _write(self.display, restore)
         self.display = None
         self.initial = None
 

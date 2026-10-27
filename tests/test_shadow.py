@@ -19,8 +19,8 @@ def fake(monkeypatch):
     """A display that records what it was set to, in place of DisplayServices."""
     state = {"brightness": {1: 0.6, 2: 0.4}, "writes": []}
 
-    def fake_set(display, level):
-        level = min(1.0, max(shadow.HARD_FLOOR, level))
+    def fake_write(display, level):
+        level = min(1.0, max(0.0, level))       # the real _write clamps only to [0, 1]; set() floors on top
         state["brightness"][display] = level
         state["writes"].append((display, round(level, 4)))
 
@@ -32,7 +32,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(shadow, "available", lambda: True)
     monkeypatch.setattr(shadow, "problem", lambda: None)
     monkeypatch.setattr(shadow, "get", lambda d: state["brightness"].get(d))
-    monkeypatch.setattr(shadow, "set", fake_set)
+    monkeypatch.setattr(shadow, "_write", fake_write)   # the write boundary; real set() floors into it
     return state
 
 
@@ -120,6 +120,22 @@ def test_the_operators_brightness_is_restored(fake):
     sh.release()
     assert fake["brightness"][1] == 0.6, "and it came back to what it was"
     assert not sh.active
+
+
+def test_restore_gives_back_a_dim_display_but_floors_a_true_black(fake):
+    """Restore routed through the floored set(), so a 2% (dark sleep room) start came back at 10%. Restore
+    now gives back what it found, flooring only a true black (0.0) so a session cannot leave the screen dark."""
+    fake["brightness"][1] = 0.02               # the operator's dark-room brightness
+    sh = shadow.DisplayShadow()
+    settle(sh, fake, level=1.0, low=20, high=100)
+    sh.release()
+    assert fake["brightness"][1] == pytest.approx(0.02), "a low-but-lit brightness comes back as found"
+
+    fake["brightness"][2] = 0.0                # a display found fully off
+    sh2 = shadow.DisplayShadow()
+    settle(sh2, fake, level=1.0, low=20, high=100, screen=2)
+    sh2.release()
+    assert fake["brightness"][2] == pytest.approx(shadow.HARD_FLOOR), "a true black is floored, not left dark"
 
 
 def test_switching_the_mechanism_off_restores_without_a_separate_call(fake):

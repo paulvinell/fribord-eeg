@@ -30,15 +30,16 @@ def fake_volume(monkeypatch):
     # shadow does, so a test driving `apply` in a tight loop passes no time and nothing would move.
     state = {"level": 0.5, "writes": [], "t": [0.0]}
 
-    def fake_set(level):
-        level = min(1.0, max(sysvolume.HARD_FLOOR, level))
+    def fake_write(level, device=None):
+        level = min(1.0, max(0.0, level))       # the real _write clamps only to [0, 1]; set() floors on top
         state["level"] = level
         state["writes"].append(round(level, 4))
 
     monkeypatch.setattr(sysvolume, "available", lambda: True)
     monkeypatch.setattr(sysvolume, "problem", lambda: None)
-    monkeypatch.setattr(sysvolume, "get", lambda: state["level"])
-    monkeypatch.setattr(sysvolume, "set", fake_set)
+    monkeypatch.setattr(sysvolume, "_device", lambda: 1)
+    monkeypatch.setattr(sysvolume, "get", lambda device=None: state["level"])
+    monkeypatch.setattr(sysvolume, "_write", fake_write)    # the write boundary; real set() floors into it
     monkeypatch.setattr(sysvolume, "clock", lambda: state["t"][0])
     return state
 
@@ -75,6 +76,55 @@ def test_the_operators_volume_is_restored(fake_volume):
     control.release()
     assert fake_volume["level"] == 0.5
     assert not control.held
+
+
+def test_restore_gives_back_a_low_level_but_floors_a_true_mute(fake_volume):
+    """Restore routed through the floored set(), so a muted (0.0) start came back at 5% and a low level was
+    pushed up to the floor. Restore now writes what it found, flooring only a true mute to keep the
+    'cannot leave it silent' rail."""
+    fake_volume["level"] = 0.0                 # the operator started muted
+    control = sysvolume.SystemVolume()
+    settle(control, fake_volume, level=1.0, low=10, high=100)
+    control.release()
+    assert fake_volume["level"] == pytest.approx(sysvolume.HARD_FLOOR), "a true mute is floored, not left at 0"
+
+    fake_volume["level"] = 0.03                # a low-but-audible start, below the floor
+    control = sysvolume.SystemVolume()
+    settle(control, fake_volume, level=1.0, low=10, high=100)
+    control.release()
+    assert fake_volume["level"] == pytest.approx(0.03), "a low-but-audible level comes back as found"
+
+
+def test_restore_targets_the_device_it_took_not_the_new_default(monkeypatch):
+    """The controller saved only the level, so after an output switch it restored to the new default while
+    the original kept the training volume. It now captures the device at take and restores to that one."""
+    levels = {1: 0.5, 2: 0.9}
+    current = {"id": 1}
+    monkeypatch.setattr(sysvolume, "available", lambda: True)
+    monkeypatch.setattr(sysvolume, "_device", lambda: current["id"])
+    monkeypatch.setattr(sysvolume, "get", lambda device=None: levels[current["id"] if device is None else device])
+    monkeypatch.setattr(sysvolume, "_write",
+                        lambda level, device=None: levels.__setitem__(current["id"] if device is None else device,
+                                                                      min(1.0, max(0.0, level))))
+    monkeypatch.setattr(sysvolume, "clock", lambda: 0.0)
+
+    control = sysvolume.SystemVolume()
+    control.apply(True, 10, 100, 1.0)          # takes device 1 at 0.5
+    current["id"] = 2                          # the default output switches to device 2
+    control.release()
+    assert levels[1] == pytest.approx(0.5), "the device we took is restored to what it was"
+    assert levels[2] == pytest.approx(0.9), "the new default is left untouched"
+
+
+def test_resuming_after_a_pause_does_not_jump_the_volume(fake_volume):
+    """release() left _last at the pre-pause time, so the first resumed update spanned the whole pause and
+    jumped straight to target. _last is reset on re-take now, so the resume approaches like any step."""
+    control = sysvolume.SystemVolume()
+    settle(control, fake_volume, level=0.0, low=10, high=100)     # steady low
+    control.release()
+    fake_volume["t"][0] += 600.0                                   # a ten-minute pause
+    control.apply(True, 10, 100, 1.0)                             # resume at a high target
+    assert fake_volume["level"] < 0.9, "the first resumed step approaches, it does not jump to the target"
 
 
 def test_switching_sound_off_restores_without_a_separate_call(fake_volume):
@@ -990,3 +1040,63 @@ def test_the_buffer_running_dry_is_counted_even_when_the_host_does_not_flag_it()
     assert health(int(2.0 * rate), 2.0 - block / 2) == "starved", "less than one block left to play"
     assert health(int(0.2 * rate), 0.2 - block / 2) == "", "and not while the buffer is still filling"
     assert health(int(9.0 * rate), 9.0 - music.STALL_SECONDS - 1) == "dead"
+
+
+# --- session output lifecycle -------------------------------------------------------------
+
+def _amp_session_with_recorders():
+    """An amplitude session whose three continuous outputs record apply/release instead of touching the
+    machine, so the lifecycle (not the device) is what a test observes."""
+    from nfb.stream import Block
+    from nfb_console.amplitude_view import AmplitudeSession
+    from nfb_console.protocols import BY_CODE
+    from conftest import BENCH
+
+    session = AmplitudeSession(BY_CODE["AMP"], path=str(BENCH), channels=2)
+    rec = {"released": 0, "applied": 0}
+    for name in ("display", "output_volume", "music"):
+        obj = getattr(session, name)
+        obj.release = lambda *a, r=rec, **k: r.__setitem__("released", r["released"] + 1)
+        obj.apply = lambda *a, r=rec, **k: r.__setitem__("applied", r["applied"] + 1)
+    return session, rec, Block
+
+
+def test_a_completed_session_hands_the_outputs_back():
+    """Auto-completion set paused and returned without releasing, so the shadow/volume/music held the last
+    training value after the session ended. tick() now releases on completion, like pause and suspend."""
+    session, rec, _Block = _amp_session_with_recorders()
+    try:
+        session.toggle_pause()                     # running
+        session.plan.complete = lambda _elapsed: True   # as if the configured length was reached
+        session.tick()
+        assert session.finished and session.paused
+        assert rec["released"] > 0, "a finished session releases the outputs"
+    finally:
+        session.stop()
+
+
+def test_losing_every_channel_releases_rather_than_holding_the_last_value():
+    """When every channel dies no live target advances, so the output-driving block was skipped and the
+    machine held the last usable value. A block with no live channel now hands the outputs back."""
+    session, rec, Block = _amp_session_with_recorders()
+    try:
+        session.toggle_pause()
+        for i in range(0, 64, 8):                   # several all-no-signal blocks on every channel
+            for ch in sorted(session.specs):
+                session.feed_block(Block(ch, i, tuple([30000] * 8), session.specs[ch], state=2))
+        assert not session.active_targets, "every channel is judged dead"
+        assert rec["released"] > 0, "no live channel hands the outputs back"
+    finally:
+        session.stop()
+
+
+def test_a_straggling_update_does_not_take_the_outputs_after_stop():
+    """A feed-thread straggler could apply outputs inline after stop() released. _apply_outputs now no-ops
+    once _stop is set, which stop() does before releasing."""
+    session, rec, _Block = _amp_session_with_recorders()
+    try:
+        session._stop = True
+        session._apply_outputs(0.5, True, 0.5, None)
+        assert rec["applied"] == 0, "a stopped session takes no outputs"
+    finally:
+        session.stop()

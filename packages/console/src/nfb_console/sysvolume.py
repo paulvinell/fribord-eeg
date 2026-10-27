@@ -142,8 +142,8 @@ def problem() -> str | None:
     return None
 
 
-def get() -> float | None:
-    device = _device()
+def get(device: int | None = None) -> float | None:
+    device = _device() if device is None else device
     if device is None or _ca is None:
         return None
     value = c_float()
@@ -154,14 +154,20 @@ def get() -> float | None:
     return float(value.value)
 
 
-def set(level: float) -> None:
-    """Set the output volume, clamped to [HARD_FLOOR, 1]. The clamp lives here so no caller can route
-    around it."""
-    device = _device()
+def _write(level: float, device: int | None = None) -> None:
+    """Write a level to a device, clamped only to [0, 1]. The restore path uses this to give back exactly
+    what it found; the public `set` floors on top of it so no feedback caller can drive to silence."""
+    device = _device() if device is None else device
     if device is None or _ca is None:
         return
-    safe = c_float(min(1.0, max(HARD_FLOOR, level)))
+    safe = c_float(min(1.0, max(0.0, level)))
     _ca.AudioObjectSetPropertyData(device, byref(_MAIN_VOLUME), 0, None, 4, byref(safe))
+
+
+def set(level: float, device: int | None = None) -> None:
+    """Set the output volume, clamped to [HARD_FLOOR, 1]. The clamp lives here so no caller can route
+    around it."""
+    _write(min(1.0, max(HARD_FLOOR, level)), device)
 
 
 class SystemVolume:
@@ -177,6 +183,7 @@ class SystemVolume:
         self.held = False
         self._registered = False
         self._last: float | None = None
+        self._device_id: int | None = None      # the device taken, so release gives back the right one
 
     def apply(self, enabled: bool, low: float, high: float, level: float) -> None:
         """`low`/`high` are percentages, `level` is 0…1."""
@@ -184,9 +191,11 @@ class SystemVolume:
             self.release()
             return
         if not self.held:
-            self.initial = get()
+            self._device_id = _device()
+            self.initial = get(self._device_id)
             self.current = self.initial if self.initial is not None else 0.5
             self.held = True
+            self._last = None       # a re-take does not smooth across the pause it just ended
             if not self._registered:
                 atexit.register(self.release)
                 self._registered = True
@@ -196,13 +205,17 @@ class SystemVolume:
         dt = MIN_DT if self._last is None else max(MIN_DT, now - self._last)
         self._last = now
         self.current += _alpha(dt, APPROACH_SECONDS) * (target - self.current)
-        set(self.current)
+        set(self.current, self._device_id)
 
     def release(self) -> None:
         if self.held and self.initial is not None:
-            set(self.initial)
+            # Give back what we found, on the device we took. Only a captured mute (0.0) is floored,
+            # keeping the "cannot leave it silent" rail; a low-but-audible level restores as-is.
+            restore = self.initial if self.initial > 0.0 else HARD_FLOOR
+            _write(restore, self._device_id)
         self.held = False
         self.initial = None
+        self._device_id = None
 
     def describe(self) -> str:
         if not available():

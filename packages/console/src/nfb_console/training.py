@@ -1222,6 +1222,10 @@ class TrainingSession:
 
     def _apply_outputs(self, level: float, met: bool, shadow_in: float,
                        balance: float | None) -> None:
+        # Never take the outputs while stopping: a feed-thread straggler could otherwise apply inline
+        # after stop() released. stop() sets `_stop` before releasing, so this catches it.
+        if self._stop:
+            return
         sh = self.feedback.shadow
         self.display.apply(sh.enabled and sh.supported, sh.screen, *sh.ends(),
                            sh.map(shadow_in), smoothing=sh.smoothing_seconds)
@@ -1512,6 +1516,7 @@ class TrainingSession:
             self._accumulated = self.plan.length_seconds
             self._resumed_at = None
             self.paused = True
+            self._outputs_off()        # a finished session hands the machine back, like pause and suspend
 
     # --- going to the device screen and coming back -------------------------------------
 
@@ -1656,6 +1661,10 @@ class TrainingSession:
             self._maybe_click()
             self._maybe_alert()
             self._drive_outputs()
+        elif not self.active_targets:
+            # No live channel (a lifted reference takes them all at once): hand the outputs over rather
+            # than freezing at the last usable value. Idempotent; the next good block re-takes.
+            self._outputs_off()
         # **Stream time, not the clock.** On the wall clock a replay fed faster than real time — every
         # test, every screenshot — gained a trend point per half second of *machine* time, so thirty
         # seconds of signal drew as one or two points depending on how warm the cache was, and the
@@ -1680,6 +1689,9 @@ class TrainingSession:
         how a test ends up measuring the scheduler; every screen test in this suite used to do it.
         """
         self.feeding = True
+        # Give the starvation watchdog an origin before the first block, so a device connected but switched
+        # off (which never delivers one) still trips the starved branch.
+        self.sentry.saw_block()
         if self._output_thread is None or not self._output_thread.is_alive():
             self._output_thread = threading.Thread(target=self._output_pump, daemon=True,
                                                    name="outputs")
@@ -1703,6 +1715,9 @@ class TrainingSession:
         # `error` unset, which is indistinguishable from a stalled UI.
         finally:
             self.feeding = False
+            # Source exhausted or a feed exception: hand the machine back. stop() already releases on its
+            # own path; this covers the ends it does not reach. Idempotent and pump-safe.
+            self._outputs_off()
         slog(f"feed ENDED after blocks/ch {self._seen} states {self._states} gaps {self.gaps} error {self.error}")
 
     DISPLAY_LIMIT_HZ = 45.0

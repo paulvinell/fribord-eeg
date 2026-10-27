@@ -28,9 +28,10 @@ def _no_real_outputs(monkeypatch):
 
     from nfb_console import prefs, shadow, sysvolume
 
-    # belt and braces: even a direct call to a setter must not reach the hardware
-    monkeypatch.setattr(shadow, "set", lambda *a, **k: None)
-    monkeypatch.setattr(sysvolume, "set", lambda *a, **k: None)
+    # belt and braces: even a direct call must not reach the hardware. `_write` is the one boundary both
+    # `set` and `release` go through, so gating it covers both.
+    monkeypatch.setattr(shadow, "_write", lambda *a, **k: None)
+    monkeypatch.setattr(sysvolume, "_write", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
