@@ -912,3 +912,15 @@ def test_the_condition_under_either_takes_its_alternatives_from_the_role():
 
     inhibit.value = 16.0
     assert not rule.on_target([up, down, inhibit]), "and the inhibit is still a veto"
+
+
+def test_music_only_feedback_is_not_reported_as_no_output():
+    """describe() listed only the four mechanisms, so a music-only arrangement read 'no output enabled'
+    while the music path received an enabled update. Music is still not a mechanism, but the summary now
+    names it."""
+    fb = FeedbackSettings()
+    for m in fb.mechanisms.values():
+        m.enabled = False
+    assert fb.describe() == "no output enabled"
+    fb.music.enabled = True
+    assert fb.describe() != "no output enabled" and "music" in fb.describe()

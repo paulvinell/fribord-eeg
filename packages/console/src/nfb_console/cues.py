@@ -26,8 +26,13 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 from pathlib import Path
+
+CLICK_STALL_SECONDS = 2.0
+"""A click stream whose callback has not run for this long is dead — a device change leaves the object
+alive but unserviced. The same figure `music.STALL_SECONDS` uses for the music writer."""
 
 SYSTEM = Path("/System/Library/Sounds")
 RATE = 44100
@@ -394,11 +399,32 @@ class _ClickStream:
         self._lock = threading.Lock()
         self._voices: list[list] = []           # [float32 samples, gain, position]
         self._tried = False
+        self._last_callback: float | None = None
         self.error: str | None = None
+
+    def _alive(self) -> bool:
+        """Whether the stream's callback is still being serviced. A device change leaves the object open
+        but silent, so a stream is only trusted while its callback has run recently."""
+        return (self._last_callback is not None
+                and time.monotonic() - self._last_callback < CLICK_STALL_SECONDS)
+
+    def _rebuild(self) -> None:
+        """Drop a stalled stream so `start` opens a fresh one. A deliberate rebuild gets a new attempt."""
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
+        self._tried = False
+        self._last_callback = None
+        with self._lock:
+            self._voices = []           # a dead stream never played them; do not carry them over
 
     def start(self) -> bool:
         if self._stream is not None:
-            return True
+            if self._alive():
+                return True
+            self._rebuild()                      # went silent (device changed): reopen
         if self._tried:                          # one failure per process, not one per click
             return False
         self._tried = True
@@ -416,6 +442,7 @@ class _ClickStream:
             self.error = f"no audio output: {exc}"
             self._stream = None
             return False
+        self._last_callback = time.monotonic()   # trust a just-opened stream until its first callback
         return True
 
     def trigger(self, name: str, volume: float | None) -> bool:
@@ -432,6 +459,7 @@ class _ClickStream:
         return True
 
     def _callback(self, outdata, frames, time_info, status) -> None:
+        self._last_callback = time.monotonic()      # proof of life for the liveness check
         import numpy as np
 
         outdata[:] = 0.0

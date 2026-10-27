@@ -1100,3 +1100,93 @@ def test_a_straggling_update_does_not_take_the_outputs_after_stop():
         assert rec["applied"] == 0, "a stopped session takes no outputs"
     finally:
         session.stop()
+
+
+def test_a_hold_set_while_no_child_exists_is_applied_to_the_next_one(tmp_path, monkeypatch):
+    """hold(True) can land while _proc is None — between tracks, or in the window after start() spawns the
+    worker before its first Popen. It then only set the flag, with nothing to signal, and the child spawned
+    next played on un-paused while the player reported itself held. The worker now stops that fresh child."""
+    import signal as stdlib
+    import threading
+
+    procs = []
+    gate = threading.Event()
+
+    class FakeProc:
+        def __init__(self, argv, **kw):
+            self.signals = []
+            procs.append(self)
+
+        def wait(self):
+            if len(procs) == 1:
+                gate.wait(timeout=2.0)      # hold the first child so the test can set a hold between tracks
+            return 0
+
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            self.signals.append(sig)
+
+        def terminate(self):
+            pass
+
+    monkeypatch.setattr(music.subprocess, "Popen", FakeProc)
+    tone(tmp_path / "a.wav")
+    player = music.TrackPlayer()
+    player.start(music.tracks(tmp_path), volume=35)
+    for _ in range(200):                    # wait for the first child to spawn and park in wait()
+        if procs:
+            break
+        time.sleep(0.005)
+    player.hold(True)                        # a hold while the first child plays, carried on the flag
+    gate.set()                               # first child ends; the worker spawns the next under the hold
+    for _ in range(200):
+        if len(procs) >= 2:
+            break
+        time.sleep(0.005)
+    player.stop()
+    assert len(procs) >= 2 and stdlib.SIGSTOP in procs[1].signals, \
+        "the child spawned while held is stopped, not left playing"
+
+
+def test_the_sonifier_clears_a_stale_error_on_a_good_rebuild():
+    """A bad band set an error that the next, valid configure never cleared, so the Feedback tab kept
+    reporting failure after recovery."""
+    son = music.Sonifier()
+    son.configure(256.0, music.Band(100.0, 130.0, "past Nyquist"))   # 130 Hz > 128 Hz Nyquist → error
+    assert son.error is not None
+    son.configure(256.0, music.Band(2.0, 38.0, "music"))             # valid rebuild
+    assert son.error is None, "a good rebuild clears the stale error"
+
+
+def test_a_stalled_click_stream_is_rebuilt_rather_than_accepting_unheard_clicks(monkeypatch):
+    """_ClickStream.start returned True whenever a stream object existed, with no liveness check — so after
+    a device change the object stayed open but unserviced and clicks piled up unheard. It now rebuilds a
+    stream whose callback has gone quiet past the stall window."""
+    import types
+
+    from nfb_console import cues
+
+    opened = []
+
+    class FakeStream:
+        def __init__(self, **kw):
+            opened.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=FakeStream))
+    monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
+
+    cs = cues._ClickStream()
+    assert cs.trigger("beep", 100) is True          # opens the stream and queues a voice
+    assert len(opened) == 1 and cs._alive(), "a just-opened stream counts alive"
+
+    cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0   # device changed: callback stopped
+    assert cs.trigger("beep", 100) is True
+    assert len(opened) == 2, "a stalled stream is rebuilt, not fed an unheard click"

@@ -984,6 +984,8 @@ class FeedbackSettings:
 
     def describe(self) -> str:
         on = [m.label for m in self.mechanisms.values() if m.enabled]
+        if self.music.enabled:
+            on.append("music")      # music is not a mechanism, but it is an output the summary must name
         return ", ".join(on) if on else "no output enabled"
 
     def level(self, targets: Iterable[Scored]) -> float:

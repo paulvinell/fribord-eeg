@@ -480,6 +480,13 @@ class TrackPlayer:
                                               stderr=subprocess.DEVNULL)
             except OSError:
                 return
+            # A hold requested before this child existed set `held` with nothing to signal. Apply it to the
+            # fresh child, or it plays un-paused while the player reports it held.
+            if self.held:
+                try:
+                    self._proc.send_signal(signal.SIGSTOP)
+                except OSError:
+                    pass
             self._proc.wait()
             self._proc = None
             if self._stop.is_set():
@@ -634,8 +641,8 @@ class _AudioStream:
             stream = self._stream
             if stream is None:
                 return
-            block = self._block(BLOCK_FRAMES)
             try:
+                block = self._block(BLOCK_FRAMES)   # inside the try: a render-time error must reopen, not die
                 if stream.write(block):
                     self.dropouts += 1
             except Exception as exc:
@@ -823,9 +830,13 @@ class NoisePlayer(_AudioStream):
         sos = self._pitch_sos[end]
         if sos is None:
             return x
-        if self._pitch_zi[end] is None:
-            self._pitch_zi[end] = np.zeros((sos.shape[0], 2))
-        out, self._pitch_zi[end] = sosfilt(sos, x, zi=self._pitch_zi[end])
+        # Read the state once: `_set_pitch` can null `_pitch_zi[end]` concurrently, and `sosfilt(zi=None)`
+        # returns one array, so the two-value unpack would raise and kill the writer.
+        zi = self._pitch_zi[end]
+        if zi is None:
+            zi = np.zeros((sos.shape[0], 2))
+        out, zi = sosfilt(sos, x, zi=zi)
+        self._pitch_zi[end] = zi
         return out * self._pitch_gain[end]
 
     def _block(self, frames: int) -> np.ndarray:
@@ -1237,6 +1248,7 @@ class Sonifier(_AudioStream):
             taps = int(round(EEG_TRACK_TAPS_SECONDS * rate_hz))
             self._tracker = CFIREnvelope(band, rate_hz, delay_seconds=EEG_TRACK_DELAY_SECONDS,
                                          n_taps=max(64, taps))
+            self.error = None          # a good rebuild clears a prior failure, or describe reports it still
         except ValueError as exc:
             self._filter = self._tracker = None
             self.error = str(exc)      # e.g. the band reaches Nyquist on this channel
