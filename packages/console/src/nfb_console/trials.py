@@ -227,7 +227,9 @@ class TrialRun:
     def feed(self, t: float, value: float, valid: bool = True) -> list[Event]:
         """One reading of the metric. Returns the events that fell due, oldest first."""
         events: list[Event] = []
-        if self._t is not None and t - self._t > JUMP_S:
+        # A backward step is a discontinuity like a forward gap (a device clock can wrap or glitch), and it
+        # would stall the phase clock, whose deadline is then never reached again.
+        if self._t is not None and (t - self._t > JUMP_S or t < self._t):
             self._abort()
         if self._t is None:
             self._phase_until = t + LEADIN_S

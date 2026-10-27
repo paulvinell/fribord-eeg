@@ -175,6 +175,20 @@ def test_a_time_jump_aborts_the_trial_in_flight():
     assert all(r.valid and r.success for r in run.results)
 
 
+def test_a_backward_time_step_aborts_rather_than_freezing_the_trial():
+    """A device clock that wraps or glitches can hand the engine a reading earlier than the last. Without a
+    guard the phase deadline is never reached again and the trial freezes mid-effort (the pupil screen's
+    'effort · 0 s'). A backward step is now a discontinuity like a forward gap: the trial in flight is
+    discarded and the run carries on from the new time base."""
+    run = TrialRun(n_trials=8, transfer_fraction=0.0, seed=4)
+    _run(run, 5.0, value=_compliant)                 # into the first trial
+    assert run.phase in (BASELINE, ACTIVE)
+    run.feed(1.0, 0.0, valid=True)                   # one reading from far in the past (a wrap)
+    assert run.phase == ITI, "the backward step discarded the trial in flight and rested"
+    events = _run(run, 60.0, value=_compliant, start=1.0)
+    assert any(e.kind == VERDICT for e in events), "the run resumed and scored a trial, not frozen"
+
+
 def test_rates_are_none_before_there_is_anything_to_rate():
     run = TrialRun(seed=0)
     assert run.success_rate() is None

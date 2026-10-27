@@ -197,6 +197,22 @@ def test_the_connect_sequence_and_then_gaze():
     assert [f.timestamp_us for f in frames] == [0, 30_000, 60_000]
 
 
+def test_emitted_time_stays_monotonic_when_the_device_clock_jumps_backward():
+    """Sample time is built from the device's own clock — a counter that wraps roughly every 71 minutes
+    and can glitch. A backward step used to drive emitted time backward, which freezes the trial clock and
+    stops the processor's windows evicting. The driver now re-anchors so time only ever moves forward."""
+    stamps = [0, 30_000, 60_000, 10_000, 40_000]      # a backward step at the fourth frame (a wrap/glitch)
+    link = FakeLink(gaze=[gaze_payload(stamp_us=s) for s in stamps])
+    source = tr.TrackerPupil(link=link)
+    times = []
+    for sample in source.samples():
+        times.append(sample.t)
+        if len(times) == len(stamps):
+            break
+    assert times == sorted(times), f"time went backward: {times}"
+    assert len(set(times)) == len(times), f"time repeated (would stall the trial): {times}"
+
+
 def test_a_gaze_frame_during_the_handshake_is_kept_not_taken_for_an_answer():
     link = FakeLink(notify_during_handshake=True)
     session = tr.TrackerSession(link)

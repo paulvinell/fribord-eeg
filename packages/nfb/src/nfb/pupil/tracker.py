@@ -685,6 +685,7 @@ class TrackerPupil:
             session = TrackerSession(link, self.screen_mm)
             session.connect()
             anchor: tuple[float, int] | None = None
+            last_t: float | None = None
             arrivals: list[float] = []
             for frame in session.gaze(stop=lambda: self._stop):
                 now = time.time()
@@ -697,6 +698,12 @@ class TrackerPupil:
                     if anchor is None:
                         anchor = (now, frame.timestamp_us)
                     t = anchor[0] + (frame.timestamp_us - anchor[1]) / 1e6
+                # The device clock wraps and can glitch, so it is not strictly increasing. A backward step
+                # freezes the trial clock and stops the processor evicting, so re-anchor and keep moving.
+                if last_t is not None and t <= last_t:
+                    t = max(now, last_t + 1e-3)
+                    anchor = (t, frame.timestamp_us)
+                last_t = t
                 self.position = Position(frame.left.box, frame.right.box, frame.distance_mm())
                 yield sample_of(frame, self.eye, t)
         except TrackerError as exc:
