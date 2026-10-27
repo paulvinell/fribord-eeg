@@ -490,3 +490,19 @@ def test_a_stale_pupil_reader_does_not_silence_its_replacement():
     runner._stop.clear()
     runner._run(stale_gen)          # the stale reader finally fails, after the generation moved on
     assert runner.error is None, "a stale reader's failure does not overwrite the live runner's state"
+
+
+def test_the_camera_shows_lit_frames_and_holds_through_the_strobe_dark_ones():
+    """The tracker strobes its lamp, so frames alternate lit and dark; a dark frame carries no picture, only
+    sensor bias the leveller amplifies into rings. The view shows the lit frames and holds through the dark."""
+    from nfb_console.pupil_camera import MAX_HELD, _LitSelector
+
+    sel = _LitSelector()
+    shown = [sel(m) for m in (100, 15, 100, 15, 100, 15)]     # lamp on / off / on / off ...
+    assert shown == [True, False, True, False, True, False], "lit frames show, dark ones are held"
+
+    sel = _LitSelector()
+    sel(100)                                                  # a lit frame sets the peak
+    run = [sel(10) for _ in range(MAX_HELD + 2)]              # then a long dark run
+    assert run[MAX_HELD - 1] is False and run[MAX_HELD] is True, \
+        "a genuinely dim scene is not frozen out — the next frame shows after MAX_HELD dark ones"

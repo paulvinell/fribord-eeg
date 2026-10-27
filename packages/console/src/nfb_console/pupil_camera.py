@@ -34,6 +34,30 @@ def level(grey: "np.ndarray") -> "np.ndarray":
     return np.clip(grey.astype(np.float32) * (TARGET_BRIGHTNESS / mean), 0, 255).astype(np.uint8)
 
 
+LIT_FRACTION = 0.5
+"""How bright, against the recent peak, a frame must be to count as lit. The tracker strobes its lamp, so
+frames alternate lit and dark; a dark frame carries no picture, only sensor bias that `level` would amplify
+into concentric rings. A fraction of the peak rather than a fixed threshold, so it follows the scene."""
+MAX_HELD = 8
+"""Show the next frame regardless after this many dark ones, so a genuinely dim scene is not frozen out."""
+
+
+class _LitSelector:
+    """Decides, frame by frame, whether a strobing frame is lit enough to show. Stateful: it tracks the
+    recent peak brightness and how many dark frames it has held through. A pure helper so it can be tested
+    without a camera."""
+
+    def __init__(self) -> None:
+        self.peak = 0.0
+        self.held = 0
+
+    def __call__(self, mean: float) -> bool:
+        self.peak = max(mean, self.peak * 0.99)
+        lit = mean >= LIT_FRACTION * self.peak or self.held >= MAX_HELD
+        self.held = 0 if lit else self.held + 1
+        return lit
+
+
 def view(page: ft.Page, on_done: Callable[[], None]) -> ft.Control:
     state = {"png": None, "error": None, "stop": False, "seen": 0, "cam": None}
 
@@ -66,12 +90,15 @@ def view(page: ft.Page, on_done: Callable[[], None]) -> ft.Control:
     def worker() -> None:
         cam = TrackerCamera()
         state["cam"] = cam              # so Back can close it even while frames() is blocked
+        lit = _LitSelector()
         try:
             for frame in cam.frames():
                 if state["stop"]:
                     break
-                grey = np.frombuffer(frame, dtype=np.uint8).reshape(HEIGHT, WIDTH)[::STEP, ::STEP]
-                grey = level(grey)
+                full = np.frombuffer(frame, dtype=np.uint8).reshape(HEIGHT, WIDTH)
+                if not lit(float(full.mean())):
+                    continue            # a lamp-off strobe frame: hold the last lit picture
+                grey = level(full[::STEP, ::STEP])
                 rgb = np.ascontiguousarray(np.repeat(grey[:, :, None], 3, axis=2))
                 state["png"] = png_bytes(rgb)
                 state["seen"] += 1
