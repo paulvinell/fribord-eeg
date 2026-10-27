@@ -91,6 +91,71 @@ def test_edf_is_an_export_and_the_native_format_stays_the_replayable_one(monkeyp
     device.close()
 
 
+def test_the_latest_pointer_never_deletes_a_real_recording(tmp_path):
+    """Finalisation repoints `latest` at the finished capture. A capture named `latest` IS the pointer, so
+    repointing it used to unlink the recording that just finished and leave a dangling self-link; and a
+    real file already at the reserved name was deleted to make way for the link. Both are data loss."""
+    from nfb.recorder import point_latest
+
+    # The capture is itself the pointer: it must survive, not be unlinked to point at itself.
+    itself = tmp_path / LATEST
+    itself.write_text("a real recording that happens to be called latest")
+    point_latest(itself)
+    assert itself.exists() and itself.read_text().startswith("a real recording")
+
+    # A real (non-symlink) file squatting at the reserved name is someone's recording: leave it.
+    squatter = tmp_path / LATEST
+    squatter.write_text("yesterday's capture")
+    point_latest(tmp_path / "tonight.jsonl.gz")
+    assert squatter.read_text() == "yesterday's capture", "a real file at latest is never deleted"
+
+    # The ordinary case still works: a stale symlink is repointed.
+    squatter.unlink()
+    (tmp_path / "tonight.jsonl.gz").write_text("tonight")
+    point_latest(tmp_path / "tonight.jsonl.gz")
+    assert (tmp_path / LATEST).is_symlink()
+    assert (tmp_path / LATEST).resolve() == (tmp_path / "tonight.jsonl.gz").resolve()
+
+
+def test_a_close_failure_marks_the_recorder_errored_not_silently_dead(monkeypatch, tmp_path):
+    """A flush failure on a full disk used to raise straight out of the finally, leaving `closed` False —
+    so `active` read True for a dead thread with no error, and the sentry's recording alarm stayed blind.
+    Now the close is guarded: the fault is recorded, the recorder reads closed-and-errored, and a
+    half-flushed capture is never promoted to `latest`."""
+    device, _fake, rec = recording(monkeypatch, tmp_path)
+    waitfor(lambda: rec.frames >= 5, what="five frames written")
+
+    def boom():
+        raise OSError("disk full")
+
+    rec._writer.close = boom
+    rec.stop()
+    waitfor(lambda: rec.closed, what="recorder finalised despite the close failure")
+    assert not rec.active, "a recorder whose thread has died is not active"
+    assert rec.error and "disk full" in rec.error, "the fault is recorded for the sentry to see"
+    assert not (tmp_path / LATEST).exists(), "a half-flushed capture does not become latest"
+    device.close()
+
+
+def test_a_failed_start_releases_the_subscription(monkeypatch, tmp_path):
+    """Registration happens before the directory and writer are made. An open failure used to leave the
+    subscription behind, so the device kept fanning frames into a queue no thread would ever drain. The
+    subscription is now released on a failed start."""
+    device, _fake = connected(monkeypatch)
+    device.start_measurement()
+    before = device.subscribers
+
+    def boom(*a, **kw):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("nfb.recorder.SessionWriter", boom)
+    rec = Recorder(device, tmp_path / "capture.jsonl.gz")
+    with pytest.raises(OSError):
+        rec.start()
+    assert device.subscribers == before, "a failed arm leaves no orphan subscription"
+    device.close()
+
+
 def test_a_name_is_kept_a_format_names_the_suffix_and_a_clash_is_never_overwritten(tmp_path):
     from nfb.recorder import timestamped_path, unique_path
 

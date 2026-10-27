@@ -59,9 +59,14 @@ def point_latest(path: Path) -> None:
     """Repoint the `latest` symlink beside a recording at it. A convenience pointer, so failures are
     swallowed — never take a finished recording down over its shortcut."""
     link = path.parent / LATEST
+    # A capture named `latest` IS the pointer: repointing would delete the recording that just finished.
+    if link == path or path.name == LATEST:
+        return
     try:
-        if link.is_symlink() or link.exists():
+        if link.is_symlink():
             link.unlink()
+        elif link.exists():
+            return          # a real recording squats at the reserved name; never delete it to repoint
         link.symlink_to(path.name)
     except OSError:
         pass
@@ -116,8 +121,15 @@ class Recorder:
         if self.path.exists():
             raise FileExistsError(f"{self.path} exists — a recording is never overwritten")
         self._sub = self.device.subscribe("recorder", queue_size=self.QUEUE_FRAMES)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._writer = self._open_edf() if self.fmt == "edf" else self._open_native()
+        # Close the subscription if the directory or the writer cannot be made: otherwise a failed arm
+        # leaves the device fanning frames into a queue no thread will ever drain.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._writer = self._open_edf() if self.fmt == "edf" else self._open_native()
+        except Exception:
+            self._sub.close()
+            self._sub = None
+            raise
         self._started_at = time.monotonic()
         self._thread = threading.Thread(target=self._run, daemon=True, name="recorder")
         self._thread.start()
@@ -156,20 +168,26 @@ class Recorder:
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
         finally:
-            self._writer.close()
+            # Guard the close: a flush failure must not leave `closed` False (a dead thread still reading
+            # `active`, with no error for the sentry to see). Record it, and set `closed` last.
+            try:
+                self._writer.close()
+            except Exception as exc:
+                if not self.error:
+                    self.error = f"{type(exc).__name__}: {exc}"
             self._sub.close()
-            self.closed = True
-            if self.frames:
+            if self.frames and not self.error:
                 self._write_notes(force=True)
                 if self.fmt == "nfb":
-                    point_latest(self.path)
-            elif not self.error:
+                    point_latest(self.path)        # only a whole, flushed capture becomes `latest`
+            elif not self.frames and not self.error:
                 # Armed but nothing ever streamed: a header-only file in sessions/ is a recording that
                 # never happened, listed forever beside real ones.
                 try:
                     self.path.unlink()
                 except OSError:
                     pass
+            self.closed = True
 
     def _write_notes(self, force: bool = False) -> None:
         if self.companion is None:
@@ -219,8 +237,13 @@ class Recorder:
             return 0
 
     def stop(self, timeout: float = 3.0) -> None:
-        """Disarm mid-session: close the subscription, wait for the file to finalise. Idempotent."""
+        """Disarm mid-session: drain what is already queued, then wait for the file to finalise. Idempotent.
+
+        Closing the subscription outright would end the writer loop at once and drop the frames already in
+        the queue, uncounted. Unsubscribing stops new frames, then the same `EpochEnd` sentinel the device
+        uses to finalise an epoch lets the loop drain the backlog before it returns."""
         if self._sub is not None:
-            self._sub.close()
+            self.device._unsubscribe(self._sub)
+            self._sub._end_epoch()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
