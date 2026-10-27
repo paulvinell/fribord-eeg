@@ -114,6 +114,30 @@ def test_antiphase_reads_zero_even_when_the_two_channels_are_unbalanced():
     assert summed == pytest.approx(30.0, rel=0.1), "the sum still sees the imbalance as signal"
 
 
+def test_product_synchrony_restarts_after_an_index_reset():
+    """A device-time reset restarts sample indices at zero. ProductSynchrony held its old output cursor, so
+    it withheld every reading until the index climbed back, and its filters bled across the gap. A genuine
+    index gap now restarts the cursor and the filters; the aligner re-anchors itself."""
+    chans = specs()
+    hz = 10.0
+    metric = ProductSynchrony(chans, (0, 1), hz)
+    n = int(20 * RATE)
+    wave = 20 * np.sin(2 * np.pi * hz * np.arange(n) / RATE) / SCALE
+
+    def feed_at(base):
+        out = []
+        for i in range(0, len(wave) - (BLOCK - 1), BLOCK):
+            out += metric.feed(Block(0, base + i, tuple(wave[i:i + BLOCK].tolist()), chans[0]))
+            out += metric.feed(Block(1, base + i, tuple(wave[i:i + BLOCK].tolist()), chans[1]))
+        return out
+
+    feed_at(3_000_000)                      # drive the cursor far past index 0
+    assert metric.samples_seen > 0
+    out = feed_at(0)                         # the epoch restarts at index 0
+    assert out, "readings resume after the reset, not after the old cursor catches up"
+    assert out[0].t < 1.0, "the first reading carries the new epoch's time"
+
+
 def test_the_product_reports_its_settling_and_it_is_the_transient_not_the_delay():
     """**The step transient outlives the group delay by an order of magnitude, and the plot needs the
     former.** At the ¼–2× default on 0.05 Hz the cascade's group delay is 3.84 s while the measured step

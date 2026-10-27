@@ -252,6 +252,7 @@ class ProductSynchrony:
         self.aligner = PairAligner(*pair)
         self.stride = max(1, int(round(self.rate_hz / output_hz)))
         self._next_index: int | None = None
+        self._expected: int | None = None
         self.post_seconds = max(0.0, float(post_seconds))
         dt = 1.0 / self.rate_hz
         self._post_alpha = 1.0 if self.post_seconds <= 0 else dt / (self.post_seconds + dt)
@@ -381,11 +382,26 @@ class ProductSynchrony:
                     f"centre{notch}")
         return f"{self.low:g}–{self.high:g} Hz · order {self.order}{notch}"
 
+    def _restart(self, start: int) -> None:
+        """Drop every filter and smoother state on a gap or epoch reset, and re-anchor the cursor so it does
+        not withhold output until a reset stream catches up. The aligner re-anchored itself."""
+        for stage in (*self.filters[self.pair[0]], *self.filters[self.pair[1]], *self.sum_filter):
+            stage.reset()
+        for notch in self.notches.values():
+            if notch is not None:
+                notch.reset()
+        self._post = self._sum_post = 0.0
+        self._next_index = start
+        self.samples_seen = 0
+
     def feed(self, block: Block) -> list[Reading]:
         paired = self.aligner.push(block)
         if paired is None:
             return []
         start, a_raw, b_raw = paired
+        if self._expected is not None and start != self._expected:
+            self._restart(start)
+        self._expected = start + len(a_raw)
         # The aligner accumulates `Block.values`, which are already in µV — scaling here again would
         # shrink every reading by the scale (41× on this device) and, since the product is a square,
         # the reward by its square. That happened.

@@ -287,6 +287,7 @@ class SynchronyMetric:
         dt = 1.0 / self.rate_hz
         self._alpha = dt / (self.plv_tau + dt)
         self._next_index: int | None = None
+        self._expected: int | None = None
         self.parts: dict[int, float] = dict.fromkeys(pair, 0.0)
         self.value = 0.0
         self.plv = 0.0
@@ -363,6 +364,14 @@ class SynchronyMetric:
         if paired is None:
             return []
         start, a_values, b_values = paired
+        if self._expected is not None and start != self._expected:
+            # a gap or epoch index reset: drop lock-in and phasor state, re-anchor the cursor so it does
+            # not withhold output until a reset stream catches up. The aligner re-anchored itself.
+            self.lockins[self.pair[0]].reset()
+            self.lockins[self.pair[1]].reset()
+            self._phasor = 0.0 + 0.0j
+            self._next_index = start
+        self._expected = start + len(a_values)
         za = self.lockins[self.pair[0]].process(a_values)
         zb = self.lockins[self.pair[1]].process(b_values)
         summed = np.abs(za + zb)

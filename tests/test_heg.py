@@ -89,6 +89,18 @@ def test_settling_then_good_and_the_projection_arithmetic():
     assert out[-1].raw_ir == pytest.approx(20000.0, abs=1.0)
 
 
+def test_a_reconnect_gap_restarts_the_settling_clock():
+    """The settling clock was set once and never restarted, so after a long gap in frame times (a headband
+    reconnect) the processor reported good quality straight away on stale, pre-gap optics. A frame gap wider
+    than a reconnect now re-settles and drops the held value."""
+    proc = FrameProcessor()
+    out = [proc.process(f) for f in frames(15.0)]
+    assert out[-1].quality == QUALITY_GOOD
+
+    resumed = proc.process(next(iter(frames(0.1, start_t=1100.0))))   # the clock jumps 85 s ahead
+    assert resumed.quality == QUALITY_SETTLING, "a reconnect must re-settle, not resume good on old optics"
+
+
 def test_a_jolt_gates_and_holds_the_optics_flat_while_the_filters_advance():
     proc = FrameProcessor()
     stream = list(frames(20.0)) + list(

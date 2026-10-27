@@ -178,6 +178,7 @@ class FrameProcessor:
                  settling_seconds: float = SETTLING_SECONDS, motion_gate: bool = True,
                  motion_sensitivity: float = MOTION_SENSITIVITY):
         self.fs_hz = fs_hz
+        self._gap_seconds = max(1.0, 5.0 / fs_hz)       # a wider frame gap is a reconnect, not jitter
         self.lowpass_hz = lowpass_hz
         self.settling_seconds = settling_seconds
         # **Both of these are live, not construction-time.** The gate is always built and `motion_gate`
@@ -213,6 +214,7 @@ class FrameProcessor:
             self._gate.sensitivity = keep.sensitivity     # a reset is not a change of setting
         self._start_t: float | None = None
         self._held: tuple[float, float] | None = None    # (hbo, hbr) at the last good frame
+        self._last_t: float | None = None                # to notice a reconnect gap in frame times
 
     def reset(self) -> None:
         self.gated = 0
@@ -228,8 +230,19 @@ class FrameProcessor:
         return Channel(ir=self._lp[(name, "ir")].push(ch.ir),
                        red=self._lp[(name, "red")].push(ch.red), amb=ch.amb)
 
+    def _restart_optics(self) -> None:
+        """A reconnect gap: rebuild the low-passes and drop the held value so the settling clock runs again.
+        The motion gate keeps its noise floor, as it does across a hold toggle."""
+        self._lp = {(ch, wl): ChannelLowpass(self.lowpass_hz, self.fs_hz)
+                    for ch in "lrp" for wl in ("ir", "red")}
+        self._start_t = None
+        self._held = None
+
     def process(self, frame: Frame) -> Processed:
         self.seen += 1
+        if self._last_t is not None and frame.t - self._last_t > self._gap_seconds:
+            self._restart_optics()
+        self._last_t = frame.t
         l = self._filtered("l", frame.l)
         r = self._filtered("r", frame.r)
         p = self._filtered("p", frame.p)

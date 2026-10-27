@@ -105,6 +105,26 @@ def test_a_window_of_rejected_data_does_not_count_as_complete():
     assert not m.settled, "a run of rejected blocks is not a complete window"
 
 
+def test_a_coupling_restarts_after_an_index_reset():
+    """Returning from a device check restarts sample indices at zero. The metric held its old output cursor,
+    so it withheld every reading until the index climbed back, and its statistics stayed settled against the
+    old epoch. A genuine index gap now restarts the cursor and the window; a held rejected block does not."""
+    m = CouplingMetric({0: SPEC}, Coupling(SLOW, FAST), window_seconds=20.0, output_hz=20.0)
+    base = 5_000_000
+    x = coupled(30, 0.9)
+    for i in range(0, len(x), 250):
+        m.feed(Block(0, base + i, np.asarray(x[i:i + 250]), SPEC))
+    assert m.settled, "the first epoch settled its window"
+
+    y = coupled(10, 0.9, seed=1)
+    readings = []
+    for i in range(0, len(y), 250):
+        readings += m.feed(Block(0, i, np.asarray(y[i:i + 250]), SPEC))
+    assert readings, "output resumes on the reset epoch, not after the old cursor catches up"
+    assert readings[0].t < 1.0, "the first reading carries the new epoch's time"
+    assert not m.settled, "the window restarts; the old epoch's statistics are not carried"
+
+
 def test_the_index_falls_as_the_coupling_weakens():
     readings = [feed(coupled(120, depth)).modulation for depth in (0.9, 0.5, 0.2, 0.0)]
     assert readings == sorted(readings, reverse=True), readings
@@ -327,6 +347,28 @@ def test_two_flat_channels_do_not_read_a_perfect_lock():
     zero = np.zeros(int(30 * RATE))
     metric = feed_locking(zero, zero)
     assert metric.locked < 0.1, f"two flat channels must not lock, got {metric.locked:.3f}"
+
+
+def test_locking_restarts_after_an_index_reset():
+    """Like the coupling metric: a device-time reset held the old output cursor, so no reading came out
+    until the index climbed back, and the phasor averaged across the epoch boundary. A genuine index gap
+    now restarts the cursor and the accumulated phasor."""
+    m = LockingMetric(LOCK_SPECS, Locking(ALPHA, (0, 1)), window_seconds=5.0, output_hz=10.0)
+    a, b = locked_pair(30, 0.9)
+    base, size = 5_000_000, 250
+    for i in range(0, len(a) - size + 1, size):
+        m.feed(Block(0, base + i, np.asarray(a[i:i + size]), SPEC))
+        m.feed(Block(1, base + i, np.asarray(b[i:i + size]), LOCK_SPECS[1]))
+    assert m.settled
+
+    a2, b2 = locked_pair(8, 0.9, seed=1)
+    readings = []
+    for i in range(0, len(a2) - size + 1, size):
+        m.feed(Block(0, i, np.asarray(a2[i:i + size]), SPEC))
+        readings += m.feed(Block(1, i, np.asarray(b2[i:i + size]), LOCK_SPECS[1]))
+    assert readings, "output resumes on the reset epoch, not after the old cursor catches up"
+    assert readings[0].t < 1.0, "the first reading carries the new epoch's time"
+    assert not m.settled, "the window restarts; the old epoch's phasor is not carried"
 
 
 def test_the_plain_locking_value_is_biased_and_the_bias_is_the_window_not_the_signal():

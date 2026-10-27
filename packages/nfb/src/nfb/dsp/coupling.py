@@ -280,6 +280,7 @@ class CouplingMetric:
 
         self.stride = max(1, int(round(self.rate_hz / output_hz)))
         self._next_index: int | None = None
+        self._expected: int | None = None
         self.value = 0.0
         self.seconds = 0.0
 
@@ -372,12 +373,29 @@ class CouplingMetric:
         return (f"{self.coupling.describe()} · {MEASURES[self.measure]} · "
                 f"averaged over {self.window_seconds:g} s")
 
+    def _restart(self, start: int) -> None:
+        """On a gap or epoch reset, drop the filters and the accumulated statistics, and re-anchor the cursor
+        so it does not withhold output until a reset stream catches up. A genuine index gap only — a held
+        rejected block keeps indices contiguous and does not reach here. The aligner re-anchored itself."""
+        for env in (self.slow, self.fast, *self.flanks):
+            env.reset()
+        self.live = _PhaseHistogram(self._decay)
+        self.surrogates = [_PhaseHistogram(self._decay) for _ in SURROGATE_SHIFTS]
+        self._history = np.zeros(max(self._lags) + 1) if self._lags else np.zeros(0)
+        self._filled = 0
+        self._slow_power = self._flank_power = 0.0
+        self._next_index = start
+        self.seconds = 0.0
+
     def feed(self, block: Block, count: bool = True) -> list[Reading]:
         """`count=False` filters the block without letting it into the statistics — see below."""
         got = self.aligner.push(block)
         if got is None:
             return []
         start, runs = got
+        if self._expected is not None and start != self._expected:
+            self._restart(start)
+        self._expected = start + len(runs[0])
         by_channel = dict(zip(self.coupling.channels, runs))
         phase_in = by_channel[self.coupling.phase_channel]
         amplitude_in = by_channel[self.coupling.amplitude_from]
@@ -544,6 +562,7 @@ class LockingMetric:
 
         self.stride = max(1, int(round(self.rate_hz / output_hz)))
         self._next_index: int | None = None
+        self._expected: int | None = None
         self.value = 0.0
         self.seconds = 0.0
 
@@ -635,11 +654,27 @@ class LockingMetric:
         return (f"{self.locking.describe()} · averaged over {self.window_seconds:g} s, "
                 f"about {self.samples:.0f} independent estimates")
 
+    def _restart(self, start: int) -> None:
+        """On a gap or epoch reset, drop the filters and the accumulated phasor, and re-anchor the cursor so
+        it does not withhold output until a reset stream catches up. A genuine index gap only — a held
+        rejected block keeps indices contiguous and does not reach here. The aligner re-anchored itself."""
+        for env in self.filters.values():
+            env.reset()
+        self._phasor = 0.0 + 0.0j
+        self._signs = self._weight = 0.0
+        self._history = []
+        self._surrogates = [0.0 + 0.0j for _ in SURROGATE_SHIFTS]
+        self._next_index = start
+        self.seconds = 0.0
+
     def feed(self, block: Block, count: bool = True) -> list[Reading]:
         got = self.aligner.push(block)
         if got is None:
             return []
         start, runs = got
+        if self._expected is not None and start != self._expected:
+            self._restart(start)
+        self._expected = start + len(runs[0])
         a, b = (self.filters[c].analytic(v) for c, v in zip(self.locking.pair, runs))
         phase_a, phase_b = np.angle(a), np.angle(b)
         unit = np.exp(1j * (phase_a - phase_b))

@@ -75,6 +75,28 @@ def test_lockin_band_power_reanchors_after_an_index_reset():
     assert out[0].t == pytest.approx(0.0, abs=1e-6), "the first reading carries the new epoch's time"
 
 
+def test_synchrony_metric_reanchors_after_an_index_reset():
+    """SynchronyMetric had no discontinuity handling. After an epoch reset to index 0 its output cursor
+    withheld every reading until the index climbed back, and the two lock-ins and the running phasor bled
+    across the gap. It now re-anchors like the single-channel estimators; the aligner re-anchors itself."""
+    reward = Reward(10.0, 1.0, "sum")
+    metric = SynchronyMetric(SPECS, (0, 1), reward, output_hz=20.0)
+
+    def feed_at(base, seconds):
+        a, b = sine(10.0, seconds, amp=25.0), sine(10.0, seconds, amp=25.0, phase=0.3)
+        ia, ib = counts(a, SCALE), counts(b, SCALE)
+        out = []
+        for i in range(0, len(ia) - 8 + 1, 8):
+            out += metric.feed(Block(0, base + i, tuple(ia[i:i + 8].tolist()), SPECS[0]))
+            out += metric.feed(Block(1, base + i, tuple(ib[i:i + 8].tolist()), SPECS[1]))
+        return out
+
+    feed_at(2_000_000, 8.0)                 # drive the cursor far past index 0
+    out = feed_at(0, 1.0)                    # the epoch restarts at index 0
+    assert out, "readings resume after the reset, not after the old cursor catches up"
+    assert out[0].t < 0.5, "the first reading carries the new epoch's time"
+
+
 def test_lockin_band_power_ignores_a_block_from_another_channel():
     """The single-channel estimator had no channel guard its three siblings have, so fed a stream it would
     mix channels into one lock-in. A block for another channel is now ignored."""
