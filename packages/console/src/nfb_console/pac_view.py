@@ -552,13 +552,10 @@ class CouplingSession(TrainingSession):
         """Train this coupling or merely watch it. The guard follows, since a monitor cannot pay out."""
         tgt.role = role
         tgt.hit_rate_override = REWARD_HIT_RATE
-        for channel in self.instrument_channels(tgt):
-            if role == "monitor":
-                self.guards.pop((channel, self.band_key(GUARD)), None)
-                self.guard_kinds.pop(channel, None)
-                for x in [y for y in self.targets if y.band == GUARD and y.source == channel]:
-                    self.remove_target(x)
-            else:
+        # Add a guard where this coupling now earns; `_drop_orphan_guards` removes the rest. A manual pop
+        # here dropped a guard another earning instrument on the same channel still needs.
+        if role != "monitor":
+            for channel in self.instrument_channels(tgt):
                 self.add_guard(channel)
         self._drop_orphan_guards()
         self._order_guards()
@@ -728,6 +725,19 @@ class CouplingSession(TrainingSession):
         return [(a, b) for i, a in enumerate(chans) for b in chans[i + 1:]
                 if (a, b) not in taken]
 
+    def _carry_settings(self, new: Target | None, old: Target | None) -> None:
+        """Carry an instrument's *settings* across a rebuild, but not its readings. The estimator, and even
+        the channel count, can differ, so the window holds a different quantity and `Target.inherit` must
+        not run. The threshold, the mode and anything typed by hand are still the operator's choices."""
+        if new is None or old is None:
+            return
+        new.mode, new.threshold, new._settled = old.mode, old.threshold, old._settled
+        new.reach_threshold = old.reach_threshold
+        if old.aim_by_hand:
+            new.hit_rate_override, new.aim_by_hand = old.hit_rate_override, True
+        if old.reach_by_hand:
+            new.reach_rate, new.reach_by_hand = old.reach_rate, True
+
     def adopt_targets(self, previous) -> None:
         """**The instruments are adopted by their settings, not as objects, and this crashed first.**
 
@@ -752,10 +762,12 @@ class CouplingSession(TrainingSession):
             # Which one is trained is a setting like any other, and losing it put four rewards on the
             # screen where the operator had left one.
             was = next((x for x in previous.targets if previous.key_for(x) == key), None)
-            self.add_coupling(metric.coupling,
-                              role="monitor" if (was is not None and was.monitor) else "reward")
-        for metric in getattr(previous, "lockings", {}).values():
-            self.add_locking(metric.locking)
+            new = self.add_coupling(metric.coupling,
+                                    role="monitor" if (was is not None and was.monitor) else "reward")
+            self._carry_settings(new, was)
+        for key, metric in getattr(previous, "lockings", {}).items():
+            was = next((x for x in previous.targets if previous.key_for(x) == key), None)
+            self._carry_settings(self.add_locking(metric.locking), was)
         if not self.couplings and not self.lockings:
             self.open_default()
         self.focus_coupling = (previous.focus_coupling

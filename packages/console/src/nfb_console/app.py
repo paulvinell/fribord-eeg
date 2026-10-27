@@ -393,12 +393,12 @@ class Console:
                 pupil_choice=self.pupil_choice,
                 pupil_runner=self.pupil,
             )
-            if previous is not None:
+            if previous is not None and previous.protocol.code == protocol.code:
+                # Same protocol: carry the live settings, which are newer than the file and overwrite it.
                 self.session.adopt(previous)
             else:
-                # Only with nothing to adopt: a live session's settings are more recent than the file, and
-                # `adopt` carries them wholesale, so restoring first would be overwritten and restoring after
-                # would undo a stop that was meant to keep them.
+                # A switch to another protocol: `adopt` carries only same-protocol state, so restore the
+                # new protocol's own saved settings. Without this gate the switch came up on raw defaults.
                 prefs.restore(protocol.code, self.session)
             threading.Thread(target=self.session.run, daemon=True,
                              name=f"{protocol.code.lower()}-feed").start()

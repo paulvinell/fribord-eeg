@@ -5722,6 +5722,51 @@ def test_changing_the_channel_count_on_the_coupling_screen_does_not_crash():
         old.stop()
 
 
+def test_a_pac_instrument_keeps_its_settings_across_a_channel_change():
+    """`adopt_targets` rebuilds the couplings, so without carrying the per-target settings a reward whose
+    aim was typed by hand, or whose threshold was fixed, went back to the automatic default the moment the
+    channel count changed. The readings do not come across — the estimator is new — but the choices do."""
+    from nfb_console import pac_view
+
+    old = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=2)
+    try:
+        tgt = next(t for t in old.targets if old.key_for(t) in old.couplings and not t.monitor)
+        tgt.set_aim(0.2)
+        tgt.mode, tgt.threshold, tgt._settled = "fixed", 0.42, True
+
+        new = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=2)
+        try:
+            new.adopt_targets(old)
+            moved = next(t for t in new.targets if new.key_for(t) == old.key_for(tgt))
+            assert moved.aim_by_hand and moved.hit_rate_override == pytest.approx(0.2)
+            assert moved.mode == "fixed" and moved.threshold == pytest.approx(0.42) and moved._settled
+        finally:
+            new.stop()
+    finally:
+        old.stop()
+
+
+def test_setting_a_pac_coupling_to_monitor_keeps_a_guard_a_locking_still_needs():
+    """`set_role` used to pop the guard for every channel the coupling read, then rebuild the orphans from
+    what was left — so a channel a locking still guards lost its guard, because the pop had already removed
+    it from the set the rebuild scans. Now the pop is gone and `_drop_orphan_guards` alone decides."""
+    from nfb_console import pac_view
+
+    session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=2)
+    try:
+        coupling = next(t for t in session.targets
+                        if session.key_for(t) in session.couplings and t.source == 0)
+        assert not coupling.monitor
+        assert session.guard_kinds.get(0) == "fast", "an earning coupling takes the strict guard"
+
+        session.set_role(coupling, "monitor")
+        assert any(t.band == pac_view.GUARD and t.source == 0 for t in session.targets), \
+            "the locking on ch0 still needs ch0 guarded"
+        assert session.guard_kinds.get(0) == "held", "and the gentler kind, now nothing earns on it"
+    finally:
+        session.stop()
+
+
 def test_a_target_with_no_band_has_no_response_time_rather_than_raising():
     """`Target.band` documents None as a state — a coupling index, a difference between two targets — so
     the shared answer has to be "no burst at a centre frequency to answer about", not an AttributeError
