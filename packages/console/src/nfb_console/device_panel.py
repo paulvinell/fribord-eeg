@@ -494,7 +494,13 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
     connect_btn.on_click = toggle_connect
     test_btn.on_click = toggle_test
 
+    # Cancel the previous device screen's poll before starting this one, or one leaks per visit. The event
+    # lives on `page` because each `view()` builds a fresh closure.
+    previous_poll = getattr(page, "_device_poll_stop", None)
+    if previous_poll is not None:
+        previous_poll.set()
     stop_polling = threading.Event()
+    page._device_poll_stop = stop_polling
 
     async def poll() -> None:
         """Contact readings change continuously while testing; nothing else here does.
@@ -669,14 +675,20 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
         refresh()
 
     def commit_address(_e=None) -> None:
-        heart.address = str(heart_address.value or "").strip()
+        value = str(heart_address.value or "").strip()
+        if value == heart.address:
+            return              # a blur on an unchanged field must not release and reattach the source
+        heart.address = value
         set_heart_kind("strap" if heart.address else heart.kind)
 
     heart_address.on_submit = commit_address
     heart_address.on_blur = commit_address
 
     def commit_port(_e=None) -> None:
-        heart.port = str(heart_port.value or "").strip()
+        value = str(heart_port.value or "").strip()
+        if value == heart.port:
+            return
+        heart.port = value
         set_heart_kind("usb" if heart.port else heart.kind)
 
     heart_port.on_submit = commit_port
@@ -819,7 +831,10 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
         refresh()
 
     def commit_mendi_address(_e=None) -> None:
-        headband.address = str(mendi_address.value or "").strip()
+        value = str(mendi_address.value or "").strip()
+        if value == headband.address:
+            return
+        headband.address = value
         set_mendi_kind("headband" if headband.address else headband.kind)
 
     mendi_address.on_submit = commit_mendi_address
