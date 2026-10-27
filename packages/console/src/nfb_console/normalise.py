@@ -111,6 +111,8 @@ class FixedRange(Strategy):
     """
 
     def __init__(self, low: float = 0.0, high: float = 1.0):
+        if not (math.isfinite(low) and math.isfinite(high)):
+            raise ValueError("the range endpoints must be finite numbers")
         if high <= low:
             raise ValueError("high must exceed low")
         self.low = float(low)
