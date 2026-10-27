@@ -492,7 +492,9 @@ class Device:
                 self._dev.request(optima.CMD["START_TEST"])
             else:
                 self._dev.start_measurement()
-            self._stop.clear()
+            # A fresh Event per reader, not a cleared shared one: a reader that outlived its join must not
+            # be un-cancelled and allowed to publish into this new epoch.
+            self._stop = threading.Event()
             self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                             name="device-reader")
             self._reader.start()
@@ -536,18 +538,23 @@ class Device:
 
     def _read_loop(self) -> None:
         """Reads and fans out. Deliberately does nothing else — every line here can delay a read."""
+        stop = self._stop          # this reader's own cancel signal; _start installs a fresh one for the next
         testing = self.status.mode is Mode.TESTING
         plan = optima.plan_channels(self.config, test_mode=testing) if testing else None
-        while not self._stop.is_set():
+        while not stop.is_set():
             try:
                 msg = self._dev.read_message()
             except TimeoutError:
                 continue
             except Exception as exc:
+                if stop.is_set():
+                    return         # asked to stop; a failing read is expected, not the new epoch's fault
                 self._fail(exc)
                 for sub in list(self._subs):
                     sub._end_epoch()
                 return
+            if stop.is_set():
+                return             # stopped while the read was in flight: do not publish into a new epoch
             for sub in list(self._subs):
                 sub._offer(msg.code, msg.payload)
             if testing and msg.code == optima.NOT_DATA:
