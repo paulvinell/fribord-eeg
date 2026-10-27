@@ -75,9 +75,13 @@ class ChannelBuffer:
         vals = np.asarray(block.samples, dtype=np.float64) * self.spec.scale
         self._samples = np.concatenate((self._samples, vals))
         self._valid = np.concatenate((self._valid, np.full(len(vals), block.valid)))
+
+    def trim_to_capacity(self) -> None:
+        """Bound the retained tail to `capacity`, oldest first. The windower calls this *after* draining,
+        not during a push: trimming in push used to discard the front of a single large block before the
+        windower could form windows from it."""
         if len(self._samples) > self.capacity:
-            drop = len(self._samples) - self.capacity
-            self._discard(drop)
+            self._discard(len(self._samples) - self.capacity)
 
     def _discard(self, n: int) -> None:
         self._samples = self._samples[n:]
@@ -117,6 +121,10 @@ class Windower:
         self.buffer = ChannelBuffer(spec, capacity_seconds)
         self.size = size
         self.hop = hop if hop is not None else size
+        if self.hop <= 0:
+            raise ValueError("window hop must be positive")
+        if self.buffer.capacity < size:
+            raise ValueError(f"window of {size} samples cannot fit a buffer of {self.buffer.capacity}")
         self._next: int | None = None
 
     @property
@@ -139,6 +147,7 @@ class Windower:
             out.append(w)
             self._next += self.hop
             self.buffer.discard_before(self._next)
+        self.buffer.trim_to_capacity()          # bound the tail only after every window is taken
         return out
 
 
@@ -153,12 +162,19 @@ class AlignedWindower:
 
     def __init__(self, specs: dict[int, ChannelSpec], size: int, hop: int | None = None,
                  capacity_seconds: float = 60.0):
+        if size <= 0:
+            raise ValueError("window size must be positive")
         rates = {s.rate_hz for s in specs.values()}
         if len(rates) > 1:
             raise ValueError(f"aligned windows need one sample rate, got {sorted(rates)}")
         self.buffers = {i: ChannelBuffer(s, capacity_seconds) for i, s in specs.items()}
         self.size = size
         self.hop = hop if hop is not None else size
+        if self.hop <= 0:
+            raise ValueError("window hop must be positive")
+        for b in self.buffers.values():
+            if b.capacity < size:
+                raise ValueError(f"window of {size} samples cannot fit a buffer of {b.capacity}")
         self._next: int | None = None
 
     def push(self, block: Block) -> list[dict[int, Window]]:
@@ -181,4 +197,6 @@ class AlignedWindower:
             self._next += self.hop
             for b in self.buffers.values():
                 b.discard_before(self._next)
+        for b in self.buffers.values():
+            b.trim_to_capacity()                # bound each tail only after every window is taken
         return out

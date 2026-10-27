@@ -125,6 +125,36 @@ def test_aligned_windows_reject_mixed_rates():
         AlignedWindower(specs, size=64)
 
 
+def test_a_large_block_does_not_drop_pending_windows():
+    """Capacity was trimmed inside push, before the windower drained, so a single push past capacity
+    discarded the front samples before they could form windows. Trimming now happens after the drain, so a
+    big block yields the same windows as the same samples in small blocks."""
+    x = sine(10, seconds=3.2)                               # 800 samples at 250 Hz
+    small = Windower(SPEC, size=20, hop=20, capacity_seconds=0.4)       # 100-sample buffer
+    got_small = [w for b in blocks(x, size=8) for w in small.push(b)]
+    big = Windower(SPEC, size=20, hop=20, capacity_seconds=0.4)
+    got_big = big.push(Block(SPEC.index, 0, tuple(int(v) for v in x), SPEC, state=1))
+    assert len(got_big) == len(got_small) == 40, "a 800/20 split is 40 windows, however it is packaged"
+
+
+def test_invalid_window_parameters_are_refused():
+    """Pure API hardening: in-app callers floor these at 1, but a zero hop span a window forever."""
+    with pytest.raises(ValueError):
+        Windower(SPEC, size=20, hop=0)
+    with pytest.raises(ValueError):
+        AlignedWindower({0: SPEC}, size=0)
+    with pytest.raises(ValueError):
+        AlignedWindower({0: SPEC}, size=20, hop=0)
+
+
+def test_a_window_larger_than_the_buffer_is_refused():
+    """A window the buffer can never hold emitted nothing yet was accepted silently. It now fails loud."""
+    with pytest.raises(ValueError):
+        Windower(SPEC, size=int(61 * RATE))                # past the 60 s default capacity
+    with pytest.raises(ValueError):
+        WindowMetric(SPEC, "x", lambda w: 0.0, window_seconds=61.0)
+
+
 # --- continuous band power ----------------------------------------------------------------
 
 def test_band_power_recovers_the_rms_of_a_sine_in_band():
@@ -225,6 +255,29 @@ def test_lempel_ziv_is_near_zero_for_a_constant_and_near_one_for_noise():
 
 def test_sample_entropy_of_a_constant_is_zero():
     assert sample_entropy(np.ones(100)) == 0.0
+
+
+def test_sample_entropy_of_a_constant_is_zero_with_an_explicit_tolerance_too():
+    """A constant is maximally predictable, so entropy is 0 whatever `r` is. With an explicit positive `r`
+    it used to count unequal template populations and return a positive 'complexity'."""
+    assert sample_entropy(np.ones(500), r=0.5) == 0.0
+    assert sample_entropy(np.ones(500)) == 0.0
+
+
+def test_two_flat_channels_make_no_coherence_reading_not_a_valid_nan():
+    """Coherence of two zero-power windows is 0/0 → NaN, which was emitted with valid=True. A non-finite
+    result is now dropped, so a downstream threshold is never compared against NaN."""
+    specs = {0: SPEC, 1: ChannelSpec(1, RATE, "uV", 1.0)}
+    pm = PairMetric(specs, "coh",
+                    lambda g: coherence(g[0].samples, g[1].samples, RATE, ALPHA),
+                    window_seconds=1.0)
+    zero = np.zeros(int(2 * RATE))
+    out = []
+    with np.errstate(invalid="ignore", divide="ignore"):   # coherence computes 0/0 here, by design
+        for b0, b1 in zip(blocks(zero, specs[0]), blocks(zero, specs[1])):
+            pm.feed(b0)
+            out += pm.feed(b1)
+    assert all(np.isfinite(r.value) for r in out), "no NaN-but-valid reading is emitted"
 
 
 def test_window_metric_reports_complexity_over_windows():

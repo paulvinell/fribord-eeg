@@ -190,6 +190,8 @@ class WindowMetric:
                 value = float(self.fn(w))
             except (ValueError, FloatingPointError):
                 continue
+            if not np.isfinite(value):
+                continue            # a 0/0 (e.g. coherence of two flat windows) is no reading, not a valid NaN
             out.append(Reading(self.name, value, w.centre_seconds, self.spec.index,
                                self.unit, w.valid))
         return out
@@ -236,6 +238,8 @@ class PairMetric:
                 value = float(self.fn(group))
             except (ValueError, FloatingPointError):
                 continue
+            if not np.isfinite(value):
+                continue            # a 0/0 (coherence of two flat windows) is no reading, not a valid NaN
             any_window = next(iter(group.values()))
             out.append(Reading(self.name, value, any_window.centre_seconds, self.channels,
                                self.unit, all(w.valid for w in group.values())))
@@ -307,10 +311,14 @@ def sample_entropy(x: np.ndarray, m: int = 2, r: float | None = None) -> float:
     n = len(x)
     if n < m + 2:
         raise ValueError(f"need at least {m + 2} samples")
+    # A constant signal is perfectly predictable: entropy 0 whatever `r` is (an explicit positive `r` on a
+    # constant otherwise returns positive, from unequal template populations).
+    if float(x.std()) == 0.0:
+        return 0.0
     if r is None:
         r = 0.2 * float(x.std())
     if r <= 0:
-        return 0.0                       # a constant signal is perfectly predictable
+        return 0.0
 
     def matches(length: int) -> int:
         emb = np.lib.stride_tricks.sliding_window_view(x, length)
