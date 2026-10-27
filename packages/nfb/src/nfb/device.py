@@ -119,8 +119,11 @@ class Subscription:
         """
         return self.device.config
 
-    def _offer(self, code: int, payload: bytes) -> None:
+    def _offer(self, code: int, payload: bytes, arrival: float | None = None) -> None:
         """Queue a frame, evicting the *oldest* on overflow.
+
+        `arrival` is the host time the frame was read, carried through to the recorder so a recording's
+        timestamps reflect when frames *arrived*, not when a stalled writer got round to them.
 
         The choice of end matters more than it looks. Dropping the newest — which this did — means a
         consumer that once fell behind is served an ever-older stream for the rest of the session: the
@@ -131,7 +134,7 @@ class Subscription:
         what a Gap means. An `EpochEnd` sentinel is never evicted — losing it would leave an iterator
         waiting on an epoch that already ended.
         """
-        self._push((code, payload))
+        self._push((code, payload, arrival))
 
     def _push(self, item: object) -> None:
         while True:
@@ -215,7 +218,7 @@ class Subscription:
             if isinstance(item, EpochEnd):
                 self._decoder = None
                 return
-            code, payload = item
+            code, payload, _arrival = item
             yield from self._decoder.feed(code, payload)
 
     def close(self) -> None:
@@ -578,8 +581,9 @@ class Device:
                 return
             if stop.is_set():
                 return             # stopped while the read was in flight: do not publish into a new epoch
+            arrival = time.monotonic()          # when the frame arrived, for the recorder's timestamps
             for sub in list(self._subs):
-                sub._offer(msg.code, msg.payload)
+                sub._offer(msg.code, msg.payload, arrival)
             if msg.code == optima.NOT_EVENT and msg.payload:
                 # The device can end the stream itself, or report a fault. Act on it in the reader, not via
                 # stop(), which would join this very thread and deadlock.

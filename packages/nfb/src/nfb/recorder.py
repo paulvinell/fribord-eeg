@@ -160,10 +160,13 @@ class Recorder:
                     self._write_notes()
             else:
                 t0: float | None = None
-                for code, payload in self._sub.frames(timeout=self.poll_seconds):
+                for code, payload, arrival in self._sub.frames(timeout=self.poll_seconds):
+                    # Arrival time, not the dequeue time: a disk stall backs the queue up, and stamping at
+                    # dequeue records the backlog at one instant and replays it as a pause then a burst.
+                    now = arrival if arrival is not None else time.monotonic()
                     if t0 is None:
-                        t0 = time.monotonic()
-                    self._writer.write(code, payload, time.monotonic() - t0)
+                        t0 = now
+                    self._writer.write(code, payload, now - t0)
                     self._write_notes()
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"

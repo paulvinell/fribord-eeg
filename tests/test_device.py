@@ -846,7 +846,8 @@ def test_a_backed_up_queue_serves_the_present_not_the_past(monkeypatch):
         sub._offer(0x40, bytes([n]))
     assert sub.dropped == 6
     queued = [sub.queue.get_nowait() for _ in range(sub.queue.qsize())]
-    assert [p[0] for _, p in queued] == [6, 7, 8, 9], "the newest frames survive, not the oldest"
+    assert [payload[0] for _code, payload, _arrival in queued] == [6, 7, 8, 9], \
+        "the newest frames survive, not the oldest"
 
     for n in range(4):
         sub._offer(0x40, bytes([n]))
@@ -856,4 +857,17 @@ def test_a_backed_up_queue_serves_the_present_not_the_past(monkeypatch):
     from nfb.device import EpochEnd
 
     assert isinstance(queued[-1], EpochEnd), "the sentinel survives a full queue"
+    d.close()
+
+
+def test_frames_carry_the_arrival_time_not_the_dequeue_time(monkeypatch):
+    """The recorder stamped a frame when it dequeued it, so a disk stall recorded a backlog at one instant
+    and replayed it as a pause then a burst. The read time now threads through the subscription instead."""
+    d, _ = connected(monkeypatch)
+    sub = d.subscribe("rec")
+    sub._offer(optima.NOT_DATA, b"\x00", 10.0)
+    sub._offer(optima.NOT_DATA, b"\x01", 10.5)
+    sub._end_epoch()
+    arrivals = [arrival for _code, _payload, arrival in sub.frames(timeout=0.1)]
+    assert arrivals == [10.0, 10.5], "the read time reaches the consumer, not the dequeue time"
     d.close()
