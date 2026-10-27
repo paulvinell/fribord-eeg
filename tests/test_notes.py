@@ -36,10 +36,14 @@ def test_a_good_night_costs_almost_nothing_and_a_bad_minute_survives():
     assert back[-1] == (0.0, 1.0)
 
 
-def test_the_file_names_itself_after_the_recording_whatever_its_suffix(tmp_path):
-    assert notes_path(tmp_path / "tuesday.edf").name == "tuesday.notes.jsonl"
-    assert notes_path(tmp_path / "tuesday.jsonl.gz").name == "tuesday.notes.jsonl", \
-        "the whole suffix chain, not just the last one"
+def test_the_companion_keeps_the_recordings_own_suffix_so_two_formats_do_not_collide(tmp_path):
+    """A native and an EDF capture with the same stem must get distinct companions. Collapsing both to a
+    bare stem made them share `tuesday.notes.jsonl`, and the second written overwrote the first's metadata
+    — for EDF, the only carrier of the per-channel states the format cannot hold."""
+    assert notes_path(tmp_path / "tuesday.edf").name == "tuesday.edf.notes.jsonl"
+    assert notes_path(tmp_path / "tuesday.jsonl.gz").name == "tuesday.jsonl.gz.notes.jsonl"
+    assert notes_path(tmp_path / "tuesday.edf") != notes_path(tmp_path / "tuesday.jsonl.gz"), \
+        "two formats of one session no longer share, and overwrite, one companion"
 
 
 def test_a_rewrite_that_is_killed_leaves_the_previous_file_whole(tmp_path):

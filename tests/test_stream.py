@@ -178,6 +178,42 @@ def test_truncated_recording_reads_up_to_the_cut(tmp_path):
     assert len(blocks) == 4 * 4               # four frames, four channels, nothing raised
 
 
+def test_a_crash_truncated_gzip_reads_up_to_the_cut(tmp_path):
+    """The default format is `.jsonl.gz`. A crash leaves the gzip trailer missing, which used to raise
+    EOFError out of the reader — defeating the promise that a truncated recording reads up to the cut.
+    Removing the trailer now returns the frames already decoded rather than raising."""
+    cfg = eeg_config()
+    path = tmp_path / "s.jsonl.gz"
+    with SessionWriter(path, SessionHeader(config=cfg)) as w:
+        for i in range(4):
+            w.write(optima.NOT_DATA, frame(i * GROUPS_PER_FRAME, optima.plan_channels(cfg)))
+    path.write_bytes(path.read_bytes()[:-8])      # drop the gzip CRC+size trailer, as a crash would
+    blocks = list(ReplaySource(path).blocks())    # must not raise
+    assert len(blocks) == 4 * 4, "every whole frame before the cut is still read"
+
+
+def test_a_data_payload_with_no_enabled_channels_does_not_hang():
+    """Replay accepts an all-disabled channel configuration; a following data payload used to enter a loop
+    that never advanced its sample index and spun a worker for ever. Only a corrupt or hand-edited
+    recording can reach it, but it must return rather than hang."""
+    cfg = eeg_config()
+    plan = optima.plan_channels(cfg)
+    for c in plan:
+        c.enabled = False
+    payload = struct.pack("<HH", 0, 0) + struct.pack("<4h", 1, 2, 3, 4)
+    df = optima.decode_data(payload, plan)        # must return, not spin
+    assert df.samples == {}, "no enabled channel, so nothing is decoded"
+
+
+def test_looping_a_header_only_recording_does_not_spin(tmp_path):
+    """A header-only recording has no frames or pacing. Looping replay reopened it and repeated with no
+    yield and no sleep — a busy loop. It now ends when a whole pass produced nothing."""
+    cfg = eeg_config()
+    path = tmp_path / "empty.jsonl"
+    SessionWriter(path, SessionHeader(config=cfg)).close()    # header only
+    assert list(ReplaySource(path, loop=True).blocks()) == [], "an empty loop ends rather than spinning"
+
+
 def test_unknown_format_is_rejected(tmp_path):
     path = tmp_path / "s.jsonl"
     path.write_text('{"format": "nfb-session/99", "config": "00"}\n')

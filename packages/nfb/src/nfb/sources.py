@@ -167,9 +167,11 @@ class ReplaySource:
         played = 0.0                     # seconds of material already played, across loops
         while not self._stop:
             last = 0.0
+            produced = False
             for code, payload, elapsed in self.reader.frames():
                 if self._stop:
                     return
+                produced = True
                 if elapsed is not None:
                     last = elapsed
                     if self.realtime:
@@ -177,8 +179,8 @@ class ReplaySource:
                         if behind > 0:
                             time.sleep(behind)
                 yield from self.decoder.feed(code, payload)
-            if not self.loop:
-                return
+            if not self.loop or not produced:
+                return          # a header-only recording has no frames; looping it would spin forever
             played += last
             # A loop is a splice, not a hole: without the rebase the recording's phase counter
             # restarting reads as a gap of ~63k groups, and every filter downstream resets and

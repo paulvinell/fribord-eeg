@@ -33,16 +33,14 @@ other."""
 
 
 def notes_path(recording: Path | str) -> Path:
-    """`<stem>.notes.jsonl` beside the recording, whatever the recording's own suffix chain is."""
+    """`<recording name>.notes.jsonl` beside the recording, keeping the recording's own suffix.
+
+    The suffix is kept so a native and an EDF capture with the same stem (`x.jsonl.gz` and `x.edf`) get
+    distinct companions. Stripping it collapsed both to `x.notes.jsonl`, and the second written silently
+    overwrote the first's session, alarm and quality metadata — which for EDF is the only carrier of the
+    per-channel states the format cannot hold."""
     path = Path(recording)
-    stem = path.name
-    for suffix in (".jsonl.gz", ".edf", ".jsonl"):
-        if stem.endswith(suffix):
-            stem = stem[:-len(suffix)]
-            break
-    else:
-        stem = path.stem
-    return path.with_name(stem + SUFFIX)
+    return path.with_name(path.name + SUFFIX)
 
 
 def encode_cells(cells) -> list[list]:

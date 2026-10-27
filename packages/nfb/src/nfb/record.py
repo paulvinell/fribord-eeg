@@ -119,14 +119,19 @@ class SessionReader:
         Truncated trailing lines are skipped rather than raising: a recording interrupted by a
         crash or a pulled cable is still worth reading up to the cut.
         """
+        import zlib
         with _open(self.path, "r") as fh:
             fh.readline()
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    return
-                yield rec["c"], bytes.fromhex(rec["p"]), rec.get("t")
+            try:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        return
+                    yield rec["c"], bytes.fromhex(rec["p"]), rec.get("t")
+            except (EOFError, gzip.BadGzipFile, zlib.error, OSError):
+                # A crash-truncated .gz decompresses part-way then raises; yield up to the cut.
+                return

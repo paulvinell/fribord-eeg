@@ -94,6 +94,9 @@ def decode_data(payload: bytes, plan: list[ChannelPlan], phase: int | None = Non
     values = struct.unpack(f"<{len(body) // 2}h", body)
 
     samples: dict[int, list[int]] = {c.index: [] for c in plan if c.enabled}
+    # No enabled channel means the inner loop consumes nothing and the while spins forever on a payload.
+    if not any(c.enabled for c in plan):
+        return DataFrame(frame_phase, sum_state, channel_states, samples, cur)
     i = 0
     while i < len(values):
         for c in plan:
