@@ -241,9 +241,11 @@ def test_a_failed_start_does_not_leave_a_false_running_mode(monkeypatch):
         real()
 
     fake.start_measurement = flaky
+    epoch = d.status.epoch
     with pytest.raises(optima.ProtocolError):
         d.start_measurement()
     assert d.status.mode is Mode.IDLE, "a start that never happened must not read as measuring"
+    assert d.status.epoch == epoch, "and it leaves the epoch where it was"
     off[0] = False
     d.start_measurement()                   # the retry must not no-op on a stale mode
     assert d.status.mode is Mode.MEASURING

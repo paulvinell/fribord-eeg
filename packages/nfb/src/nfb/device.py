@@ -510,9 +510,10 @@ class Device:
                 else:
                     self._dev.start_measurement()
             except Exception:
-                # The device never entered the mode, so the host must not claim it did: the mode guard
-                # above would then make the next start a no-op and leave the device stranded with no reader.
+                # A start that did not happen changes nothing: undo the mode and the epoch bump, or the mode
+                # guard above makes the next start a no-op and strands the device with no reader.
                 self.status.mode = Mode.IDLE
+                self.status.epoch -= 1
                 raise
             # A fresh Event per reader, not a cleared shared one: a reader that outlived its join must not
             # be un-cancelled and allowed to publish into this new epoch.
