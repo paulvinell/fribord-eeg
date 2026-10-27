@@ -95,6 +95,45 @@ def test_the_samples_survive_the_round_trip_unchanged(tmp_path):
     assert np.array_equal(got, wave), "16-bit counts in, the same counts out — no requantisation"
 
 
+def test_arming_mid_session_exports_from_the_first_block_not_from_zero(tmp_path):
+    """A recording armed partway through a session starts at a large stream index. Treating that index as
+    'samples before me' zero-filled from 0 — forty-one seconds of leading zeros for one second of signal,
+    the timestamp no longer matching the data. The export now starts from the first block it sees."""
+    path = tmp_path / "mid.edf"
+    spec_map = specs(250.0)
+    spec = spec_map[0]
+    with EDFWriter(path, spec_map) as writer:
+        for start in range(10000, 10250, 8):          # armed 40 s in, one second of signal
+            writer.feed(Block(0, start, tuple([1000] * min(8, 10250 - start)), spec))
+    got = read_samples(path)[0]
+    assert len(got) == 250, "one second exported, not forty-one"
+    assert set(int(v) for v in got) == {1000}, "real signal, no leading zeros from index 0"
+
+
+def test_a_short_capture_is_kept_and_a_lagged_channel_loses_no_record(tmp_path):
+    """EDF close only wrote records every channel fully covered, so the trailing partial record was lost:
+    a sub-second capture reported zero records and got deleted as empty, and a fast channel buffered past
+    the flush boundary while a slow one lagged lost a whole record. The final drain pads and writes it."""
+    short = tmp_path / "short.edf"
+    spec_map = specs(250.0)
+    with EDFWriter(short, spec_map) as writer:
+        for start in range(0, 125, 8):                # half a second: less than one 1 s record
+            writer.feed(Block(0, start, tuple([7] * min(8, 125 - start)), spec_map[0]))
+    assert read_header(short)["records"] == 1, "a sub-second capture is one padded record, not zero"
+    got = read_samples(short)[0]
+    assert [int(v) for v in got[:125]] == [7] * 125 and set(int(v) for v in got[125:]) == {0}
+
+    lag = tmp_path / "lag.edf"
+    sm = specs(250.0, 62.5)                            # record_seconds 2, per_record 500 / 125
+    with EDFWriter(lag, sm) as writer:
+        for start in range(0, 1100, 8):               # fast channel runs two records' worth ahead
+            writer.feed(Block(0, start, tuple([3] * min(8, 1100 - start)), sm[0]))
+        for start in range(0, 125, 8):                # slow channel lags at one record
+            writer.feed(Block(1, start, tuple([4] * min(8, 125 - start)), sm[1]))
+    fast = read_samples(lag)[0]
+    assert [int(v) for v in fast[:1100]] == [3] * 1100, "the fast channel's buffered tail is not lost"
+
+
 def test_an_interrupted_file_is_still_readable(tmp_path):
     """A crash leaves the record count at -1, which readers take as "ongoing" — the data up to the
     last whole record is intact, which is the whole reason the count is written that way."""

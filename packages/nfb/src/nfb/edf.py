@@ -70,6 +70,7 @@ class EDFWriter:
         self.per_record = {c: int(round(self.specs[c].rate_hz * self.record_seconds))
                            for c in self.channels}
         self.records = 0
+        self._origin_seconds: float | None = None    # the stream time the export starts from
         self._buf: dict[int, list[int]] = {c: [] for c in self.channels}
         self._base: dict[int, int] = {c: 0 for c in self.channels}
         self._seen: dict[int, int] = {c: 0 for c in self.channels}
@@ -119,8 +120,14 @@ class EDFWriter:
         channel = block.channel
         if channel not in self._buf:
             return
+        # The export starts from the first block seen, not from stream index 0: a recording armed
+        # mid-session must not zero-fill every channel from 0 up to the current index.
+        if self._origin_seconds is None:
+            self._origin_seconds = block.start_seconds
+        rate = self.specs[channel].rate_hz
         buf = self._buf[channel]
-        start = block.start_index
+        # Clamp at 0: a channel rounding a sample before the origin pads/rounds, never drops leading samples.
+        start = max(0, block.start_index - round(self._origin_seconds * rate))
         end = self._base[channel] + len(buf)
         if start < end:
             # Overlap: keep what is already placed and take only the tail. Re-writing a sample would
@@ -133,18 +140,23 @@ class EDFWriter:
         self._seen[channel] = max(self._seen[channel], start + len(block.samples))
         self._flush()
 
-    def _flush(self) -> None:
-        """Write every record that all channels have now covered."""
-        while all(self._seen[c] >= (self.records + 1) * self.per_record[c]
-                  for c in self.channels):
+    def _flush(self, final: bool = False) -> None:
+        """Write every record all channels have covered. With `final`, also drain the buffered tail,
+        padding short channels each pass, so a capture that does not end on a record boundary keeps its
+        last partial record instead of losing up to `record_seconds` of signal."""
+        while True:
+            covered = all(self._seen[c] >= (self.records + 1) * self.per_record[c]
+                          for c in self.channels)
+            remaining = any(self._buf[c] for c in self.channels)
+            if not (covered or (final and remaining)):
+                return
             for channel in self.channels:
                 n = self.per_record[channel]
                 want = (self.records + 1) * n - self._base[channel]
                 buf = self._buf[channel]
                 if len(buf) < want:
                     buf.extend([0] * (want - len(buf)))
-                take = buf[want - n:want]
-                self._fh.write(np.asarray(take, dtype="<i2").tobytes())
+                self._fh.write(np.asarray(buf[want - n:want], dtype="<i2").tobytes())
                 del buf[:want]
                 self._base[channel] += want
             self.records += 1
@@ -153,6 +165,7 @@ class EDFWriter:
         if self._fh.closed:
             return
         try:
+            self._flush(final=True)                  # the trailing partial record, or it is lost
             self._fh.flush()
             self._fh.seek(236)                       # the number-of-records field
             self._fh.write(_text(str(self.records), 8))
