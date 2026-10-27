@@ -174,8 +174,25 @@ def test_a_file_and_a_folder_both_resolve_to_a_track_list(tmp_path):
     assert music.tracks(tmp_path / "notes.txt") == [], "a text file is not a track"
 
 
+def test_the_file_player_stays_silent_under_the_output_guard(tmp_path, monkeypatch):
+    """NFB_NO_OUTPUTS silences the process, and afplay is a real output like the generated streams. The
+    player launched it anyway. conftest sets the flag for the whole suite, so muted() is True here."""
+    launched: list = []
+    monkeypatch.setattr(music.subprocess, "Popen", lambda *a, **k: launched.append(a))
+    track = tmp_path / "t.wav"
+    track.write_bytes(b"\x00")
+    player = music.TrackPlayer()
+    player.start([track], 80.0)             # returns at once under the guard; no worker thread, no afplay
+    try:
+        assert not player.playing, "the player does not start under NFB_NO_OUTPUTS"
+        assert launched == [], "and no afplay is launched"
+    finally:
+        player.stop()
+
+
 def test_the_player_reports_what_it_would_run_and_stops_cleanly(tmp_path, monkeypatch):
     """The subprocess is faked: the point is the track order, the volume argument and the shutdown."""
+    monkeypatch.setattr(music, "muted", lambda: False)  # faked subprocess, so run the player
     launched: list[list[str]] = []
 
     class FakeProc:
@@ -429,6 +446,7 @@ def test_switching_source_stops_the_other_path(tmp_path, monkeypatch):
 def test_pausing_keeps_the_position_rather_than_restarting_the_track(tmp_path, monkeypatch):
     """The pause-on-violation model. A backing track that restarted on every violation would be a much
     worse experience than one that stops mid-phrase and carries on, so this is SIGSTOP, not a relaunch."""
+    monkeypatch.setattr(music, "muted", lambda: False)  # faked subprocess, so run the player
     import signal as sig
 
     launched: list[list[str]] = []
@@ -1106,6 +1124,7 @@ def test_a_hold_set_while_no_child_exists_is_applied_to_the_next_one(tmp_path, m
     """hold(True) can land while _proc is None — between tracks, or in the window after start() spawns the
     worker before its first Popen. It then only set the flag, with nothing to signal, and the child spawned
     next played on un-paused while the player reported itself held. The worker now stops that fresh child."""
+    monkeypatch.setattr(music, "muted", lambda: False)  # faked subprocess, so run the player
     import signal as stdlib
     import threading
 

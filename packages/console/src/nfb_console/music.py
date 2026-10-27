@@ -408,9 +408,9 @@ def muted() -> bool:
     every protocol that enables music by default opened a live audio stream from the test suite, and the
     only reason it was not obvious is that generated noise under a test run sounds like nothing in particular.
 
-    Checked by the two paths that open an audio *device*. The track player is not gated here, because
-    playing a file needs a path that nothing sets by default, and gating it would defeat the tests that
-    exercise it deliberately with a stubbed player.
+    Checked by every path that opens an audio device: the generated streams, and the track player's
+    `start`. The player's own unit tests fake the subprocess and set `muted` False, so they still run it;
+    production and the stubbed-player session tests both leave it silent.
     """
     return bool(os.environ.get("NFB_NO_OUTPUTS"))
 
@@ -458,6 +458,8 @@ class TrackPlayer:
         return self.files[self.index % len(self.files)].name
 
     def start(self, files: list[Path], volume: float) -> None:
+        if muted():
+            return          # NFB_NO_OUTPUTS silences the process, and afplay is a real output like the rest
         if self.playing and files == self.files:
             self.volume = volume
             return
