@@ -35,7 +35,7 @@ def level(grey: "np.ndarray") -> "np.ndarray":
 
 
 def view(page: ft.Page, on_done: Callable[[], None]) -> ft.Control:
-    state = {"png": None, "error": None, "stop": False, "seen": 0}
+    state = {"png": None, "error": None, "stop": False, "seen": 0, "cam": None}
 
     image = ft.Image(src=None, width=520, height=520, fit=ft.BoxFit.CONTAIN,
                      filter_quality=ft.FilterQuality.NONE, border_radius=10, visible=False)
@@ -49,6 +49,14 @@ def view(page: ft.Page, on_done: Callable[[], None]) -> ft.Control:
             return
         done["left"] = True
         state["stop"] = True
+        # Close the camera directly, not just via the flag: the worker checks the flag only after a frame,
+        # and a torn transfer never yields, so it would hold the interface indefinitely.
+        cam = state.get("cam")
+        if cam is not None:
+            try:
+                cam.close()
+            except Exception:
+                pass
         on_done()
 
     back = ft.Container(content=ft.Text("Back", size=t.BODY, color=t.TEXT),
@@ -57,6 +65,7 @@ def view(page: ft.Page, on_done: Callable[[], None]) -> ft.Control:
 
     def worker() -> None:
         cam = TrackerCamera()
+        state["cam"] = cam              # so Back can close it even while frames() is blocked
         try:
             for frame in cam.frames():
                 if state["stop"]:
