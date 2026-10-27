@@ -428,6 +428,7 @@ class LockinBandPower:
         self.lockin = Lockin(centre, width, self.rate_hz, poles=poles)
         self.stride = max(1, int(round(self.rate_hz / output_hz)))
         self._next_index: int | None = None
+        self._expected: int | None = None
         self.value = 0.0
 
     @property
@@ -451,6 +452,12 @@ class LockinBandPower:
         # `Block.values` are already scaled to µV — every estimator scales exactly once, either here
         # via `values` or from `samples` with an explicit `* spec.scale`, never both.
         values = np.asarray(block.values, dtype=float)
+        # On a discontinuity (gap or epoch index reset), drop the pole state and re-anchor the cursor — the
+        # guard the sibling estimators have. `Lockin.reset` keeps the oscillator phase.
+        if self._expected is not None and block.start_index != self._expected:
+            self.lockin.reset()
+            self._next_index = block.start_index
+        self._expected = block.end_index
         z = np.abs(self.lockin.process(values))
         if self._next_index is None:
             self._next_index = block.start_index

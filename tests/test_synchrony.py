@@ -56,6 +56,25 @@ def final(reward, xa, xb, output_hz=20.0):
 
 # --- the lock-in itself ---------------------------------------------------------------------
 
+def test_lockin_band_power_reanchors_after_an_index_reset():
+    """LockinBandPower had no discontinuity handling. After an epoch reset to index 0 the output cursor
+    skipped every sample until the index climbed back to the stale cursor — silence for the whole pre-reset
+    span — and the heterodyne pole state bled across the gap. It now re-anchors like its sibling estimators."""
+    from nfb.dsp import Band, LockinBandPower
+
+    s = spec(0)
+    lb = LockinBandPower(s, Band(8.0, 12.0), output_hz=20.0)
+    for block in blocks(sine(10.0, 8.0, amp=25.0), 0):      # drive the cursor far past index 0
+        lb.feed(block)
+
+    # The epoch restarts: indices reset to 0. Readings must resume on the first post-reset block.
+    first = blocks(sine(10.0, 1.0, amp=25.0), 0)[0]
+    assert first.start_index == 0
+    out = lb.feed(first)
+    assert out, "readings resume on the first block after the reset, not after the old cursor catches up"
+    assert out[0].t == pytest.approx(0.0, abs=1e-6), "the first reading carries the new epoch's time"
+
+
 def test_the_lockin_recovers_peak_amplitude():
     lock = Lockin(10.0, 1.0, RATE)
     z = lock.process(sine(10.0, 20.0, amp=25.0))
