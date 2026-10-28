@@ -372,7 +372,10 @@ class PupilSession:
         self.feedback_now = run.feedback_live and self._feedback_unfaded(run, state.t)
         driving = self.feedback_now and self.shown_shift is not None
         if driving:
-            self._move_level(self.trial_level(self.shown_shift), state.t)
+            # Stepwise feedback is already quantised, so the continuous smoother must not run on top of it,
+            # or the sound glides between the steps the circle jumps across.
+            self._move_level(self.trial_level(self.shown_shift), state.t,
+                             smoothed=self.update_s <= 0)
         elif self._driving:
             self._go_quiet()
         self._driving = driving
@@ -414,10 +417,10 @@ class PupilSession:
             return True
         return run.active_s - run.phase_remaining(t) < self.feedback_window_s
 
-    def _move_level(self, signal: float, now: float) -> None:
+    def _move_level(self, signal: float, now: float, smoothed: bool = True) -> None:
         self._signal = signal
         self.signal_target.observe(signal, OBSERVE_HZ)
-        tau = max(0.0, self.feedback.smoothing_seconds)
+        tau = max(0.0, self.feedback.smoothing_seconds) if smoothed else 0.0
         if tau <= 0 or self._level_at is None:
             self._level = signal
         else:
@@ -581,8 +584,9 @@ MODE_HELP = (
     "panel counts these trials on their own. **succeeds at** sets how far past the baseline the mean of a "
     "trial must be. **full at** sets the change that moves the level to its end. **show circle for** sets "
     "how many seconds of the effort show the circle. After that the circle stops, and you hold the change "
-    "without it. **update every** makes the circle refresh in steps: it waits that many seconds, then "
-    "shows the average over them. Set it to 0 for a circle that moves all the time. Use these two rows to "
+    "without it. **update every** makes the feedback refresh in steps: it waits that many seconds, then "
+    "shows the average over them. The circle and the sound step together. Set it to 0 for feedback that "
+    "moves all the time. Use these two rows to "
     "train with less help, before a trial without feedback. A change to **trials**, **without feedback**, "
     "**succeeds at** or **full at** starts a new run."
 )

@@ -204,6 +204,55 @@ def test_the_stepwise_update_holds_the_circle_between_blocks():
         session.stop()
 
 
+def test_the_sound_steps_with_the_circle_and_does_not_glide_between_blocks():
+    """The bug: the circle stepped, but the smoother ran on the sound's level too, so the sound glided
+    across the steps the circle jumped. Stepwise feedback is already quantised; the continuous smoother
+    must not run on top of it, whatever the smoothing is set to."""
+    session = _session("strong", direction="increase", n_trials=1)
+    session.update_s = 3.0
+    session.feedback.smoothing_seconds = 0.5      # on: the smoother is what dissolves the steps
+    levels = []
+    original = session.observe
+
+    def watch():
+        original()
+        run = session.trials
+        if run.phase == ACTIVE and not run.transfer and session.feedback_now:
+            levels.append(round(session.level, 4))
+
+    session.observe = watch
+    try:
+        _drive(session, 40.0)
+        assert len(levels) > 20, "the effort window has many readings"
+        changes = sum(1 for a, b in zip(levels, levels[1:]) if a != b)
+        assert changes <= 6, "the sound's level steps with the blocks, it does not glide between them"
+    finally:
+        session.stop()
+
+
+def test_live_feedback_still_smooths_the_level():
+    """The other side of it: with no stepping, the smoother still runs, so the level moves every reading."""
+    session = _session("strong", direction="increase", n_trials=1)
+    session.update_s = 0.0
+    session.feedback.smoothing_seconds = 0.5
+    levels = []
+    original = session.observe
+
+    def watch():
+        original()
+        run = session.trials
+        if run.phase == ACTIVE and not run.transfer and session.feedback_now:
+            levels.append(round(session.level, 4))
+
+    session.observe = watch
+    try:
+        _drive(session, 40.0)
+        changes = sum(1 for a, b in zip(levels, levels[1:]) if a != b)
+        assert changes > 10, "live feedback moves continuously, not in a handful of steps"
+    finally:
+        session.stop()
+
+
 def test_no_feedback_trials_are_counted_on_their_own():
     from nfb_console.pupil_view import trial_summary
     from nfb_console.trials import Trial
