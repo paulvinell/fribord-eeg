@@ -22,7 +22,7 @@ from nfb import Device, Recorder, Settings
 
 from . import (amplitude_view, at_view, brand, chrome, device_panel, heart, heg_view, hrv_view, cfc_view,
                ilf_view, mendi, pac_view, prefs, pupil, pupil_calibrate, pupil_camera, pupil_view, record_dialog, scp_view, session_view, sleep_view,
-               splash, wave_view)
+               splash, wakelock, wave_view)
 from . import theme as t
 from .inputs import HeartChoice, InputChoice, MendiChoice, PupilChoice
 from .protocols import BY_CODE, Protocol
@@ -147,6 +147,7 @@ class Console:
         self.toolbar.set_channels_visible(True)
         self.protocol = None
         # the session detaches, but the device stays connected
+        wakelock.release()              # no session on screen, so let the display sleep normally again
         self.toolbar.set_crumb(None)
         if self.session is not None:
             self.session.stop()
@@ -260,6 +261,8 @@ class Console:
             self.session.suspend()
             if self.device.status.connected:
                 self.device.stop()          # release the mode so a contact check can run
+        # Paused to look at the electrodes, and the operator is at the keyboard: hand idle-sleep back.
+        wakelock.release()
         self._end_recording()               # its epoch just ended; `resume` arms a fresh file
         # no session while the device screen is up, so no transport either
         self.toolbar.set_transport_visible(False)
@@ -352,6 +355,7 @@ class Console:
             threading.Thread(target=session.run, daemon=True,
                              name=f"{protocol.code.lower()}-feed").start()
         self._maybe_record(session)
+        wakelock.hold()                 # back on task: keep the display awake through a still session
         self.show(screen.view(self.page, session, self.toolbar, self.restart))
 
     def pick(self, protocol: Protocol) -> None:
@@ -435,6 +439,7 @@ class Console:
             if self._generation != gen:
                 self.session.stop()
                 return
+            wakelock.hold()             # a still subject gives no input; keep the display from sleeping
             self.show(screen.view(self.page, self.session, self.toolbar, self.restart))
             return
         if self._generation != gen:
@@ -450,6 +455,7 @@ class Console:
         if self._generation != gen:
             self.session.stop()
             return
+        wakelock.hold()                 # a still subject gives no input; keep the display from sleeping
         self.show(session_view.view(self.page, self.session, self.show_launcher,
                                     lambda: self.show_device(protocol),
                                     self.args.benchmark))

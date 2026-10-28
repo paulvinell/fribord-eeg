@@ -26,12 +26,15 @@ def _no_real_outputs(monkeypatch):
     # reaches a device that is not there, which is a state it has to handle anyway.
     monkeypatch.setenv("NFB_NO_OUTPUTS", "1")
 
-    from nfb_console import prefs, shadow, sysvolume
+    from nfb_console import prefs, shadow, sysvolume, wakelock
 
     # belt and braces: even a direct call must not reach the hardware. `_write` is the one boundary both
     # `set` and `release` go through, so gating it covers both.
     monkeypatch.setattr(shadow, "_write", lambda *a, **k: None)
     monkeypatch.setattr(sysvolume, "_write", lambda *a, **k: None)
+    # The wakelock's boundaries, for the same reason: a stray `hold` must not pin the display awake.
+    monkeypatch.setattr(wakelock, "_create", lambda *a, **k: None)
+    monkeypatch.setattr(wakelock, "_release", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
