@@ -98,8 +98,15 @@ class _Device:
 def build_screen(code: str, state: str, channels: int, page: ft.Page):
     module = importlib.import_module(f"nfb_console.{SCREENS[code]}")
     from nfb import ReplaySource
+    heart_kwargs = {}
+    if code == "PUPIL" and state == "fed":
+        # Give the fed pupil shot a heart source, so the heart panel and its stats appear in the frame.
+        from nfb_console import heart as heart_mod
+        from nfb_console.inputs import HeartChoice
+        hc = HeartChoice(kind="simulator")
+        heart_kwargs = dict(heart_choice=hc, heart_runner=heart_mod.HeartRunner(hc))
     session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
-                                 channels=channels)
+                                 channels=channels, **heart_kwargs)
     bar = chrome.Toolbar(_Device(), lambda: None, lambda: None, lambda _n: None)
     control = module.view(page, session, bar, lambda: None)
     if state == "fed" and code == "PUPIL":
@@ -126,6 +133,8 @@ def feed_pupil(session, seconds: float = 75.0) -> None:
     sixth reading, its own 10 Hz, as it does on screen."""
     from nfb.pupil import SimulatedPupil
 
+    if session.heart is not None:
+        _warm_heart(session)
     eye = SimulatedPupil(seed=4, realtime=False, response_mm=0.35)
     session.eye.source = eye
     session.paused = False
@@ -139,6 +148,19 @@ def feed_pupil(session, seconds: float = 75.0) -> None:
             session.observe()
     session.paused = True       # the shot is a still: nothing may move the frame after it is drawn
     session.eye.source = None
+
+
+def _warm_heart(session, beats: int = 120) -> None:
+    """Fill the borrowed heart runner's state with simulated beats, so the heart panel has a spectrum and a
+    rate to draw. No thread and no clock: the beats are pushed straight through the processor."""
+    import time
+
+    from nfb.hrv import SimulatedBeats
+
+    source = SimulatedBeats(seed=4, realtime=False)
+    for i, beat in zip(range(beats), source.beats()):
+        session.heart.state = session.heart.processor.push(beat)
+    session.heart.seen_at = time.monotonic()
 
 
 _runners: list = []

@@ -11,12 +11,12 @@ import pytest
 from nfb.pupil import PupilProcessor, PupilSample, SimulatedPupil
 from nfb.pupil.processor import AFTER_BLINK_S, RESYNC_S
 
-from nfb_console.inputs import PupilChoice
+from nfb_console.inputs import HeartChoice, PupilChoice
 from nfb_console.protocols import BY_CODE
-from nfb_console.trials import ACTIVE, NEGATIVE, POSITIVE, TrialRun
+from nfb_console.trials import ACTIVE, BASELINE, ITI, NEGATIVE, POSITIVE, RESULT, TrialRun
 
 from test_screens import StubPage, toolbar
-from test_ste import _help_faults
+from test_ste import _help_faults, _texts
 
 
 def _session(response: str = "strong", **settings):
@@ -555,3 +555,123 @@ def test_the_camera_shows_lit_frames_and_holds_through_the_strobe_dark_ones():
     run = [sel(10) for _ in range(MAX_HELD + 2)]              # then a long dark run
     assert run[MAX_HELD - 1] is False and run[MAX_HELD] is True, \
         "a genuinely dim scene is not frozen out — the next frame shows after MAX_HELD dark ones"
+
+
+# --- the heart beside the pupil trials --------------------------------------------------------
+
+def _feed_trial(h, trial, direction, base_bpm, effort_bpm, base_n=5, effort_n=5, result_beat=True):
+    """One trial through the heart aggregator: a baseline window, an effort window, then the result."""
+    from nfb_console.pupil_view import HeartTrials
+    for _ in range(base_n):
+        h.feed(BASELINE, trial, direction, base_bpm)
+    for _ in range(effort_n):
+        h.feed(ACTIVE, trial, direction, effort_bpm)
+    h.feed(RESULT, trial, direction, effort_bpm if result_beat else None)
+
+
+def test_heart_stats_are_the_change_from_baseline_split_by_direction():
+    from nfb_console.pupil_view import HeartTrials
+    h = HeartTrials()
+    _feed_trial(h, 1, POSITIVE, 60.0, 66.0)        # larger: +6 bpm
+    _feed_trial(h, 2, POSITIVE, 62.0, 66.0)        # larger: +4 bpm  -> mean +5
+    _feed_trial(h, 3, NEGATIVE, 70.0, 66.0)        # smaller: -4 bpm
+    summary = {word: (change, n) for word, change, n in h.direction_summary()}
+    assert summary["larger"][0] == pytest.approx(5.0) and summary["larger"][1] == 2
+    assert summary["smaller"][0] == pytest.approx(-4.0) and summary["smaller"][1] == 1
+
+
+def test_a_trial_is_scored_even_with_no_beat_at_the_result_instant():
+    from nfb_console.pupil_view import HeartTrials
+    h = HeartTrials()
+    _feed_trial(h, 1, POSITIVE, 60.0, 66.0, result_beat=False)
+    assert h.direction_summary()[0][1] == pytest.approx(6.0), "the window is scored when it ends"
+
+
+def test_a_thin_heart_window_has_no_result():
+    from nfb_console.pupil_view import HeartTrials, HEART_MIN_READINGS
+    h = HeartTrials()
+    _feed_trial(h, 1, POSITIVE, 60.0, 66.0, base_n=HEART_MIN_READINGS - 1)
+    assert h.direction_summary() == [], "too few baseline readings means no heart result for the trial"
+
+
+def test_the_session_heart_view_is_overall_and_effort_against_rest():
+    from nfb_console.pupil_view import HeartTrials
+    h = HeartTrials()
+    for _ in range(5):
+        h.feed(BASELINE, 1, POSITIVE, 60.0)
+    for _ in range(5):
+        h.feed(ACTIVE, 1, POSITIVE, 70.0)
+    for _ in range(5):
+        h.feed(ITI, 1, POSITIVE, 62.0)
+    mean, lo, hi = h.overall()
+    assert lo == 60.0 and hi == 70.0 and mean == pytest.approx(64.0)
+    effort, rest = h.effort_vs_rest()
+    assert effort == pytest.approx(70.0) and rest == pytest.approx(62.0)
+
+
+def test_a_missing_reading_does_not_enter_the_stats():
+    from nfb_console.pupil_view import HeartTrials
+    h = HeartTrials()
+    for _ in range(5):
+        h.feed(ACTIVE, 1, POSITIVE, 70.0)
+    h.feed(ACTIVE, 1, POSITIVE, None)              # a dropped beat: skipped, not counted as zero
+    mean, lo, hi = h.overall()
+    assert mean == 70.0 and lo == 70.0 and hi == 70.0
+
+
+class _PhaseHeart:
+    """A stand-in heart runner whose rate rises during the effort window, so a direction effect appears."""
+
+    def __init__(self, session, base=70.0, lift=6.0):
+        self.session = session
+        self.base = base
+        self.lift = lift
+        self.stale = False
+        self.error = None
+
+    @property
+    def state(self):
+        import types
+        bpm = self.base + (self.lift if self.session.trials.phase == ACTIVE else 0.0)
+        return types.SimpleNamespace(hr_bpm=bpm)
+
+    def describe(self):
+        return "simulated strap"
+
+
+def test_driving_with_a_heart_source_fills_the_stats_from_the_effort():
+    session = _session("strong", direction="increase", n_trials=1)
+    session.heart_choice = HeartChoice(kind="simulator")
+    session.heart = _PhaseHeart(session)
+    session.heart_trials.reset()        # the heart runner was set after the session was built
+    assert session.heart_on
+    _drive(session, 40.0)
+    assert session.heart_trials.has_data
+    summary = session.heart_trials.direction_summary()
+    assert summary and summary[0][1] == pytest.approx(6.0, abs=0.5), "effort runs 6 bpm above baseline"
+    effort, rest = session.heart_trials.effort_vs_rest()
+    assert effort > rest, "the effort window runs hotter than the rest between trials"
+
+
+def _labels_of(session):
+    page = StubPage()
+    control = pupil_view_view(page, session)
+    return " | ".join(_texts(control)).upper()
+
+
+def pupil_view_view(page, session):
+    from nfb_console import pupil_view
+    return pupil_view.view(page, session, toolbar(), lambda: None)
+
+
+def test_the_heart_panel_appears_only_when_a_source_is_chosen():
+    from nfb_console import pupil_view
+    bare = pupil_view.session_for(BY_CODE["PUPIL"], channels=0)
+    assert "HEART" not in _labels_of(bare), "no heart panel without a chosen source"
+
+    hc = HeartChoice(kind="simulator")
+    from nfb_console import heart as heart_mod
+    with_heart = pupil_view.session_for(BY_CODE["PUPIL"], channels=0,
+                                        heart_choice=hc, heart_runner=heart_mod.HeartRunner(hc))
+    labels = _labels_of(with_heart)
+    assert "HEART STATS" in labels and "HEART" in labels, "the heart panels show with a chosen source"

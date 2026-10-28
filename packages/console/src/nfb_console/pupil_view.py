@@ -22,7 +22,7 @@ from typing import Callable
 import flet as ft
 import flet.canvas as cv
 
-from . import chrome, cues, normalise, plan_pane, prefs, pupil, signal_pane, sysvolume, music
+from . import chrome, cues, heart_panel, normalise, plan_pane, prefs, pupil, signal_pane, sysvolume, music
 from . import theme as t
 from .feedback import CONDITION, FeedbackSettings
 from .inputs import PupilChoice
@@ -97,13 +97,123 @@ def _duration(seconds: float) -> str:
     return f"{minutes} min" if minutes >= 1 else f"{seconds:.0f} s"
 
 
+HEART_MIN_READINGS = 3
+"""Fewest heart readings a trial window needs before its mean counts. Below it the window is too thin to
+average, so the trial has no heart result rather than a number made from one or two beats."""
+
+
+def _mean(xs: list[float]) -> float:
+    return sum(xs) / len(xs)
+
+
+class _Tally:
+    """A running mean and range, so a whole session's heart rate needs no list kept."""
+
+    __slots__ = ("total", "n", "lo", "hi")
+
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.n = 0
+        self.lo: float | None = None
+        self.hi: float | None = None
+
+    def add(self, x: float) -> None:
+        self.total += x
+        self.n += 1
+        self.lo = x if self.lo is None else min(self.lo, x)
+        self.hi = x if self.hi is None else max(self.hi, x)
+
+    @property
+    def mean(self) -> float | None:
+        return self.total / self.n if self.n else None
+
+
+class HeartTrials:
+    """Heart rate gathered against the pupil trials, to show how the effort moves the heart.
+
+    Fed one reading at a time with the trial phase, the trial number, the cue direction and the
+    instantaneous heart rate, it keeps two views. Per trial: the mean rate over the baseline window and
+    over the effort window, so each direction averages into one effort-against-baseline change. Per
+    session: the rate over the whole run, and the rate during effort against the rate during the rest
+    between trials, neither tied to a single trial.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._trial: int | None = None
+        self._direction: str | None = None
+        self._last_phase: str | None = None
+        self._base: list[float] = []
+        self._effort: list[float] = []
+        self._scored = False
+        self.by_direction: dict[str, list[float]] = {POSITIVE: [], NEGATIVE: []}
+        self._all = _Tally()
+        self._effort_all = _Tally()
+        self._rest_all = _Tally()
+
+    def feed(self, phase: str, trial: int, direction: str | None, hr: float | None) -> None:
+        # Score when the effort ends, before the new-trial reset wipes the windows: the run advances its
+        # trial number as the effort ends. A beat need not land on the result reading.
+        if self._last_phase == ACTIVE and phase != ACTIVE and not self._scored:
+            self._score()
+        if trial != self._trial:
+            self._trial = trial
+            self._direction = None
+            self._base = []
+            self._effort = []
+            self._scored = False
+        if direction is not None:
+            self._direction = direction
+        self._last_phase = phase
+        if hr is None:
+            return
+        self._all.add(hr)
+        if phase == ACTIVE:
+            self._effort_all.add(hr)
+            self._effort.append(hr)
+        elif phase == ITI:
+            self._rest_all.add(hr)
+        elif phase == BASELINE:
+            self._base.append(hr)
+
+    def _score(self) -> None:
+        self._scored = True
+        if (self._direction in self.by_direction
+                and len(self._base) >= HEART_MIN_READINGS
+                and len(self._effort) >= HEART_MIN_READINGS):
+            self.by_direction[self._direction].append(_mean(self._effort) - _mean(self._base))
+
+    @property
+    def has_data(self) -> bool:
+        return self._all.n > 0
+
+    def direction_summary(self) -> list[tuple[str, float, int]]:
+        """Per direction with scored trials: (the word on the screen, the mean change in bpm, the count)."""
+        out = []
+        for d in (POSITIVE, NEGATIVE):
+            changes = self.by_direction[d]
+            if changes:
+                out.append((DIRECTION_WORD[d], _mean(changes), len(changes)))
+        return out
+
+    def overall(self) -> tuple[float | None, float | None, float | None]:
+        """The whole run: mean, low and high heart rate."""
+        return self._all.mean, self._all.lo, self._all.hi
+
+    def effort_vs_rest(self) -> tuple[float | None, float | None]:
+        """Mean heart rate during the effort windows, and during the rest between trials."""
+        return self._effort_all.mean, self._rest_all.mean
+
+
 class PupilSession:
     """The eye, the trials and the level. Not a `TrainingSession`, for the reason `HEGSession` is not:
     there are no sample blocks here, and the readings come from a runner the app owns."""
 
     def __init__(self, protocol: Protocol, choice: PupilChoice | None = None,
                  length_seconds: float | None = None, runner: pupil.PupilRunner | None = None,
-                 offered: PupilChoice | None = None):
+                 offered: PupilChoice | None = None, heart_choice=None, heart_runner=None):
         self.protocol = protocol
         self.plan = SessionPlan(length_seconds)
         self.cue = cues.play
@@ -113,6 +223,10 @@ class PupilSession:
         self.choice = choice if choice is not None else PupilChoice(kind="simulator")
         self.offered = offered if offered is not None else choice
         self.eye = runner if runner is not None else pupil.PupilRunner(self.choice)
+        # Borrowed, not owned: this screen never attaches or releases it, so the HRV screen can share it.
+        self.heart_choice = heart_choice
+        self.heart = heart_runner
+        self.heart_trials = HeartTrials()
         self.finished = False
 
         self.feedback = FeedbackSettings()
@@ -232,6 +346,7 @@ class PupilSession:
         self.finished = False
         self.count_from = None
         self._last_phase = None
+        self.heart_trials.reset()
         self._go_quiet()
 
     def set_mode(self, mode: str) -> None:
@@ -272,6 +387,19 @@ class PupilSession:
     @property
     def signal(self) -> float | None:
         return self._signal
+
+    @property
+    def heart_on(self) -> bool:
+        """Whether a heart-rate source is chosen, so the heart panel and stats belong on the screen."""
+        return self.heart is not None and self.heart_choice is not None and self.heart_choice.on
+
+    def _heart_rate(self) -> float | None:
+        """The latest instantaneous heart rate, or None when there is no live reading to trust. A stale
+        runner holds its last reading, so a dead strap must not keep feeding one figure into the stats."""
+        if not self.heart_on or self.heart.stale or self.heart.error:
+            return None
+        state = self.heart.state
+        return state.hr_bpm if state is not None else None
 
     @property
     def active_targets(self) -> list[Target]:
@@ -357,6 +485,7 @@ class PupilSession:
             self._sound(event)
             if event.kind == CUE:
                 self.count_from = random.randint(300, 999)
+        self.heart_trials.feed(run.phase, run.trial_number, run.required, self._heart_rate())
         if run.phase != self._last_phase:
             if run.phase == ACTIVE:
                 self._start_block(state.t)
@@ -588,7 +717,10 @@ MODE_HELP = (
     "shows the average over them. The circle and the sound step together. Set it to 0 for feedback that "
     "moves all the time. Use these two rows to "
     "train with less help, before a trial without feedback. A change to **trials**, **without feedback**, "
-    "**succeeds at** or **full at** starts a new run."
+    "**succeeds at** or **full at** starts a new run.\n\n"
+    "**The heart.** When you choose a heart-rate source on the device screen, a heart panel appears here. "
+    "It shows the mean heart-rate change from baseline for each direction. It also shows the heart rate "
+    "across the run, so you can see how the effort moves the heart."
 )
 
 
@@ -597,10 +729,10 @@ def session_for(protocol: Protocol, path=None, device=None, length_seconds=None,
                 mendi_runner=None, pupil_choice: PupilChoice | None = None,
                 pupil_runner: pupil.PupilRunner | None = None) -> PupilSession:
     """The other screens' signature, so `app.pick` need not special-case it."""
-    _ = path, device, source, channels, heart_choice, heart_runner, mendi_choice, mendi_runner
+    _ = path, device, source, channels, mendi_choice, mendi_runner
     choice = pupil_choice if (pupil_choice is not None and pupil_choice.on) else None
     return PupilSession(protocol, choice=choice, length_seconds=length_seconds, runner=pupil_runner,
-                        offered=pupil_choice)
+                        offered=pupil_choice, heart_choice=heart_choice, heart_runner=heart_runner)
 
 
 def _instrument(session: PupilSession) -> tuple[str, str, str]:
@@ -694,6 +826,29 @@ def trial_summary(run: TrialRun) -> str:
     return "\n".join(lines) if lines else "no result yet"
 
 
+def heart_summary(session: PupilSession) -> str:
+    """The HEART STATS panel text: how the trials moved the heart, and the heart across the whole run.
+
+    The per-direction line is the change from each trial's own baseline, averaged over that direction's
+    trials — the same de-trending the pupil score uses. The run lines are not tied to a single trial: the
+    mean and range over the whole session, and the effort windows against the rest between trials.
+    """
+    stats = session.heart_trials
+    if not stats.has_data:
+        return "no heart readings yet"
+    lines = []
+    for word, change, n in stats.direction_summary():
+        trials = "trial" if n == 1 else "trials"
+        lines.append(f"{word}: {change:+.1f} bpm from baseline · {n} {trials}")
+    mean, lo, hi = stats.overall()
+    if mean is not None:
+        lines.append(f"run: {mean:.0f} bpm · {lo:.0f} to {hi:.0f}")
+    effort, rest = stats.effort_vs_rest()
+    if effort is not None and rest is not None:
+        lines.append(f"effort {effort:.0f} bpm · rest {rest:.0f} bpm")
+    return "\n".join(lines)
+
+
 def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
          on_stop: Callable[[], None]) -> ft.Control:
     plan_pane_ = plan_pane.PlanPane(page, session)
@@ -733,6 +888,11 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
     history_cells = ft.Row(spacing=3, wrap=True)
     history_text = ft.Text("", size=t.SMALL, color=t.MUTED)
     history_panel = panel("TRIALS", history_cells, ft.Container(height=8), history_text)
+
+    # --- the heart, when a source is chosen on the device screen -------------------------------
+    heart_ui = (heart_panel.HeartPanel(compact=True, width_of=lambda: max(200.0, SIDE_W - 60))
+                if session.heart_on else None)
+    heart_stats_text = ft.Text("", size=t.SMALL, color=t.MUTED)
 
     def changed(action) -> Callable:
         return lambda *_a: (action(*_a), rebuild(), draw())
@@ -829,15 +989,27 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
               ft.Container(height=6), trace_caption),
     ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
 
-    right = ft.Column([
+    right_panels = [
         panel("MODE", mode_rows, help=help_button(page, "Pupil training", MODE_HELP)),
         ft.Container(height=12),
         history_panel,
+    ]
+    if heart_ui is not None:
+        right_panels += [
+            ft.Container(height=12),
+            panel("HEART STATS", heart_stats_text),
+            ft.Container(height=12),
+            panel("HEART", *heart_ui.spectrum_rows(),
+                  ft.Container(height=10), heart_ui.tiles,
+                  ft.Container(height=8), heart_ui.source_note),
+        ]
+    right_panels += [
         ft.Container(height=12),
         panel("NOW", tiles),
         ft.Container(height=12),
         panel("SOURCE", source_note),
-    ], spacing=0, width=SIDE_W, scroll=ft.ScrollMode.AUTO)
+    ]
+    right = ft.Column(right_panels, spacing=0, width=SIDE_W, scroll=ft.ScrollMode.AUTO)
 
     train_tab = ft.Container(content=ft.Row([left, right], spacing=14, expand=True),
                              padding=ft.Padding(14, 12, 14, 14), expand=True)
@@ -1002,6 +1174,9 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
         draw_fixation()
         draw_trace()
         draw_side()
+        if heart_ui is not None:
+            heart_ui.refresh(session.heart)
+            heart_stats_text.value = heart_summary(session)
         signal.refresh()
         page.update()
 
