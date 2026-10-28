@@ -650,7 +650,7 @@ def test_a_dead_or_silent_beat_source_stops_the_feedback_and_says_so():
         runner._stop.clear()
         # One attempt, not the retry loop the reader thread runs: what is under test is that an ending
         # nobody asked for is reported as a fault rather than passing in silence.
-        runner.error = runner._read_once()   # the generator ends on its own
+        runner.error = runner._read(runner._generation)   # the generator ends on its own
         assert runner.error, "an end nobody asked for is a fault, not a silence"
 
         applies = []
@@ -717,13 +717,13 @@ def test_a_strap_that_loses_contact_goes_stale_rather_than_running_the_room():
     runner._stop.clear()
     # A good beat is news; its arrival time is recorded.
     runner.source = Source([Beat(1000.0, 60.0, [1.0], contact=True)])
-    runner._read_once()
+    runner._read(runner._generation)
     assert runner.seen_at is not None, "a beat with a real interval is fresh news"
 
     # A run of no-contact beats carries no usable interval, so it must not refresh the freshness clock.
     was = runner.seen_at
     runner.source = Source([Beat(1001.0 + i, 60.0, [], contact=False) for i in range(5)])
-    runner._read_once()
+    runner._read(runner._generation)
     assert runner.seen_at == was, "no-contact beats are not news and must not hold off staleness"
 
 

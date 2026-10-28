@@ -14,10 +14,11 @@ them, so nothing above has to know there are two.
 
 from __future__ import annotations
 
-import threading
 import time
 
 from nfb.heg import FrameProcessor, SignalProcessor
+
+from .runner import SensorRunner
 
 SCAN_SECONDS = 8.0
 
@@ -59,132 +60,41 @@ def scan(seconds: float = SCAN_SECONDS) -> tuple[list[tuple[str, str]], str | No
     return out, None
 
 
-class MendiRunner:
-    """Owns a frame source and its processing for as long as it is running."""
+class MendiRunner(SensorRunner):
+    """Owns a frame source and its processing for as long as it is running.
 
-    STALE_S = 3.0
-    """No frame for this long, with the reader still alive, means the headband has gone quiet.
-
-    Much tighter than the heart's five seconds, and it should be: the device streams at ~30 Hz, so three
-    seconds of silence is hundreds of missed frames rather than a few missed beats. The reason for having
-    the check at all is the same — `state` freezes on whatever arrived last and nothing about the object
-    says when that was, which is how a dead source keeps driving the outputs from a snapshot.
+    Two things are stacked here: `FrameProcessor` (filters, motion gate, projection) and `SignalProcessor`
+    (the rolling windows), chained in `_read` so nothing above knows there are two.
     """
 
+    STALE_S = 3.0
+    """Tighter than the heart's five seconds: the headband streams at ~30 Hz, so three seconds of silence
+    is hundreds of missed frames rather than a few missed beats."""
+    _THREAD_NAME = "mendi"
+    NO_SOURCE = "no headband — choose one on the device screen"
+
     def __init__(self, choice=None):
-        self.choice = choice
+        super().__init__(choice)
         self.processor = FrameProcessor()
         self.signal = SignalProcessor()
-        self.source = None
-        self.state = None
-        self.error: str | None = None
-        self.seen_at: float | None = None    # monotonic arrival of the last frame, written by _run only
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-        # See `PupilRunner`: a stale reader stuck past its join must not write onto a healthy replacement.
-        self._generation = 0
 
-    @property
-    def stale(self) -> bool:
-        """Whether the snapshot in `state` has stopped being news.
+    def _ready(self, state) -> bool:
+        return state.samples_seen > 5
 
-        Arrival time rather than the frame's own timestamp, because the simulator and the tests carry
-        synthetic clocks; and only while the reader is alive, because a dead reader sets `error` and that
-        is the louder signal.
-        """
-        return (self.running and self.seen_at is not None
-                and time.monotonic() - self.seen_at > self.STALE_S)
-
-    @property
-    def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
-
-    @property
-    def ready(self) -> bool:
-        """Enough frames for the windowed numbers to be arithmetic rather than a single reading.
-
-        A low bar on purpose: it says the stream is alive, not that the signal means anything. The
-        settling clock in `FrameProcessor` holds quality at 0.5 for eleven seconds and each metric carries
-        its own `ready` predicate — this is only the check that anything is arriving at all.
-        """
-        return self.state is not None and self.state.samples_seen > 5
-
-    def attach(self, choice=None) -> bool:
-        """Start reading, if a source is chosen. Idempotent."""
-        if choice is not None:
-            self.choice = choice
-        if self.choice is None or not self.choice.on:
-            self.release()
-            return False
-        if self.running:
-            return True
-        trouble = self.choice.problem()
-        if trouble:
-            self.error = trouble
-            return False
-        self.source = self.choice.open()
-        if self.source is None:
-            return False
-        # A fresh source starts a fresh record — the lesson `HeartRunner.attach` records, and it bites
-        # harder here: the low-pass filters hold the *previous* source's DC level, the settling clock
-        # would arrive pre-satisfied, and the motion gate's window would carry another headband's
-        # accelerometer. Same-source continuity is not lost, since an attach onto a running reader
-        # returns above without passing here.
+    def _reset(self) -> None:
         self.processor.reset()
         self.signal.reset()
-        self.state = None
-        self.seen_at = None
-        self.error = None
-        self._stop.clear()
-        self._generation += 1
-        gen = self._generation
-        self._thread = threading.Thread(target=self._run, args=(gen,), daemon=True, name="mendi")
-        self._thread.start()
-        return True
 
-    def _run(self, gen: int) -> None:
-        try:
-            for frame in self.source.frames():
-                if self._stop.is_set() or gen != self._generation:
-                    return
-                self.state = self.signal.push(self.processor.process(frame),
-                                              self.processor.gate_fraction)
-                self.seen_at = time.monotonic()
-        except Exception as exc:
-            if gen == self._generation:
-                self.error = f"{type(exc).__name__}: {exc}"
-            return
-        # The generator ending is how `LiveMendi` reports its BLE worker dying — the connection dropped,
-        # the headband switched off, bleak raised inside the asyncio thread. An end nobody asked for is a
-        # fault and has to say so, or `state` freezes on the last frame and the feedback runs on it
-        # indefinitely. The source's own `error` is preferred because it knows what actually happened.
-        if gen == self._generation and not self._stop.is_set() and self.error is None:
-            source = self.source
-            self.error = (getattr(source, "error", None) if source is not None else None) \
-                or "the headband stopped delivering frames"
-
-    def release(self) -> None:
-        self._stop.set()
+    def _read(self, gen: int) -> str | None:
+        for frame in self.source.frames():
+            if self._stop.is_set() or gen != self._generation:
+                return None
+            self.state = self.signal.push(self.processor.process(frame), self.processor.gate_fraction)
+            self.seen_at = time.monotonic()
+        # The generator ending is how `LiveMendi` reports its BLE worker dying; its own `error` knows why.
         source = self.source
-        self.source = None
-        if source is not None:
-            try:
-                source.close()
-            except Exception:
-                pass
-        thread = self._thread
-        self._thread = None
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-
-    def describe(self) -> str:
-        if self.error:
-            return self.error
-        if self.choice is not None and not self.choice.on:
-            return "no headband — choose one on the device screen"
-        if self.source is None:
-            return "not started"
-        return self.source.describe()
+        return (getattr(source, "error", None) if source is not None else None) \
+            or "the headband stopped delivering frames"
 
     @property
     def battery_pct(self) -> int | None:

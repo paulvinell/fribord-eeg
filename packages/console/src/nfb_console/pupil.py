@@ -7,43 +7,40 @@ source, and a stale flag so a frozen snapshot cannot drive the room after the so
 
 from __future__ import annotations
 
-import threading
 import time
 
 from nfb.pupil import PupilProcessor
 
+from .runner import SensorRunner
 
-class PupilRunner:
+
+class PupilRunner(SensorRunner):
     STALE_S = 2.0
     """No reading for this long, with the reader alive, means the source has gone quiet. Readings arrive
     at 60 Hz, so two seconds is more than a hundred missed ones."""
+    _THREAD_NAME = "pupil"
+    NO_SOURCE = "no pupil source — choose one on the device screen"
 
     def __init__(self, choice=None):
-        self.choice = choice
+        super().__init__(choice)
         self.processor = PupilProcessor()
-        self.source = None
-        self.state = None
         self.sample = None                  # the last reading as the source gave it, both eyes included
-        self.error: str | None = None
-        self.seen_at: float | None = None
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-        # Each reader carries its generation, so a stale one that outlived its join cannot write onto a
-        # healthy replacement (a handshake can block past the stop event).
-        self._generation = 0
 
-    @property
-    def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+    def _ready(self, state) -> bool:
+        return state.samples_seen > 5
 
-    @property
-    def stale(self) -> bool:
-        return (self.running and self.seen_at is not None
-                and time.monotonic() - self.seen_at > self.STALE_S)
+    def _reset(self) -> None:
+        self.processor.reset()
+        self.sample = None
 
-    @property
-    def ready(self) -> bool:
-        return self.state is not None and self.state.samples_seen > 5
+    def _read(self, gen: int) -> str | None:
+        for sample in self.source.samples():
+            if self._stop.is_set() or gen != self._generation:
+                return None
+            self.sample = sample
+            self.state = self.processor.push(sample)
+            self.seen_at = time.monotonic()
+        return getattr(self.source, "error", None) or "the source stopped sending readings"
 
     def steer(self, effort: float) -> None:
         """Tell a simulated eye what its person is trying to do. A real eye has no such attribute, and
@@ -51,69 +48,6 @@ class PupilRunner:
         source = self.source
         if source is not None and hasattr(source, "effort"):
             source.effort = effort
-
-    def attach(self, choice=None) -> bool:
-        if choice is not None:
-            self.choice = choice
-        if self.choice is None or not self.choice.on:
-            self.release()
-            return False
-        if self.running:
-            return True
-        trouble = self.choice.problem()
-        if trouble:
-            self.error = trouble
-            return False
-        self.source = self.choice.open()
-        if self.source is None:
-            return False
-        self.processor.reset()
-        self.state = None
-        self.sample = None
-        self.seen_at = None
-        self.error = None
-        self._stop.clear()
-        self._generation += 1
-        gen = self._generation
-        self._thread = threading.Thread(target=self._run, args=(gen,), daemon=True, name="pupil")
-        self._thread.start()
-        return True
-
-    def _run(self, gen: int) -> None:
-        try:
-            for sample in self.source.samples():
-                if self._stop.is_set() or gen != self._generation:
-                    return
-                self.sample = sample
-                self.state = self.processor.push(sample)
-                self.seen_at = time.monotonic()
-        except Exception as exc:
-            if gen == self._generation:
-                self.error = f"{type(exc).__name__}: {exc}"
-            return
-        if gen == self._generation and not self._stop.is_set() and self.error is None:
-            self.error = getattr(self.source, "error", None) or "the source stopped sending readings"
-
-    def release(self) -> None:
-        self._stop.set()
-        source, self.source = self.source, None
-        if source is not None:
-            try:
-                source.close()
-            except Exception:
-                pass
-        thread, self._thread = self._thread, None
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-
-    def describe(self) -> str:
-        if self.error:
-            return self.error
-        if self.choice is not None and not self.choice.on:
-            return "no pupil source — choose one on the device screen"
-        if self.source is None:
-            return "not started"
-        return self.source.describe()
 
     def status(self) -> tuple[str, str]:
         """The connection state as (word, tone-name), for a clear line on the device screen. The tone
