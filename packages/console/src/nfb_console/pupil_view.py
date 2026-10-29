@@ -826,27 +826,20 @@ def trial_summary(run: TrialRun) -> str:
     return "\n".join(lines) if lines else "no result yet"
 
 
-def heart_summary(session: PupilSession) -> str:
-    """The HEART STATS panel text: how the trials moved the heart, and the heart across the whole run.
-
-    The per-direction line is the change from each trial's own baseline, averaged over that direction's
-    trials — the same de-trending the pupil score uses. The run lines are not tied to a single trial: the
-    mean and range over the whole session, and the effort windows against the rest between trials.
-    """
-    stats = session.heart_trials
-    if not stats.has_data:
-        return "no heart readings yet"
-    lines = []
-    for word, change, n in stats.direction_summary():
-        trials = "trial" if n == 1 else "trials"
-        lines.append(f"{word}: {change:+.1f} bpm from baseline · {n} {trials}")
-    mean, lo, hi = stats.overall()
-    if mean is not None:
-        lines.append(f"run: {mean:.0f} bpm · {lo:.0f} to {hi:.0f}")
-    effort, rest = stats.effort_vs_rest()
-    if effort is not None and rest is not None:
-        lines.append(f"effort {effort:.0f} bpm · rest {rest:.0f} bpm")
-    return "\n".join(lines)
+def _stat_tile(label: str, width: int, value_size: int, unit: str = "", sub: bool = False):
+    """One bordered figure tile, the same shape the NOW and HEART panels use: a faint label, a large
+    value, a small unit, and an optional faint sub-line. Returns the box and the texts to update."""
+    value = ft.Text("—", size=value_size, color=t.TEXT, weight=ft.FontWeight.W_300)
+    unit_text = ft.Text(unit, size=t.SMALL, color=t.FAINT)
+    column = [ft.Text(label, size=t.SMALL, color=t.FAINT), value, unit_text]
+    sub_text = None
+    if sub:
+        sub_text = ft.Text("", size=t.SMALL, color=t.FAINT)
+        column.append(sub_text)
+    box = ft.Container(content=ft.Column(column, spacing=1), width=width,
+                       padding=ft.Padding(10, 9, 10, 9), border_radius=8,
+                       bgcolor=t.BG, border=ft.Border.all(1, t.BORDER))
+    return box, value, unit_text, sub_text
 
 
 def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
@@ -892,7 +885,19 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
     # --- the heart, when a source is chosen on the device screen -------------------------------
     heart_ui = (heart_panel.HeartPanel(compact=True, width_of=lambda: max(200.0, SIDE_W - 60))
                 if session.heart_on else None)
-    heart_stats_text = ft.Text("", size=t.SMALL, color=t.MUTED)
+    larger_box, larger_val, _, larger_sub = _stat_tile("larger", 158, 20, "bpm from baseline", sub=True)
+    smaller_box, smaller_val, _, smaller_sub = _stat_tile("smaller", 158, 20, "bpm from baseline", sub=True)
+    run_box, run_val, run_unit, _ = _stat_tile("run", 108, 17, "bpm")
+    effort_box, effort_val, _, _ = _stat_tile("effort", 108, 17, "bpm")
+    rest_box, rest_val, _, _ = _stat_tile("rest", 108, 17, "bpm")
+    heart_no_data = ft.Text("no heart readings yet", size=t.SMALL, color=t.MUTED)
+    heart_stats_body = ft.Column([
+        ft.Row([larger_box, smaller_box], spacing=10),
+        ft.Container(height=6),
+        ft.Text("the mean change over each direction's trials", size=t.SMALL, color=t.FAINT),
+        ft.Container(height=10), ft.Container(height=1, bgcolor=t.BORDER), ft.Container(height=10),
+        ft.Row([run_box, effort_box, rest_box], spacing=8),
+    ], spacing=0, visible=False)
 
     def changed(action) -> Callable:
         return lambda *_a: (action(*_a), rebuild(), draw())
@@ -997,7 +1002,7 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
     if heart_ui is not None:
         right_panels += [
             ft.Container(height=12),
-            panel("HEART STATS", heart_stats_text),
+            panel("HEART STATS", heart_no_data, heart_stats_body),
             ft.Container(height=12),
             panel("HEART", *heart_ui.spectrum_rows(),
                   ft.Container(height=10), heart_ui.tiles,
@@ -1161,6 +1166,28 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
         history_cells.controls = cells
         history_text.value = trial_summary(run)
 
+    def draw_heart_stats() -> None:
+        stats = session.heart_trials
+        heart_no_data.visible = not stats.has_data
+        heart_stats_body.visible = stats.has_data
+        if not stats.has_data:
+            return
+        by = {word: (change, n) for word, change, n in stats.direction_summary()}
+        for word, value, sub in (("larger", larger_val, larger_sub),
+                                  ("smaller", smaller_val, smaller_sub)):
+            if word in by:
+                change, n = by[word]
+                value.value = f"{change:+.1f}"
+                sub.value = f"{n} trial" if n == 1 else f"{n} trials"
+            else:
+                value.value, sub.value = "—", "no trials yet"
+        mean, lo, hi = stats.overall()
+        run_val.value = f"{mean:.0f}" if mean is not None else "—"
+        run_unit.value = f"bpm · {lo:.0f}-{hi:.0f}" if lo is not None else "bpm"
+        effort, rest = stats.effort_vs_rest()
+        effort_val.value = f"{effort:.0f}" if effort is not None else "—"
+        rest_val.value = f"{rest:.0f}" if rest is not None else "—"
+
     def draw() -> None:
         session.tick()
         instrument = _instrument(session)
@@ -1176,7 +1203,7 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
         draw_side()
         if heart_ui is not None:
             heart_ui.refresh(session.heart)
-            heart_stats_text.value = heart_summary(session)
+            draw_heart_stats()
         signal.refresh()
         page.update()
 
