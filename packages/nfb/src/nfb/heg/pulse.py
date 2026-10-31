@@ -4,7 +4,7 @@ Each heartbeat pushes a little blood into the forehead, the blood absorbs the he
 and the light that comes back dips once per beat. The HEG processing filters this out on purpose, since
 it trains a change over seconds; this module keeps it and turns it into `Beat`s, the form the HeartMath
 sources produce, so the heart-rate processing downstream takes either device. Each choice here was
-measured on a 40 s recording of a resting forehead in a room with flickering light.
+measured on real recordings of a resting forehead.
 """
 
 from __future__ import annotations
@@ -18,10 +18,11 @@ from nfb.hrv.ppg import PeakDetector, steepest_rise
 from .source import HEG_RATE_HZ, Frame
 
 DESPIKE_SAMPLES = 5
-"""The width of the running median over infrared minus ambient. Room light flickering at about 2 Hz put
-a false 117 bpm rhythm into the infrared; the ambient reading carries the same flicker, so subtracting
-it removes the rhythm, and the frames where the two do not cancel exactly become spikes, which a
-five-sample median removes. It delays the signal two frames, which the time stamps account for."""
+"""The width of the running median over infrared minus ambient. In one recording a disturbance about
+twice a second, of unknown cause, raised the infrared and the ambient reading together in the same
+frames and put a false 117 bpm rhythm into the infrared. Subtracting the ambient reading removes most of
+it; the frames where the two do not cancel exactly become spikes, which a five-sample median removes.
+It delays the signal two frames, which the time stamps account for."""
 
 EDGE_SEARCH_S = 0.40
 """How far before a detected peak to look for its edge. The edge of a resting pulse comes 0.1 to
@@ -32,7 +33,8 @@ MIN_PULSE_TO_NOISE = 3.5
 """How far a beat's rise must stand above the noise, as a multiple of the frame-to-frame jitter of the
 signal before the median. The detector's own flat-line guard measures jitter on what it is fed, and the
 median smooths that jitter away, so plain noise would pass it. On the recording real beats rose 3.6 to
-18 times this jitter, median 11; synthetic noise alone and flicker alone never passed 3.0."""
+18 times this jitter, median 11; synthetic noise alone and the disturbance alone never passed
+3.0."""
 
 DETREND_SECONDS = 1.0
 """The width of the centred average taken off the cleaned signal before peaks are looked for. The

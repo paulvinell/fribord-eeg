@@ -1,7 +1,7 @@
 """Heart rate from the Mendi's optical frames.
 
-Held to two kinds of evidence: synthetic frames with known beat times and the room-light flicker a real
-recording showed, which always run, and that real recording of a resting forehead, which is kept on the
+Held to two kinds of evidence: synthetic frames with known beat times and the disturbance in the light
+readings a real recording showed, which always run, and that real recording of a resting forehead, which is kept on the
 machine it was made on and not committed, so its tests run only where it exists. Frames are values pushed
 in; no headband, no clock.
 """
@@ -21,7 +21,8 @@ from nfb.heg.pulse import PulseExtractor, _FrameClock
 from nfb.heg.source import Channel, Frame
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mendi-pulse.jsonl.gz"
-"""40 s from a real headband, put on during the first few seconds, with room light flickering."""
+"""40 s from a real headband, put on during the first few seconds, with a disturbance about twice a second
+in its light readings."""
 
 recorded = pytest.mark.skipif(not FIXTURE.exists(), reason="needs the local headband recording")
 
@@ -43,11 +44,11 @@ def _successive_rms_ms(intervals: list[float]) -> float:
     return 1000.0 * math.sqrt(sum(s * s for s in steps) / len(steps))
 
 
-def _synthetic(seconds: float = 60.0, flicker: bool = True, pulse: bool = True, seed: int = 3,
+def _synthetic(seconds: float = 60.0, disturbance: bool = True, pulse: bool = True, seed: int = 3,
                drift: float = 0.0):
     """Frames at 31 a second with radio jitter on their arrival, a pulse with a fast rise and a slow
-    fall at known beat times, and optionally room light flickering into infrared and ambient alike, with
-    occasional frames where the two do not match."""
+    fall at known beat times, and optionally a disturbance about twice a second raising infrared and
+    ambient alike, with occasional frames where the two do not match, as one real recording showed."""
     rng = random.Random(seed)
     beats, at = [], 0.5
     while at < seconds:
@@ -64,8 +65,8 @@ def _synthetic(seconds: float = 60.0, flicker: bool = True, pulse: bool = True, 
                     blood += d / 0.12
                 elif 0.12 <= d < 0.9:
                     blood += math.exp(-(d - 0.12) / 0.25)
-        light = 60000.0 * (1.0 if (t * 1.95) % 1.0 < 0.2 else 0.0) if flicker else 0.0
-        spike = 40000.0 if flicker and rng.random() < 0.03 else 0.0
+        light = 60000.0 * (1.0 if (t * 1.95) % 1.0 < 0.2 else 0.0) if disturbance else 0.0
+        spike = 40000.0 if disturbance and rng.random() < 0.03 else 0.0
         ir = (300000.0 - 4000.0 * blood + drift * math.sin(2 * math.pi * 0.1 * t) + light + spike
               + rng.gauss(0.0, 150.0))
         amb = 15000.0 + light + rng.gauss(0.0, 150.0)
@@ -97,7 +98,7 @@ def test_beats_are_stamped_on_the_edge_so_their_intervals_stay_steady():
     assert _successive_rms_ms(settled) < 120.0
 
 
-def test_room_light_flicker_does_not_become_a_heart_rate():
+def test_a_disturbance_in_the_light_readings_does_not_become_a_heart_rate():
     frames, truth = _synthetic()
     extractor = PulseExtractor()
     beats = [b for f in frames for b in extractor.push(f)]
@@ -105,7 +106,7 @@ def test_room_light_flicker_does_not_become_a_heart_rate():
     true_intervals = [b - a for a, b in zip(truth, truth[1:])]
     found = [b.rr_intervals[0] for b in beats[2:]]
     errors = [min(abs(f - t) for t in true_intervals) for f in found]
-    assert statistics.median(errors) < 0.015, "intervals follow the heart, not the flicker"
+    assert statistics.median(errors) < 0.015, "intervals follow the heart, not the disturbance"
 
 
 def test_a_slow_drift_under_the_pulse_does_not_hide_beats():
@@ -144,7 +145,7 @@ def test_out_of_range_readings_give_no_beats_and_say_so():
 
 
 def test_a_signal_with_no_pulse_gives_no_beats():
-    frames, _ = _synthetic(seconds=30.0, pulse=False, flicker=False)
+    frames, _ = _synthetic(seconds=30.0, pulse=False, disturbance=False)
     extractor = PulseExtractor()
     assert not [b for f in frames for b in extractor.push(f)], "a headband on the table finds no heart"
 
