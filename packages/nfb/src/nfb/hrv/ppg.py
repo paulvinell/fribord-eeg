@@ -306,6 +306,71 @@ def steepest_rise(points: list[tuple[float, float]]) -> float:
     return t_0 + shift * (t_p - t_m) / 2.0
 
 
+RISE_AFTER_S = 0.85
+"""How long after the detector's stamp a HeartMath pulse's whole rise has arrived: its foot within 0.25 s
+of the stamp and its top within 0.6 s of the foot. A beat is held this long before it is timed."""
+
+
+def half_height(points: list[tuple[float, float]], stamp: float) -> float | None:
+    """When an upright pulse crossed half its height on the way up, from `(time, value)` points around it.
+
+    The foot is the lowest point near `stamp`, the top the highest within 0.6 s after the foot, and the
+    crossing is interpolated between samples. Half height sits on the steep part of the rise, where noise
+    moves a crossing least; the foot and the top are rounded and noise moves them most.
+    """
+    near = [(t, v) for t, v in points if stamp - 0.15 <= t <= stamp + 0.25]
+    if not near:
+        return None
+    t_foot, foot = min(near, key=lambda p: p[1])
+    rise = [(t, v) for t, v in points if t_foot <= t <= t_foot + 0.6]
+    if len(rise) < 3:
+        return None
+    top = max(v for _, v in rise)
+    if top <= foot:
+        return None
+    half = (foot + top) / 2.0
+    for (t0, v0), (t1, v1) in zip(rise, rise[1:]):
+        if v0 < half <= v1:
+            return t0 + (half - v0) / (v1 - v0) * (t1 - t0)
+    return None
+
+
+class BeatFinder:
+    """Raw HeartMath samples in, `Beat`s out, each timed at half height of its pulse's rise.
+
+    The detector finds each beat at the highest raw sample. The HeartMath's raw pulse points down, so
+    that sample is the pulse's rounded foot, and on two recordings beside a headband it gave intervals
+    whose beat-to-beat variation read 104 and 168 ms where the two devices together showed about 66.
+    Timed at half height of the rise instead, the two devices' intervals correlated at 0.96 and 0.97 and
+    agreed on that variation. Each beat waits `RISE_AFTER_S` for its rise to arrive.
+    """
+
+    def __init__(self, rate_hz: float = PPG_RATE_HZ):
+        self._detector = PeakDetector(rate_hz=rate_hz)
+        self._recent: deque[tuple[float, float]] = deque(maxlen=int(2.0 * rate_hz))
+        self._pending: deque[float] = deque()
+        self._last: float | None = None
+
+    def push(self, t: float, sample: float) -> list[Beat]:
+        self._recent.append((t, sample))
+        found = self._detector.push(t, sample)
+        if found is not None:
+            self._pending.append(found[0])
+        out: list[Beat] = []
+        while self._pending and t - self._pending[0] >= RISE_AFTER_S:
+            stamp = self._pending.popleft()
+            upright = [(at, -v) for at, v in self._recent if stamp - 0.3 <= at <= stamp + RISE_AFTER_S]
+            when = half_height(upright, stamp)
+            previous, self._last = self._last, when
+            if when is None or previous is None or when <= previous:
+                continue                # the first beat, or one without a rise, has no interval
+            interval = when - previous
+            # `contact=None`, not False: a pulse sensor has no contact flag, and False is the strap
+            # saying its intervals are whatever its detector latched onto, which the processor drops.
+            out.append(Beat(t=when, hr_bpm=60.0 / interval, rr_intervals=[interval], contact=None))
+        return out
+
+
 class PpgDecoder:
     """Transport bytes in, `Beat`s out. Everything between the two, and nothing about the wire.
 
@@ -318,7 +383,7 @@ class PpgDecoder:
         self.rate_hz = rate_hz
         self._dt = 1.0 / rate_hz
         self._splitter = FrameSplitter()
-        self._detector = PeakDetector(rate_hz=rate_hz)
+        self._finder = BeatFinder(rate_hz=rate_hz)
         self._warm_up = max(0, warm_up_samples)
         self._seen = 0
         self._last_stamp: float | None = None
@@ -375,11 +440,5 @@ class PpgDecoder:
             if self._seen <= self._warm_up:
                 continue
             self.raw.append((t, sample))
-            found = self._detector.push(t, sample)
-            if found is None or found[1] is None:
-                continue                        # the first beat has no interval to report
-            beat_t, interval = found
-            # `contact=None`, not False: a pulse sensor has no contact flag, and False is the strap
-            # saying its intervals are whatever its detector latched onto, which the processor drops.
-            out.append(Beat(t=beat_t, hr_bpm=60.0 / interval, rr_intervals=[interval], contact=None))
+            out += self._finder.push(t, sample)
         return out
