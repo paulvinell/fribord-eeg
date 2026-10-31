@@ -98,9 +98,9 @@ class _FrameClock:
 class PulseExtractor:
     """Mendi frames in, `Beat`s out. `push(frame)` returns the beats that frame completed.
 
-    It reads the P channel, which carried the strongest pulse of the three and is the channel the HEG
-    projection uses as its reference, so the pulse and the HEG signal come from different channels. The
-    signal is negated, because the pulse is a dip in light and the detector looks for peaks. The cleaned
+    It reads the P channel. In every recording P carried the strongest pulse rhythm of the three, and
+    over three minutes beside the HeartMath it timed beats as well as L, about 22 ms of error per beat
+    against 24, and better than R at 33. The signal is negated, because the pulse is a dip in light and the detector looks for peaks. The cleaned
     waveform is kept in `waveform` as `(time, value)` pairs, pulse pointing up, for a caller that averages
     it around beats.
     """
