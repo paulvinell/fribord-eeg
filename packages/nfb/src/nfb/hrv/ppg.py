@@ -283,6 +283,29 @@ class PeakDetector:
         return 0.5 ** ((elapsed - overdue_at) / self.floor_relax_halflife_s)
 
 
+def steepest_rise(points: list[tuple[float, float]]) -> float:
+    """When a pulse rose fastest, between samples, from `(time, value)` points spanning its rise.
+
+    The steepest point of the rise is a steadier beat time than the top, which on a weak optical pulse
+    is broad and moved by noise: on a forehead recording it halved beat-to-beat variation. The points
+    are smoothed over three samples first, because a difference of neighbouring samples doubles their
+    noise, and the steepest step is placed by a parabola through it and its neighbours.
+    """
+    smooth = [(points[i][0], (points[i - 1][1] + points[i][1] + points[i + 1][1]) / 3.0)
+              for i in range(1, len(points) - 1)]
+    slopes = [((smooth[i][0] + smooth[i + 1][0]) / 2.0, smooth[i + 1][1] - smooth[i][1])
+              for i in range(len(smooth) - 1)]
+    k = max(range(len(slopes)), key=lambda i: slopes[i][1])
+    if not 0 < k < len(slopes) - 1:
+        return slopes[k][0]
+    (t_m, s_m), (t_0, s_0), (t_p, s_p) = slopes[k - 1], slopes[k], slopes[k + 1]
+    bend = s_m - 2.0 * s_0 + s_p
+    if bend >= 0.0:
+        return t_0
+    shift = max(-0.5, min(0.5, 0.5 * (s_m - s_p) / bend))
+    return t_0 + shift * (t_p - t_m) / 2.0
+
+
 class PpgDecoder:
     """Transport bytes in, `Beat`s out. Everything between the two, and nothing about the wire.
 

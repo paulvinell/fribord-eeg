@@ -13,7 +13,7 @@ from collections import deque
 from statistics import median
 
 from nfb.hrv.beats import Beat
-from nfb.hrv.ppg import PeakDetector
+from nfb.hrv.ppg import PeakDetector, steepest_rise
 
 from .source import HEG_RATE_HZ, Frame
 
@@ -112,7 +112,7 @@ class PulseExtractor:
         if len(rise) < 5 or not self._stands_clear(rise):
             self._last_edge = None      # the next interval would span the missing beat
             return []
-        edge = self._edge_time(rise)
+        edge = steepest_rise(rise)
         previous, self._last_edge = self._last_edge, edge
         if previous is None or edge <= previous:
             return []
@@ -125,25 +125,3 @@ class PulseExtractor:
         recent = list(self._recent)
         jitter = median(abs(b - a) for a, b in zip(recent, recent[1:])) if len(recent) > 2 else 0.0
         return max(values) - min(values) >= MIN_PULSE_TO_NOISE * max(jitter, 0.5)
-
-    def _edge_time(self, points: list[tuple[float, float]]) -> float:
-        """The steepest point of the rise before a peak, between samples.
-
-        The top of a forehead pulse is broad and noise moves it; on the recording, stamping beats on the
-        steepest point of the rise instead halved their beat-to-beat variation. The waveform is smoothed
-        over three samples first, because a difference of neighbouring samples doubles their noise, and
-        the steepest step is placed by a parabola through it and its neighbours.
-        """
-        smooth =[(points[i][0], (points[i - 1][1] + points[i][1] + points[i + 1][1]) / 3.0)
-                  for i in range(1, len(points) - 1)]
-        slopes = [((smooth[i][0] + smooth[i + 1][0]) / 2.0, smooth[i + 1][1] - smooth[i][1])
-                  for i in range(len(smooth) - 1)]
-        k = max(range(len(slopes)), key=lambda i: slopes[i][1])
-        if not 0 < k < len(slopes) - 1:
-            return slopes[k][0]
-        (t_m, s_m), (t_0, s_0), (t_p, s_p) = slopes[k - 1], slopes[k], slopes[k + 1]
-        bend = s_m - 2.0 * s_0 + s_p
-        if bend >= 0.0:
-            return t_0
-        shift = max(-0.5, min(0.5, 0.5 * (s_m - s_p) / bend))
-        return t_0 + shift * (t_p - t_m) / 2.0

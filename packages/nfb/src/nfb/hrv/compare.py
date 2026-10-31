@@ -15,6 +15,8 @@ from statistics import median
 
 import numpy as np
 
+from .ppg import steepest_rise
+
 Wave = list[tuple[float, float]]
 
 MAX_LAG_S = 0.40
@@ -24,9 +26,10 @@ at 75 bpm, so a beat cannot be paired with its neighbour."""
 MATCH_TOLERANCE_S = 0.15
 """How far, once the usual delay is known, a pair may stray from it and still be the same heartbeat."""
 
-EDGE_BEFORE_S, EDGE_AFTER_S = 0.40, 0.10
-"""Where to look for the steepest rise around a beat: before a beat stamped on its top, and a little after
-a beat already stamped on its rise."""
+EDGE_BEFORE_S, EDGE_AFTER_S = 0.40, 0.20
+"""Where to look for the steepest rise around a beat: back far enough for a beat stamped on its top, and
+on far enough for one stamped at the start of its rise, which at 30 samples a second needs the whole
+rise in view. The next heartbeat's rise is further on than that even at 120 bpm."""
 
 
 @dataclass(frozen=True)
@@ -94,19 +97,11 @@ def match_beats(forehead: list[float], reference: list[float]) -> Agreement:
 def edge_times(wave: Wave, beats: list[float]) -> list[float]:
     """Each beat moved to the steepest point of the rise near it, so two detectors that stamp beats at
     different points of the pulse are compared at the same point."""
-    if len(wave) < 5:
-        return list(beats)
-    t = np.array([p[0] for p in wave])
-    v = np.array([p[1] for p in wave])
+    times = [p[0] for p in wave]
     out = []
     for b in beats:
-        lo, hi = np.searchsorted(t, b - EDGE_BEFORE_S), np.searchsorted(t, b + EDGE_AFTER_S)
-        if hi - lo < 4:
-            out.append(b)
-            continue
-        slope = np.diff(v[lo:hi])
-        k = int(np.argmax(slope))
-        out.append(float((t[lo + k] + t[lo + k + 1]) / 2.0))
+        lo, hi = bisect_left(times, b - EDGE_BEFORE_S), bisect_left(times, b + EDGE_AFTER_S)
+        out.append(steepest_rise(wave[lo:hi]) if hi - lo >= 5 else b)
     return out
 
 
