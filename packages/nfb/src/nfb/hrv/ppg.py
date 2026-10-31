@@ -371,15 +371,20 @@ class BeatFinder:
         return out
 
 
+WAVEFORM_SECONDS = 64.0
+"""How much raw waveform the decoder keeps: enough for a program to compare a minute of this pulse with
+another sensor's."""
+
+
 class PpgDecoder:
     """Transport bytes in, `Beat`s out. Everything between the two, and nothing about the wire.
 
-    `feed()` takes a chunk and the time it arrived, and returns the beats it completed. The raw waveform
-    is kept for a caller that wants to draw it; nothing does yet.
+    `feed()` takes a chunk and the time it arrived, and returns the beats it completed. The last
+    `WAVEFORM_SECONDS` of raw waveform are kept in `raw`, and `upright()` gives them pulse pointing up.
     """
 
     def __init__(self, rate_hz: float = PPG_RATE_HZ, warm_up_samples: int = 150,
-                 raw_keep: int = 4096):
+                 raw_keep: int | None = None):
         self.rate_hz = rate_hz
         self._dt = 1.0 / rate_hz
         self._splitter = FrameSplitter()
@@ -387,12 +392,17 @@ class PpgDecoder:
         self._warm_up = max(0, warm_up_samples)
         self._seen = 0
         self._last_stamp: float | None = None
-        self.raw: deque[tuple[float, int]] = deque(maxlen=raw_keep)
+        self.raw: deque[tuple[float, int]] = deque(maxlen=raw_keep or int(WAVEFORM_SECONDS * rate_hz))
         self.battery_pct: int | None = None
 
     @property
     def bad_crc(self) -> int:
         return self._splitter.bad_crc
+
+    def upright(self) -> list[tuple[float, float]]:
+        """The kept waveform with the pulse pointing up. The HeartMath's raw pulse points down: averaged
+        around its beats it rises slowly and falls fast."""
+        return [(t, -float(v)) for t, v in self.raw]
 
     def feed(self, data: bytes, arrival_t: float) -> list[Beat]:
         """Decode `data`, taking `arrival_t` as the moment its last sample was taken.

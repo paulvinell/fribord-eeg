@@ -15,11 +15,12 @@ them, so nothing above has to know there are two.
 from __future__ import annotations
 
 import time
+from collections import deque
 
 from nfb.heg import FrameProcessor, PulseExtractor, SignalProcessor
 from nfb.hrv import HRVProcessor
 
-from .runner import SensorRunner
+from .runner import BEATS_KEPT, SensorRunner
 
 SCAN_SECONDS = 8.0
 
@@ -83,6 +84,7 @@ class MendiRunner(SensorRunner):
         self.pulse = PulseExtractor()
         self.heart_processor = HRVProcessor()
         self.heart_state = None             # the heart rate from the headband's own frames
+        self.beat_times: deque[float] = deque(maxlen=BEATS_KEPT)
 
     def _ready(self, state) -> bool:
         return state.samples_seen > 5
@@ -93,6 +95,7 @@ class MendiRunner(SensorRunner):
         self.pulse.reset()
         self.heart_processor.reset()
         self.heart_state = None
+        self.beat_times.clear()
 
     def _read(self, gen: int) -> str | None:
         for frame in self.source.frames():
@@ -101,6 +104,7 @@ class MendiRunner(SensorRunner):
             self.state = self.signal.push(self.processor.process(frame), self.processor.gate_fraction)
             for beat in self.pulse.push(frame):
                 self.heart_state = self.heart_processor.push(beat)
+                self.beat_times.append(beat.t)
             if self.pulse.trouble:
                 self.heart_state = None     # no heart rate from readings that carry none
             self.seen_at = time.monotonic()
@@ -108,6 +112,11 @@ class MendiRunner(SensorRunner):
         source = self.source
         return (getattr(source, "error", None) if source is not None else None) \
             or "the headband stopped delivering frames"
+
+    @property
+    def waveform(self) -> list[tuple[float, float]]:
+        """The last minute of the forehead pulse, pointing up; see `runner.PulseRunner`."""
+        return list(self.pulse.waveform)
 
     @property
     def battery_pct(self) -> int | None:

@@ -12,10 +12,11 @@ it, and the CFC screen shows the same instruments beside the EEG and warns when 
 from __future__ import annotations
 
 import time
+from collections import deque
 
 from nfb.hrv import HRVProcessor
 
-from .runner import SensorRunner
+from .runner import BEATS_KEPT, SensorRunner
 
 SCAN_SECONDS = 8.0
 
@@ -45,6 +46,7 @@ class HeartRunner(SensorRunner):
     def __init__(self, choice=None):
         super().__init__(choice)
         self.processor = HRVProcessor()
+        self.beat_times: deque[float] = deque(maxlen=BEATS_KEPT)
         self._reading: tuple | None = None   # what the live reader was opened for, if any
 
     def _ready(self, state) -> bool:
@@ -54,6 +56,7 @@ class HeartRunner(SensorRunner):
         # On a new source only, not between reconnect attempts: a gap's beats are worth keeping (`_reopen`
         # does not call this).
         self.processor.reset()
+        self.beat_times.clear()
 
     def _wanted(self) -> tuple:
         """What the current choice asks for, in the terms that decide whether a reader is the right one:
@@ -85,6 +88,7 @@ class HeartRunner(SensorRunner):
             # the processor discards, and refreshing on those stops `stale` ever firing.
             if beat.contact is not False and beat.rr_intervals:
                 self.seen_at = time.monotonic()
+                self.beat_times.append(beat.t)
         return getattr(self.source, "error", None) or "the beat source stopped delivering"
 
     def _reopen(self) -> bool:
@@ -97,6 +101,18 @@ class HeartRunner(SensorRunner):
             return False
         self.error = None
         return True
+
+    @property
+    def heart_state(self):
+        """The heart-rate state under the name every pulse runner uses; see `runner.PulseRunner`."""
+        return self.state
+
+    @property
+    def waveform(self) -> list[tuple[float, float]] | None:
+        """The last minute of the pulse, pointing up, when the source sends its waveform (the USB cable
+        does; the Bluetooth heart-rate service sends only beats)."""
+        decoder = getattr(self.source, "decoder", None)
+        return decoder.upright() if decoder is not None else None
 
     @property
     def spectrum(self):

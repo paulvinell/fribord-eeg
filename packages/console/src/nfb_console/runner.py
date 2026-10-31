@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
+from typing import Protocol
 
 
 class SensorRunner:
@@ -168,3 +170,26 @@ class SensorRunner:
     def _reopen(self) -> bool:
         """For a reconnecting source: open it again. Return False to give up retrying."""
         return True
+
+
+BEATS_KEPT = 256
+"""How many raw beat times a pulse runner keeps: four minutes at a resting rate."""
+
+
+class PulseRunner(Protocol):
+    """What a runner that reads a pulse hands out, whichever device it reads.
+
+    The HeartMath's runner and the Mendi's both provide it, so a program that compares them treats the
+    two alike and neither device learns about the other.
+    """
+
+    heart_state: object | None
+    """The heart-rate state from `nfb.hrv.HRVProcessor`, or None before beats arrive."""
+
+    beat_times: deque
+    """When each recent beat happened, in seconds, as the device's own processing stamped it."""
+
+    @property
+    def waveform(self) -> list[tuple[float, float]] | None:
+        """The last minute of the pulse as `(time, value)` pairs, pulse pointing up, or None when the
+        source sends no waveform."""

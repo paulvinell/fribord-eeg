@@ -154,8 +154,8 @@ def heartmath_waveform(seconds: float = 60.0, hr: float = 62.0, noise: float = 6
     truth = []
     for b in onsets:
         lo, hi = int((b - 0.1) * rate), int((b + 0.2) * rate)
-        if lo < 0:
-            continue
+        if lo < 0 or hi + int(0.6 * rate) > len(clean):
+            continue                    # too near either end to have its whole rise
         foot = min(range(lo, hi), key=lambda i: clean[i])
         top = max(range(foot, min(len(clean), foot + int(0.6 * rate))), key=lambda i: clean[i])
         half = (clean[foot] + clean[top]) / 2.0
