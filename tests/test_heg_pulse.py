@@ -43,7 +43,8 @@ def _successive_rms_ms(intervals: list[float]) -> float:
     return 1000.0 * math.sqrt(sum(s * s for s in steps) / len(steps))
 
 
-def _synthetic(seconds: float = 60.0, flicker: bool = True, pulse: bool = True, seed: int = 3):
+def _synthetic(seconds: float = 60.0, flicker: bool = True, pulse: bool = True, seed: int = 3,
+               drift: float = 0.0):
     """Frames at 31 a second with radio jitter on their arrival, a pulse with a fast rise and a slow
     fall at known beat times, and optionally room light flickering into infrared and ambient alike, with
     occasional frames where the two do not match."""
@@ -65,7 +66,8 @@ def _synthetic(seconds: float = 60.0, flicker: bool = True, pulse: bool = True, 
                     blood += math.exp(-(d - 0.12) / 0.25)
         light = 60000.0 * (1.0 if (t * 1.95) % 1.0 < 0.2 else 0.0) if flicker else 0.0
         spike = 40000.0 if flicker and rng.random() < 0.03 else 0.0
-        ir = 300000.0 - 4000.0 * blood + light + spike + rng.gauss(0.0, 150.0)
+        ir = (300000.0 - 4000.0 * blood + drift * math.sin(2 * math.pi * 0.1 * t) + light + spike
+              + rng.gauss(0.0, 150.0))
         amb = 15000.0 + light + rng.gauss(0.0, 150.0)
         arrival = t + abs(rng.gauss(0.0, 0.013))
         frames.append(Frame(t=arrival, l=Channel(ir, ir, amb), r=Channel(ir, ir, amb), p=Channel(ir, ir, amb),
@@ -104,6 +106,15 @@ def test_room_light_flicker_does_not_become_a_heart_rate():
     found = [b.rr_intervals[0] for b in beats[2:]]
     errors = [min(abs(f - t) for t in true_intervals) for f in found]
     assert statistics.median(errors) < 0.015, "intervals follow the heart, not the flicker"
+
+
+def test_a_slow_drift_under_the_pulse_does_not_hide_beats():
+    """The forehead signal drifts over seconds. Without the drift taken out first, the peak detector's
+    slower baseline left whole seconds of pulses below it; on this drift, every beat."""
+    frames, truth = _synthetic(drift=20000.0)
+    extractor = PulseExtractor()
+    beats = [b for f in frames for b in extractor.push(f)]
+    assert len(beats) >= len(truth) - 4, f"{len(beats)} beats for {len(truth) - 1} intervals"
 
 
 def test_a_signal_with_no_pulse_gives_no_beats():

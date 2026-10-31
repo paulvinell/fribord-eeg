@@ -34,6 +34,20 @@ signal before the median. The detector's own flat-line guard measures jitter on 
 median smooths that jitter away, so plain noise would pass it. On the recording real beats rose 3.6 to
 18 times this jitter, median 11; synthetic noise alone and flicker alone never passed 3.0."""
 
+DETREND_SECONDS = 1.0
+"""The width of the centred average taken off the cleaned signal before peaks are looked for. The
+forehead signal drifts over seconds, and the peak detector's own baseline, tuned for the HeartMath's
+steadier signal, follows more slowly: on one recording the drift held whole seconds of pulses below it,
+and 19 of 43 beats were lost. A centred average takes the drift out without moving any beat, at the cost
+of half a second of delay."""
+
+DETECTOR_MIN_SNR = 2.5
+"""The shared peak detector's flat-line guard, loosened for this sensor. The guard compares a peak to the
+typical step between neighbouring samples. At 500 samples a second those steps are tiny beside a pulse;
+at 30, a pulse rises in a few samples, its own steps are large, and real beats cleared the default bar of
+5 by a hair or not at all. `MIN_PULSE_TO_NOISE` does the noise job here. On a recording with 38 heartbeats
+the beats found rose from 30 to 35 at 2.5 and no lower setting found more."""
+
 NOISE_SECONDS = 2.0
 """How much of the signal before the median the noise is measured over."""
 
@@ -90,8 +104,9 @@ class PulseExtractor:
     def reset(self) -> None:
         self._clock = _FrameClock(self.rate_hz)
         self._raw: deque[tuple[float, float]] = deque(maxlen=DESPIKE_SAMPLES)
+        self._level: deque[tuple[float, float]] = deque(maxlen=int(DETREND_SECONDS * self.rate_hz) | 1)
         self._recent: deque[float] = deque(maxlen=int(NOISE_SECONDS * self.rate_hz))
-        self._detector = PeakDetector(rate_hz=self.rate_hz)
+        self._detector = PeakDetector(rate_hz=self.rate_hz, min_snr=DETECTOR_MIN_SNR)
         self._last_edge: float | None = None
         self.waveform: deque[tuple[float, float]] = deque(maxlen=int(WAVEFORM_SECONDS * self.rate_hz))
         self.beats_found = 0
@@ -102,8 +117,11 @@ class PulseExtractor:
         self._recent.append(sample)
         if len(self._raw) < DESPIKE_SAMPLES:
             return []
-        t = self._raw[DESPIKE_SAMPLES // 2][0]
-        value = -median(v for _, v in self._raw)
+        self._level.append((self._raw[DESPIKE_SAMPLES // 2][0], -median(v for _, v in self._raw)))
+        if len(self._level) < self._level.maxlen:
+            return []
+        t, centre = self._level[len(self._level) // 2]
+        value = centre - sum(v for _, v in self._level) / len(self._level)
         self.waveform.append((t, value))
         found = self._detector.push(t, value)
         if found is None:
