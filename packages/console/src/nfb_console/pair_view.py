@@ -1,15 +1,15 @@
-"""The Mendi's pulse against the HeartMath's, live: a program that compares two heart sensors.
+"""The Mendi's pulse against the HeartMath's, live: a program that trains the ratio of their pulse heights.
 
-It borrows the two runners the app already owns, the headband's and the heart-rate sensor's, and never
-starts or stops either, so the HEG and HRV programs can use them too. Both hand out their beats and their
-pulse in one form (`runner.PulseRunner`), so nothing here knows which device is which beyond its name.
-Every couple of seconds it compares the last minute of the two pulses with `nfb.hrv.compare`. It trains
-nothing: the height ratio and the delay are not validated as things to train, so they are shown, not fed
-back.
+When the small vessels in the skin tighten, a pulse measured at the skin shrinks, so the ear pulse's height
+against the forehead's is a readout of those vessels, a third handle on arousal beside the pupil and the heart
+rate. The program trains it upward from its value at the start of the session; whether it follows arousal at
+the ear is not known yet. It borrows the app's two runners through `runner.PulseRunner`, never starting or
+stopping either, and compares their last minute every second with `nfb.hrv.compare`.
 """
 
 from __future__ import annotations
 
+import math
 import statistics
 import threading
 import time
@@ -22,12 +22,14 @@ import flet.canvas as cv
 
 from nfb.hrv.compare import compare, heights
 
-from . import chrome, cues, plan_pane, prefs
+from . import chrome, cues, music, plan_pane, prefs, sysvolume
 from . import theme as t
+from .feedback import CONDITION, FeedbackSettings
 from .plan import SessionPlan
 from .plots import StickyCeiling, dashed, grid, place_value_labels, polyline, value_axis
 from .protocols import Protocol
 from .runner import PulseRunner
+from .targets import Target
 from .widgets import help_button, panel, stat_tile
 
 HANDLES = ("PAIR",)
@@ -51,6 +53,13 @@ starting value, not a measured one."""
 START_BEATS = 20
 """How many of the session's first heartbeats set the ratio's starting value, the half-way point of the
 level. Until that many have arrived the start is provisional, so feedback runs from the first beats."""
+
+DEFAULT_FULL_AT = 0.3
+"""How far above its starting value the ratio puts the level at full, and below it at empty: 30%, about how
+far the ratio wandered either way over three calm minutes with nothing asked of the wearer."""
+
+OBSERVE_HZ = 1.0 / UPDATE_S
+"""How often a new training reading can arrive, for the target's own statistics: once per comparison."""
 
 SETTLE_S = 1.2
 """How long after a heartbeat both sensors' pulses around it have arrived: the headband's cleaned waveform
@@ -78,7 +87,7 @@ class Snapshot:
 
 
 class PairSession:
-    """The two borrowed runners, the comparison and the session clock. No outputs: nothing is trained."""
+    """The two borrowed runners, the comparison, the level it drives and the session clock."""
 
     def __init__(self, protocol: Protocol, length_seconds: float | None = None,
                  heart_runner: PulseRunner | None = None, mendi_runner: PulseRunner | None = None,
@@ -98,6 +107,25 @@ class PairSession:
         self._start_ratios: list[float] = []
         self._last_ratio_at = float("-inf")
         self.training: tuple[float, float] | None = None      # (ear beat, ratio against the start)
+        self.feedback = FeedbackSettings()
+        self.output_volume = sysvolume.SystemVolume()
+        self.music = music.MusicOutput()
+        for name, mech in self.feedback.mechanisms.items():
+            if name not in self.offers:
+                mech.enabled = False
+        # A tone to follow, as on the Pupil program: the sound mechanism moves the volume of what plays.
+        self.feedback.music.enabled = True
+        self.feedback.music.source = "tone"
+        self.full_at = DEFAULT_FULL_AT
+        self.signal_target = Target(0, None, "increase", threshold=0.5, mode="fixed", name="height ratio",
+                                    unit="")
+        self.signal_target._settled = True
+        self.targets = [self.signal_target]
+        self._signal: float | None = None
+        self._level = 0.0
+        self._level_at: float | None = None
+        self._driven: float | None = None       # the ear beat of the training reading last driven
+        self._last_click: float | None = None
         self.finished = False
         self.paused = True
         self._stop = False
@@ -106,6 +134,60 @@ class PairSession:
         self._wake = threading.Event()
         self._worker: threading.Thread | None = None
         self.redraw: Callable[[], None] = lambda: None
+
+    # --- what the shared Feedback pane reads ------------------------------------------------
+    # Declared one by one, as on the HEG and Pupil programs, and for their reason.
+
+    offers = ("sound", "click", "music")
+    """Sound only, as on the Pupil program."""
+    music_sources = ("tone", "noise", "shepard", "file")
+    combines = ("weighted",)
+    pinned_feedback = frozenset()
+    arrangements: tuple[str, ...] = ()
+    state_ends = None
+    tone_bias = None
+    unbiased = False
+    gates = None
+    scores_bands = False
+    sustains_reward = False
+    hold_choices = None
+    hold_seconds = 0.0
+    tunes_envelope = False
+    conditions_signal = False
+
+    def level_note(self) -> tuple[str, str] | None:
+        return None
+
+    def dead_channels(self) -> list[str]:
+        return ["the two sensors"] if self.missing() else []
+
+    @property
+    def level_source(self) -> tuple[str, str]:
+        return ("the ear pulse height against the forehead's, against the start of the session",
+                f"half = as at the start · full at {self.full_at * 100:+.0f}%")
+
+    @property
+    def level(self) -> float:
+        return self._level
+
+    @property
+    def signal(self) -> float | None:
+        return self._signal
+
+    @property
+    def active_targets(self) -> list[Target]:
+        return self.targets if self._signal is not None else []
+
+    def channel_targets(self, channel: str) -> list[Target]:
+        return self.active_targets
+
+    @property
+    def state_balance(self) -> float | None:
+        return None
+
+    def level_of(self, ratio: float) -> float:
+        """Half at the starting ratio, full `full_at` above it, empty the same distance below."""
+        return min(1.0, max(0.0, 0.5 + (ratio - 1.0) / (2.0 * max(0.05, self.full_at))))
 
     # --- what is missing ----------------------------------------------------------------------
 
@@ -198,6 +280,58 @@ class PairSession:
         self.training = (self.beat_ratios[-1][0], value)
         return value
 
+    # --- the level and the outputs -----------------------------------------------------------
+
+    def observe(self) -> None:
+        """The newest training reading into the level and the outputs. Once per draw, on Flet's loop."""
+        if self.missing():
+            if self._signal is not None:
+                self._go_quiet()
+            return
+        reading = self.training
+        if reading is None or reading[0] == self._driven:
+            return
+        self._driven = reading[0]
+        self._move_level(self.level_of(reading[1]), time.monotonic())
+
+    def _move_level(self, signal: float, now: float) -> None:
+        self._signal = signal
+        self.signal_target.observe(signal, OBSERVE_HZ)
+        tau = max(0.0, self.feedback.smoothing_seconds)
+        if tau <= 0 or self._level_at is None:
+            self._level = signal
+        else:
+            dt = now - self._level_at
+            if dt > 0:
+                self._level += (1.0 - math.exp(-dt / tau)) * (signal - self._level)
+        self._level_at = now
+        self._drive_outputs()
+
+    def _drive_outputs(self) -> None:
+        met = self.feedback.on_target(self.channel_targets(CONDITION))
+        snd = self.feedback.sound
+        self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(self._level))
+        self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met),
+                         balance=self.state_balance, level=self._level)
+        click = self.feedback.click
+        if not click.enabled or not met:
+            if not click.enabled:
+                self._last_click = None
+            return
+        now = time.monotonic()
+        if self._last_click is None or now - self._last_click >= click.interval_seconds:
+            self._last_click = now
+            self.cue(click.sound, click.volume)
+
+    def _go_quiet(self) -> None:
+        self._signal = None
+        self._level_at = None
+        self.release_outputs()
+
+    def release_outputs(self) -> None:
+        self.output_volume.release()
+        self.music.release()
+
     # --- the thread ---------------------------------------------------------------------------
 
     def run(self) -> None:
@@ -241,6 +375,7 @@ class PairSession:
             self._accumulated = self.elapsed
             self._resumed_at = None
             self.paused = True
+            self._go_quiet()                # pause lets go of every output, as on every program
 
     def tick(self) -> None:
         if not self.running:
@@ -253,6 +388,7 @@ class PairSession:
             self._accumulated = self.plan.length_seconds
             self._resumed_at = None
             self.paused = True
+            self._go_quiet()
 
     def stop(self) -> None:
         """End the session. The runners are borrowed and keep running for whatever program is next."""
@@ -260,12 +396,14 @@ class PairSession:
         self.paused = True
         self._wake.set()
         prefs.remember(self.protocol.code, self)
+        self.release_outputs()
 
     # --- going to the device screen and coming back ------------------------------------------
 
     def suspend(self) -> None:
         if not self.paused:
             self.toggle_pause()
+        self.release_outputs()              # and again, for a suspend that arrives already paused
 
     @property
     def suspended(self) -> bool:
@@ -281,12 +419,14 @@ class PairSession:
             return
         self.plan = previous.plan
         self.plan.rewind()
+        self.feedback = previous.feedback
+        self.full_at = previous.full_at
 
     def calibration(self) -> dict:
-        return {}
+        return prefs.capture(self.feedback)
 
     def restore_calibration(self, values: dict) -> int:
-        return 0
+        return prefs.apply(self.feedback, values)
 
 
 def _correlation(a: list[float], b: list[float]) -> float | None:

@@ -183,3 +183,80 @@ def test_a_comparison_that_fails_is_said_and_the_next_one_still_runs():
     session.heart = good
     waitfor(lambda: session.fault is None, what="the next comparison runs and clears it")
     session.stop()
+
+
+# --- the training -------------------------------------------------------------------------------
+
+def _spied(session):
+    calls = {"volume": [], "music": [], "released": 0}
+    session.output_volume.apply = lambda *a, **k: calls["volume"].append(a)
+    session.music.apply = lambda *a, **k: calls["music"].append(k.get("level"))
+    session.output_volume.release = lambda: calls.__setitem__("released", calls["released"] + 1)
+    session.music.release = lambda: None
+    session.cue = lambda *a, **k: True
+    return calls
+
+
+def test_the_level_is_half_at_the_start_and_full_at_the_set_amount_above():
+    session = _session()
+    assert session.level_of(1.0) == 0.5
+    assert session.level_of(1.0 + session.full_at) == 1.0
+    assert session.level_of(1.0 - session.full_at) == 0.0
+
+
+def test_each_new_reading_drives_the_outputs_once():
+    session = _session()
+    calls = _spied(session)
+    session.toggle_pause()
+    session.update(now=40.0)
+    session.observe()
+    session.observe()                   # no new reading since: nothing is driven again
+    assert len(calls["volume"]) == 1 and len(calls["music"]) == 1
+    assert session.signal == pytest.approx(session.level_of(session.training[1]))
+
+
+def test_a_shrinking_ear_pulse_lowers_the_level():
+    session = _session()
+    _spied(session)
+    session.toggle_pause()
+    session.feedback.smoothing_seconds = 0.0
+    levels = {}
+    for now in range(30, 70):
+        session.update(now=float(now))
+        session.observe()
+        levels[now] = session.level
+    assert levels[44] > 0.4 and levels[66] < 0.2
+
+
+def test_pause_suspend_and_stop_let_go_of_the_outputs():
+    session = _session()
+    calls = _spied(session)
+    session.toggle_pause()
+    session.update(now=40.0)
+    session.observe()
+    session.toggle_pause()
+    assert calls["released"] >= 1 and session.signal is None
+    session.suspend()
+    session.stop()
+    assert calls["released"] >= 3
+
+
+def test_a_sensor_dropping_out_silences_the_feedback():
+    session = _session()
+    calls = _spied(session)
+    session.toggle_pause()
+    session.update(now=40.0)
+    session.observe()
+    session.mendi.stale = True
+    session.observe()
+    assert session.signal is None and calls["released"] >= 1
+
+
+def test_settings_survive_a_stop():
+    old = _session()
+    old.full_at = 0.45
+    old.feedback.click.enabled = False
+    new = _session()
+    new.adopt(old)
+    assert new.full_at == 0.45 and not new.feedback.click.enabled
+    assert new.restore_calibration(old.calibration()) > 0
