@@ -8,7 +8,7 @@ HIGHPASS ?= 0.5
 FILE    ?= $(SESSION)
 
 .DEFAULT_GOAL := help
-.PHONY: help setup console live play record sessions probe impedance capture test lint clean
+.PHONY: help setup console live play record heartpair sessions probe impedance capture test lint clean
 
 help:  ## show this
 	@echo "nfb — neurofeedback stack"
@@ -51,6 +51,11 @@ record:  ## record a session to sessions/<timestamp>.jsonl.gz (SESSION= to name 
 	  sessions/*) ln -sf $(notdir $(RECORD_TO)) sessions/latest.jsonl.gz; echo "recorded to $(RECORD_TO) — sessions/latest.jsonl.gz now points at it" ;; \
 	  *) echo "recorded to $(RECORD_TO) (outside sessions/, latest not repointed)" ;; \
 	esac
+
+HEART ?= usb
+
+heartpair:  ## record the headband and the HeartMath together and compare their pulses (HEART=usb|ble REPLAY=file)
+	uv run python tools/heart_pair.py $(if $(REPLAY),--replay "$(REPLAY)",--seconds $(SECONDS) --heart $(HEART))
 
 sessions:  ## list the recordings, newest first
 	@ls -lht sessions/ 2>/dev/null || echo "no recordings yet"
