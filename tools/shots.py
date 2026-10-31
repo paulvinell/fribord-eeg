@@ -171,7 +171,7 @@ def feed_pupil(session, seconds: float = 75.0) -> None:
         start = sample.t if start is None else start
         if sample.t - start > seconds:
             break
-        session.eye.state = session.eye.processor.push(sample)
+        session.eye.push(sample)
         if i % 6 == 0:
             session.observe()
     session.paused = True       # the shot is a still: nothing may move the frame after it is drawn

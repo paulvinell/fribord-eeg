@@ -77,8 +77,9 @@ MIN_RANGE_MM = 0.05
 PASSIVE_WINDOW_S = 60.0
 
 OBSERVE_HZ = 10.0
-"""How often a reading is taken from the stream, matched to the draw loop. The stream runs at 60 Hz and
-is already smoothed; a voluntary change takes a second to show, so ten readings a second lose nothing."""
+"""How many readings a second of the eye's own time the session takes from the stream. The stream runs at
+60 Hz and is already smoothed; a voluntary change takes a second to show, so ten readings a second lose
+nothing. Counted in the eye's time, not in frames, so a slow frame takes the readings it missed."""
 
 CUE_PITCH = {POSITIVE: 620.0, NEGATIVE: 310.0}
 """The slow-potential screen's two cue tones, for the same reason: an octave apart, so that the two
@@ -259,6 +260,7 @@ class PupilSession:
         self._level = 0.0
         self._level_at: float | None = None
         self._last_t: float | None = None
+        self._due_t: float | None = None       # the eye time from which the next reading is taken
         self._last_phase: str | None = None
         self._block_at: float | None = None
         self._block_vals: list[float] = []
@@ -450,15 +452,37 @@ class PupilSession:
         return min(1.0, max(0.0, 0.5 + shift_mm / (2 * max(MIN_RANGE_MM, self.range_mm))))
 
     def observe(self) -> None:
-        """One reading from the stream into the level, the trials and the outputs. Once per draw."""
+        """The readings since the last draw, taken at `OBSERVE_HZ` of the eye's time, into the level, the
+        trials and the outputs, in order. Once per draw."""
         if self.error is not None or self.eye.stale:
             self.eye.steer(0.0)
             self._go_quiet()
             return
-        state = self.state
-        if state is None or state.t == self._last_t:
-            return
-        self._last_t = state.t
+        for state in self._due_readings():
+            self._observe_one(state)
+
+    def _due_readings(self) -> list:
+        """The waiting readings, thinned to one per `1 / OBSERVE_HZ` of eye time. The trial engine judges a
+        gap by the eye's time between readings, so it must see every stretch of readings the eye sent,
+        however late the frame that hands them over."""
+        step = 1.0 / OBSERVE_HZ
+        due = []
+        readings = self.eye.readings
+        while readings:
+            state = readings.popleft()
+            # A step back in time is a new source or a clock that wrapped: taken, for the trial engine to
+            # treat as the gap it is, and the grid starts again from it.
+            back = self._last_t is not None and state.t < self._last_t
+            if not back and self._due_t is not None and state.t < self._due_t:
+                continue
+            # On the grid while the readings keep up with it; from this reading after a gap.
+            on_grid = not back and self._due_t is not None and state.t - self._due_t < step
+            self._due_t = (self._due_t if on_grid else state.t) + step
+            self._last_t = state.t
+            due.append(state)
+        return due
+
+    def _observe_one(self, state) -> None:
         self.diameter = state.diameter_mm
         self.history.append((state.t, state.diameter_mm, state.valid))
         while state.t - self.history[0][0] > TRACE_SECONDS:
@@ -626,6 +650,8 @@ class PupilSession:
                 return
             self.paused = False
             self._resumed_at = time.monotonic()
+            # What arrived while paused is not part of the run. The first reading after it is then a gap.
+            self.eye.readings.clear()
         else:
             self._accumulated = self.elapsed
             self._resumed_at = None

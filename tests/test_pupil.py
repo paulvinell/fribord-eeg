@@ -13,7 +13,8 @@ from nfb.pupil.processor import AFTER_BLINK_S, RESYNC_S
 
 from nfb_console.inputs import HeartChoice, PupilChoice
 from nfb_console.protocols import BY_CODE
-from nfb_console.trials import ACTIVE, BASELINE, ITI, NEGATIVE, POSITIVE, RESULT, TrialRun
+from nfb_console.trials import ACTIVE, BASELINE, ITI, LEADIN_S, NEGATIVE, POSITIVE, RESULT, TrialRun
+from nfb_console.pupil_view import ITI_S, OBSERVE_HZ, RESULT_S
 
 from test_screens import StubPage, toolbar
 from test_ste import _help_faults, _texts
@@ -50,7 +51,7 @@ def _drive(session, seconds: float, seed: int = 3, response_mm: float | None = N
         start = sample.t if start is None else start
         if sample.t - start > seconds or session.finished:
             break
-        runner.state = runner.processor.push(sample)
+        runner.push(sample)
         if i % 6 == 0:
             session.observe()
 
@@ -379,6 +380,68 @@ def test_an_invented_simulator_is_handed_back_switched_off():
                                      pupil_runner=runner)
     session.stop()
     assert runner.choice.kind == "off"
+
+
+def _steady(session, start: float, seconds: float, observe_every: int | None = 6) -> float:
+    """Steady 60 Hz readings of a 4 mm pupil into the session's runner from `start`, observed every
+    `observe_every` readings, or not at all. Returns the time after the last reading."""
+    t = start
+    for i in range(int(round(seconds * 60))):
+        session.eye.push(PupilSample(t, 4.0, 0.95))
+        if observe_every and i % observe_every == 0:
+            session.observe()
+        t += 1 / 60
+    return t
+
+
+def _to_result(session) -> float:
+    t = 1000.0
+    while session.trials.phase != RESULT:
+        t = _steady(session, t, 0.1)
+    return t
+
+
+def test_a_slow_frame_does_not_cut_the_result_short():
+    """Stopping the sound at the end of an effort once held the screen for 0.85 s. The session took only
+    the newest reading per frame, so the trial engine saw a gap and dropped the result after a split
+    second. It takes every reading the frame missed, so the result runs its full time."""
+    session = _session()
+    t = _to_result(session)
+    began = session._last_t
+    t = _steady(session, t, 1.2, observe_every=None)        # the screen stands still for 1.2 s
+    session.observe()
+    assert session.trials.phase == RESULT, "the readings the frame missed are taken, not a gap"
+    while session.trials.phase == RESULT:
+        t = _steady(session, t, 0.1)
+    assert session._last_t - began == pytest.approx(RESULT_S, abs=0.11)
+
+
+def test_a_real_gap_in_the_readings_still_drops_the_trial():
+    session = _session()
+    t = _to_result(session)
+    _steady(session, t + 1.5, 0.2)                           # the eye sends nothing for 1.5 s
+    assert session.trials.phase == ITI
+    assert session.trials.phase_remaining() <= LEADIN_S < ITI_S[0], \
+        "the engine starts again from its lead-in, not from the rest that follows a result"
+
+
+def test_readings_that_arrive_while_paused_are_not_taken():
+    session = _session()
+    t = _steady(session, 1000.0, 1.0)
+    session.toggle_pause()
+    t = _steady(session, t, 0.5, observe_every=None)
+    session.toggle_pause()
+    resumed = t
+    _steady(session, t, 0.5)
+    assert all(not (resumed - 0.5 <= at < resumed) for at, _d, _k in session.history)
+
+
+def test_the_session_takes_ten_readings_a_second_of_eye_time_however_often_it_draws():
+    session = _session()
+    _steady(session, 1000.0, 10.0, observe_every=45)        # a frame every 0.75 s
+    times = [at for at, _d, _k in session.history]
+    assert len(times) == pytest.approx(10 * OBSERVE_HZ, abs=2)
+    assert max(b - a for a, b in zip(times, times[1:])) < 0.12
 
 
 # --- the screens ------------------------------------------------------------------------------
