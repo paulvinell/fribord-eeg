@@ -78,6 +78,7 @@ from .feedback import CONDITION, LEVEL, FeedbackSettings
 from .inputs import HeartChoice
 from .plan import SessionPlan
 from .protocols import Protocol
+from .scaling import Scaled, scaling_row
 from .targets import Target
 from .widgets import help_button, labelled, num_box, panel, pill
 
@@ -184,7 +185,7 @@ breath a minute apart."""
 # snapped to half a second and feeding that back would drag the target off wherever it was set.
 
 
-class HRVSession:
+class HRVSession(Scaled):
     """The heart, the clock, and the pacer. Not a `TrainingSession`.
 
     Deliberately not: that class is built around blocks of evenly spaced samples with an artifact gate and
@@ -269,9 +270,7 @@ class HRVSession:
         # same way a protocol's bands arrive as increase or decrease on the amplitude screen and can be
         # cycled there.
         self.direction = HRV_METRICS[DEFAULT_METRIC].default_direction
-        self.strategy_id = normalise.DEFAULT_STRATEGY
-        self.strategy_params: dict = {}
-        self._strategy = normalise.build(self.strategy_id)
+        self._init_scaling()
         self.raw_metric: float | None = None
         # A stand-in for the opening minute, on its own fixed scale. See STANDIN_METRIC.
         self._standin = normalise.build("fixed_range", low=STANDIN_RANGE_BPM[0],
@@ -474,16 +473,9 @@ class HRVSession:
         """Whether the level is `1 - signal`: training the metric down."""
         return self.direction == "decrease"
 
-    def set_strategy(self, strategy_id: str, **params) -> None:
-        if strategy_id not in normalise.STRATEGIES:
-            return
-        strategy = normalise.build(strategy_id, **params)   # build first: a bad range raises before any
-        self.strategy_id = strategy_id                      # stored state can drift from the live strategy
-        self.strategy_params = dict(params)
-        self._strategy = strategy
+    def _scaling_changed(self) -> None:
+        super()._scaling_changed()
         self.warm_from_history()
-        self.signal_target.reset_stats()
-        self.signal_target._settled = True
 
     def warm_from_history(self) -> None:
         """Fill a freshly built scale from the beats already in hand.
@@ -511,10 +503,6 @@ class HRVSession:
             if value is not None:
                 self._strategy.push(value, now - (newest - state.t))
         self._signal = None
-
-    @property
-    def strategy(self) -> normalise.Strategy:
-        return self._strategy
 
     @property
     def level_source(self) -> tuple[str, str]:
@@ -988,12 +976,7 @@ class SignalSource:
                      note=(f"the usual aim for {spec.label}" if session.direction == usual else
                            f"{spec.label} is usually trained to {usual}"),
                      width=76),
-            labelled("scaled by",
-                     *[pill(normalise.STRATEGIES[k].label, session.strategy_id == k,
-                            (lambda k_=k: lambda _e: (session.set_strategy(k_), self.rebuild()))())
-                       for k in normalise.STRATEGIES],
-                     *self._params(),
-                     note=normalise.STRATEGIES[session.strategy_id].description, width=76),
+            scaling_row(session, self.rebuild),
         ]
         self.page.update()
 
@@ -1012,33 +995,8 @@ class SignalSource:
                 on_click=(lambda i=m.id: lambda _e: self._pick(i))())
                 for m in HRV_METRICS.values()])
 
-    def _params(self) -> list:
-        """Only the knobs the selected scaling has. One that does not apply is absent rather than inert."""
-        strategy = self.session.strategy
-        out: list[ft.Control] = []
-        if isinstance(strategy, (normalise.ZScore, normalise.RollingMinMax)):
-            out += [ft.Text("over", size=t.SMALL, color=t.FAINT),
-                    num_box(strategy.window_s, lambda v: self._set(window_s=v),
-                            suffix="s", step=15, low=10, high=600)]
-        if isinstance(strategy, normalise.ZScore):
-            out += [num_box(strategy.clamp_k, lambda v: self._set(clamp_k=v),
-                            suffix="sd", step=0.5, low=0.5, high=5.0)]
-        if isinstance(strategy, normalise.FixedRange):
-            out += [num_box(strategy.low, lambda v: self._set(low=v), step=0.1),
-                    ft.Text("to", size=t.SMALL, color=t.FAINT),
-                    num_box(strategy.high, lambda v: self._set(high=v), step=0.1)]
-        if isinstance(strategy, (normalise.Saturating, normalise.Tanh)):
-            out += [ft.Text("at", size=t.SMALL, color=t.FAINT),
-                    num_box(strategy.scale, lambda v: self._set(scale=v), step=0.1, low=0.01)]
-        return out
-
     def _pick(self, metric_id: str) -> None:
         self.session.set_metric(metric_id)
-        self.rebuild()
-
-    def _set(self, **params) -> None:
-        session = self.session
-        session.set_strategy(session.strategy_id, **{**session.strategy_params, **params})
         self.rebuild()
 
     def refresh(self) -> None:

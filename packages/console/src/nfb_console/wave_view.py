@@ -68,6 +68,7 @@ from .feedback import CONDITION
 from .plots import (bars, nice_ceiling, place_tick_labels, place_value_labels,
                     signed_shapes, tick_axis, value_axis)
 from .protocols import Protocol
+from .scaling import Scaled, scaling_row
 from .targets import RECENT_WINDOW, Target
 from .traces import RawRing, SlowRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession
@@ -222,7 +223,7 @@ SLOW_HELP = (
 )
 
 
-class WaveSession(TrainingSession):
+class WaveSession(TrainingSession, Scaled):
     """One channel, one filtered waveform, and its position as the level.
 
     Everything generic is `TrainingSession`. What is here is the measurement (`nfb.dsp.wave`), the calibration
@@ -284,10 +285,8 @@ class WaveSession(TrainingSession):
         # `hrv_view`, which introduced this layer, and `normalise`, which says why a scaling is not a
         # direction.
         self.direction = "increase"
-        self.strategy_id = "fixed_range"
         self.range_uv = 20.0
-        self._strategy = normalise.build("fixed_range", low=-self.range_uv, high=self.range_uv)
-        self.strategy_params: dict = {}
+        self._init_scaling("fixed_range", low=-self.range_uv, high=self.range_uv)
         self.raw_wave: float | None = None
         self._signal: float | None = None
 
@@ -526,21 +525,11 @@ class WaveSession(TrainingSession):
     def inverts(self) -> bool:
         return self.direction == "decrease"
 
-    def set_strategy(self, strategy_id: str, **params) -> None:
-        if strategy_id not in normalise.STRATEGIES:
-            return
+    def _scaling_defaults(self, strategy_id: str, params: dict) -> dict:
+        """A fixed range chosen without ends takes the calibrated range, symmetric about the baseline."""
         if strategy_id == "fixed_range" and not params:
-            params = {"low": -self.range_uv, "high": self.range_uv}
-        self.strategy_id = strategy_id
-        self.strategy_params = dict(params)
-        self._strategy = normalise.build(strategy_id, **params)
-        self._signal = None
-        self.signal_target.reset_stats()
-        self.signal_target._settled = True
-
-    @property
-    def strategy(self) -> normalise.Strategy:
-        return self._strategy
+            return {"low": -self.range_uv, "high": self.range_uv}
+        return params
 
     @property
     def signal(self) -> float | None:
@@ -986,45 +975,10 @@ class LevelSource:
                      note="which side of its own baseline the wave trains toward. In a bipolar pair, "
                           "the electrode wiring sets this direction",
                      width=76),
-            labelled("scaled by",
-                     *[pill(normalise.STRATEGIES[k].label, session.strategy_id == k,
-                            (lambda k_=k: lambda _e: (session.set_strategy(k_), self.rebuild()))())
-                       for k in normalise.STRATEGIES],
-                     *self._params(),
-                     note=normalise.STRATEGIES[session.strategy_id].description, width=76),
+            scaling_row(session, self.rebuild, unit="µV", step=1,
+                        fixed_range_note="calibrated · set on the card"),
         ]
         self.page.update()
-
-    def _params(self) -> list:
-        """Only the knobs the selected scaling has, and only the ones this screen owns *here*: a fixed range's
-        ends are the calibration's, so they are stated with a pointer at the card that sets them."""
-        strategy = self.session.strategy
-        out: list[ft.Control] = []
-        if isinstance(strategy, (normalise.ZScore, normalise.RollingMinMax)):
-            out += [ft.Text("over", size=t.SMALL, color=t.FAINT),
-                    num_box(strategy.window_s, lambda v: self._set(window_s=v),
-                            suffix="s", step=15, low=10, high=600)]
-        if isinstance(strategy, normalise.ZScore):
-            out += [num_box(strategy.clamp_k, lambda v: self._set(clamp_k=v),
-                            suffix="sd", step=0.5, low=0.5, high=5.0)]
-        if isinstance(strategy, normalise.FixedRange):
-            # **Reported, not offered.** Its ends are the calibrated range, and that has one editor: the card,
-            # beside the wave it was measured from. A second pair of boxes here would be two controls for one
-            # number, which is how a screen comes to disagree with itself — and it is also what made the
-            # operator hunt for the range on the wrong tab.
-            out += [ft.Text(f"{strategy.low:g} to {strategy.high:g} µV", size=t.BODY, color=t.TEXT),
-                    ft.Container(width=6),
-                    ft.Text("calibrated · set on the card", size=t.SMALL, color=t.FAINT)]
-        if isinstance(strategy, (normalise.Saturating, normalise.Tanh)):
-            out += [ft.Text("at", size=t.SMALL, color=t.FAINT),
-                    num_box(strategy.scale, lambda v: self._set(scale=v), suffix="µV", step=1,
-                            low=0.1)]
-        return out
-
-    def _set(self, **params) -> None:
-        session = self.session
-        session.set_strategy(session.strategy_id, **{**session.strategy_params, **params})
-        self.rebuild()
 
     def refresh(self) -> None:
         session = self.session
