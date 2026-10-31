@@ -2,8 +2,8 @@
 
 When the small vessels in the skin tighten, a pulse measured at the skin shrinks, so the ear pulse's height
 against the forehead's is a readout of those vessels, a third handle on arousal beside the pupil and the heart
-rate. The program trains it upward from its value at the start of the session; whether it follows arousal at
-the ear is not known yet. It borrows the app's two runners through `runner.PulseRunner`, never starting or
+rate. The program trains it upward, scaled by the strategy chosen on the Feedback tab; whether it follows
+arousal at the ear is not known yet. It borrows the app's two runners through `runner.PulseRunner`, never starting or
 stopping either, and compares their last minute every second with `nfb.hrv.compare`.
 """
 
@@ -22,7 +22,7 @@ import flet.canvas as cv
 
 from nfb.hrv.compare import compare, heights
 
-from . import chrome, cues, music, plan_pane, prefs, signal_pane, sysvolume
+from . import chrome, cues, music, plan_pane, prefs, shadow, signal_pane, sysvolume
 from . import theme as t
 from .feedback import CONDITION, FeedbackSettings
 from .hrv_view import _level_arc
@@ -30,6 +30,7 @@ from .plan import SessionPlan
 from .plots import StickyCeiling, dashed, grid, place_value_labels, polyline, value_axis
 from .protocols import Protocol
 from .runner import PulseRunner
+from .scaling import Scaled, scaling_row
 from .targets import Target
 from .widgets import help_button, labelled, num_box, panel, stat_tile
 
@@ -54,10 +55,6 @@ starting value, not a measured one."""
 START_BEATS = 20
 """How many of the session's first heartbeats set the ratio's starting value, the half-way point of the
 level. Until that many have arrived the start is provisional, so feedback runs from the first beats."""
-
-DEFAULT_FULL_AT = 0.3
-"""How far above its starting value the ratio puts the level at full, and below it at empty: 30%, about how
-far the ratio wandered either way over three calm minutes with nothing asked of the wearer."""
 
 OBSERVE_HZ = 1.0 / UPDATE_S
 """How often a new training reading can arrive, for the target's own statistics: once per comparison."""
@@ -87,7 +84,7 @@ class Snapshot:
     pulse_shape: list[float] = field(default_factory=list)      # the forehead pulse averaged around them
 
 
-class PairSession:
+class PairSession(Scaled):
     """The two borrowed runners, the comparison, the level it drives and the session clock."""
 
     def __init__(self, protocol: Protocol, length_seconds: float | None = None,
@@ -109,17 +106,18 @@ class PairSession:
         self._last_ratio_at = float("-inf")
         self.training: tuple[float, float] | None = None      # (ear beat, ratio against the start)
         self.feedback = FeedbackSettings()
+        self.display = shadow.DisplayShadow()
         self.output_volume = sysvolume.SystemVolume()
         self.music = music.MusicOutput()
         for name, mech in self.feedback.mechanisms.items():
             if name not in self.offers:
                 mech.enabled = False
-        # A tone to follow, as on the Pupil program: the sound mechanism moves the volume of what plays.
+        # A tone to follow: the sound mechanism moves the volume of what plays.
         self.feedback.music.enabled = True
         self.feedback.music.source = "tone"
-        self.full_at = DEFAULT_FULL_AT
-        self.signal_target = Target(0, None, "increase", threshold=0.5, mode="fixed", name="height ratio",
-                                    unit="")
+        self._init_scaling()
+        self.signal_target = Target(0, None, "increase", threshold=0.5, mode="fixed",
+                                    name="ear pulse / forehead pulse", unit="")
         self.signal_target._settled = True
         self.targets = [self.signal_target]
         self._signal: float | None = None
@@ -139,8 +137,9 @@ class PairSession:
     # --- what the shared Feedback pane reads ------------------------------------------------
     # Declared one by one, as on the HEG and Pupil programs, and for their reason.
 
-    offers = ("sound", "click", "music")
-    """Sound only, as on the Pupil program."""
+    offers = ("sound", "shadow", "click", "music")
+    """Every shared mechanism. Pupil leaves out the shadow because screen light changes the pupil; screen
+    light does nothing to a pulse."""
     music_sources = ("tone", "noise", "shepard", "file")
     combines = ("weighted",)
     pinned_feedback = frozenset()
@@ -164,8 +163,8 @@ class PairSession:
 
     @property
     def level_source(self) -> tuple[str, str]:
-        return ("ear pulse height against the forehead's, against the start",
-                f"half = as at the start · full at {self.full_at * 100:+.0f}%")
+        return (f"more ear pulse / forehead pulse, on a {self.scale_label} scale",
+                f"half = the middle of that scale · {self._strategy.describe()}")
 
     @property
     def level(self) -> float:
@@ -185,10 +184,6 @@ class PairSession:
     @property
     def state_balance(self) -> float | None:
         return None
-
-    def level_of(self, ratio: float) -> float:
-        """Half at the starting ratio, full `full_at` above it, empty the same distance below."""
-        return min(1.0, max(0.0, 0.5 + (ratio - 1.0) / (2.0 * max(0.05, self.full_at))))
 
     # --- what is missing ----------------------------------------------------------------------
 
@@ -293,7 +288,7 @@ class PairSession:
         if reading is None or reading[0] == self._driven:
             return
         self._driven = reading[0]
-        self._move_level(self.level_of(reading[1]), time.monotonic())
+        self._move_level(self._strategy.push(reading[1], self.elapsed), time.monotonic())
 
     def _move_level(self, signal: float, now: float) -> None:
         self._signal = signal
@@ -310,6 +305,8 @@ class PairSession:
 
     def _drive_outputs(self) -> None:
         met = self.feedback.on_target(self.channel_targets(CONDITION))
+        sh = self.feedback.shadow
+        self.display.apply(sh.enabled and sh.supported, sh.screen, *sh.ends(), sh.map(self._level))
         snd = self.feedback.sound
         self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(self._level))
         self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met),
@@ -330,6 +327,7 @@ class PairSession:
         self.release_outputs()
 
     def release_outputs(self) -> None:
+        self.display.release()
         self.output_volume.release()
         self.music.release()
 
@@ -421,7 +419,7 @@ class PairSession:
         self.plan = previous.plan
         self.plan.rewind()
         self.feedback = previous.feedback
-        self.full_at = previous.full_at
+        self.set_strategy(previous.strategy_id, **previous.strategy_params)
 
     def calibration(self) -> dict:
         return prefs.capture(self.feedback)
@@ -460,21 +458,33 @@ FOREHEAD, EAR = t.ACCENT, t.MUTED
 
 PAIR_HELP = (
     "**What it trains.** The program compares two sensors on one heart: the Mendi headband on the forehead "
-    "and the HeartMath sensor on the ear. When the small vessels in the skin tighten, the pulse at the skin "
-    "gets smaller. The program trains the ear pulse height against the forehead pulse height, and it aims "
-    "that ratio up. The level is half at the ratio of your first heartbeats, and full at the value that "
-    "**full at** sets. The sound, the music and the click follow the level. Set them on the Feedback tab.\n\n"
+    "and the HeartMath sensor on the ear. With each heartbeat, blood fills the small vessels under each "
+    "sensor, and its light reading rises and falls one time. That rise and fall is the pulse. The height of "
+    "a pulse is the highest reading less the lowest reading in the 0.8 s around one heartbeat. "
+    "**ear pulse / forehead pulse** is the height at the ear divided by the height at the forehead. "
+    "Its value over your first heartbeats is 1. When the small vessels in the skin tighten, the pulse at the "
+    "skin gets smaller. The program trains this number up. Set its scale, the sound, the screen, the music "
+    "and the click on the Feedback tab.\n\n"
     "**What is not known yet.** Both sensors are on the head, and the ear can react less than a finger. Do "
-    "a first session with one minute at rest and one minute of mental arithmetic. If the ratio does not "
+    "a first session with one minute at rest and one minute of mental arithmetic. If the number does not "
     "change more than it changes at rest, it does not show arousal for you.\n\n"
     "**What you see.** **intervals** shows the time between beats from each sensor over the last minute. "
     "The two lines must follow each other closely. **averaged pulse** shows the forehead pulse, averaged "
-    "around each beat of the ear sensor. **over the session** shows the delay and the height ratio. "
+    "around each beat of the ear sensor. **over the session** shows the delay and the trained number. "
     "**agreement** shows how closely the two sensors' beat intervals follow each other, from 0 to 1. "
     "**delay** is the time from a beat at the forehead to the same beat at the ear. It includes the time "
     "each sensor takes to send its data, so only a change during a session tells you something.\n\n"
     "**What you need.** Choose both sensors on the device screen, and connect the HeartMath with its cable. "
-    "Over Bluetooth it sends only beats, and the program cannot measure the height ratio."
+    "Over Bluetooth it sends only beats, and the program cannot measure the height of its pulse."
+)
+
+SOURCE_HELP = (
+    "**What you see.** The trained number, **ear pulse / forehead pulse**, and the level it gives from 0% "
+    "to 100%. **scaled by** sets how the number becomes the level.\n\n"
+    "**What the scaling means.** The two sensors measure in different units, so the number means "
+    "something only against itself. **recent range** puts the ends at the highest and lowest values of "
+    "the last minutes. **standard deviations** measures how far the number is from its recent average. "
+    "A fixed range and the two other scales use values that you set, where 1 is the start of the session."
 )
 
 
@@ -516,12 +526,13 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
     level_arc = cv.Canvas(shapes=[], width=ARC_SIDE, height=ARC_SIDE)
     level_note = ft.Text("", size=t.SMALL, color=t.FAINT)
 
-    def set_full_at(percent: float) -> None:
-        session.full_at = max(0.05, min(1.0, float(percent) / 100.0))
+    source_readout = ft.Text("", size=t.BODY, color=t.TEXT)
+    source_note = ft.Text("", size=t.SMALL, color=t.FAINT)
+    source_rows = ft.Column(spacing=12)
 
-    full_at_row = labelled("full at", num_box(session.full_at * 100.0, set_full_at, suffix="%", step=5,
-                                              low=5, high=100, width=58),
-                           note="above the start", width=72)
+    def rebuild_source() -> None:
+        source_rows.controls = [scaling_row(session, rebuild_source, step=0.05)]
+        page.update()
 
     values: dict[str, ft.Text] = {}
     units: dict[str, ft.Text] = {}
@@ -536,7 +547,7 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
         ft.Row([tile("f_rmssd", "forehead RMSSD", "ms"), tile("e_rmssd", "ear RMSSD", "ms")], spacing=10),
         ft.Row([tile("agreement", "agreement", "paired intervals"), tile("paired", "paired", "beats, last minute")],
                spacing=10),
-        ft.Row([tile("delay", "delay", "ms, forehead to ear"), tile("ratio", "height ratio", "of the start")],
+        ft.Row([tile("delay", "delay", "ms, forehead to ear"), tile("ratio", "ear / forehead", "1 = the start")],
                spacing=10),
     ], spacing=10)
     # Two lines reserved for each sensor, so a long status cannot change the panel's height.
@@ -556,7 +567,7 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
     right = ft.Column([
         panel("LEVEL", ft.Row([ft.Container(content=level_arc, width=ARC_SIDE, height=ARC_SIDE)],
                               alignment=ft.MainAxisAlignment.CENTER),
-              ft.Container(height=10), level_note, ft.Container(height=10), full_at_row),
+              ft.Container(height=10), level_note),
         ft.Container(height=12),
         panel("NOW", tiles),
         ft.Container(height=12),
@@ -567,7 +578,11 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
                             padding=ft.Padding(14, 12, 14, 14), expand=True)
     signal = signal_pane.SignalPane(page, session, inset=False)
     feedback_tab = ft.Container(
-        content=ft.Column([signal.control], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO),
+        content=ft.Column([panel("SIGNAL SOURCE", source_readout, ft.Container(height=4), source_note,
+                                 ft.Container(height=14), source_rows,
+                                 help=help_button(page, "Signal source", SOURCE_HELP)),
+                           ft.Container(height=12), signal.control],
+                          spacing=0, expand=True, scroll=ft.ScrollMode.AUTO),
         padding=ft.Padding(14, 12, 14, 14), expand=True, visible=False)
     panes = [main_tab, feedback_tab, plan_pane_.control]
 
@@ -656,7 +671,7 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
         half = span_ceiling.update(max(abs(v - centre) for v in vals), time.monotonic())
         top, bottom = centre + half, centre - half
         if floor is not None and bottom < floor:
-            bottom = floor              # a height ratio is never below zero, so the axis stops there
+            bottom = floor              # a ratio of heights is never below zero, so the axis stops there
         length = max(points[-1][0], 60.0)
 
         def y(v):
@@ -693,7 +708,7 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
             paint_trend(delay_canvas, delay_labels, delay_caption, session.delay_series, delay_span, "ms",
                         None, "delay, forehead to ear")
             paint_trend(ratio_canvas, ratio_labels, ratio_caption, session.ratio_series, ratio_span, "",
-                        1.0, "height ratio, dashed = the start", floor=0.0)
+                        1.0, "ear pulse / forehead pulse, dashed = the start", floor=0.0)
         level_arc.shapes = _level_arc(ARC_SIDE, session.signal)
         if missing:
             level_note.value = "no level: needs both sensors"
@@ -702,9 +717,17 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
         else:
             headline, detail = session.level_source
             level_note.value = f"{headline} · {detail}"
+        reading = session.training
+        if reading is None:
+            source_readout.value, source_readout.color = "—", t.FAINT
+        else:
+            level = f"  →  {session.signal:.0%}" if session.signal is not None else ""
+            source_readout.value, source_readout.color = f"{reading[1]:.2f}{level}", t.TEXT
+        source_note.value = f"ear pulse / forehead pulse, 1 = the start · {session.strategy.describe()}"
         signal.refresh()
         page.update()
 
+    rebuild_source()
     toolbar.set_channels_visible(False)
     session.redraw = draw
     toolbar.bind_transport(lambda _e: (session.toggle_pause(), draw()),

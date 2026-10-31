@@ -158,10 +158,12 @@ def test_fed_the_program_shows_both_sensors_and_how_they_compare():
     session.update(now=46.0)
     session.update(now=90.0)
     texts = _drawn(session)
-    for shown in ("INTERVALS", "AVERAGED PULSE", "OVER THE SESSION", "agreement", "height ratio", "62"):
+    for shown in ("INTERVALS", "AVERAGED PULSE", "OVER THE SESSION", "agreement", "ear pulse / forehead pulse", "62"):
         assert shown in texts
     assert "blue = forehead, grey = ear" in texts
     assert "waiting for beats" not in texts
+    assert "height ratio" not in texts, "the number is named by what it divides"
+    assert "scaled by" in texts and "recent range" in texts, "the shared scaling, on the Feedback tab"
 
 
 def test_the_height_ratio_axis_stops_at_zero():
@@ -204,15 +206,34 @@ def _spied(session):
     session.music.apply = lambda *a, **k: calls["music"].append(k.get("level"))
     session.output_volume.release = lambda: calls.__setitem__("released", calls["released"] + 1)
     session.music.release = lambda: None
+    session.display.apply = lambda *a, **k: calls.setdefault("shadow", []).append(a)
+    session.display.release = lambda: None
     session.cue = lambda *a, **k: True
     return calls
 
 
-def test_the_level_is_half_at_the_start_and_full_at_the_set_amount_above():
+def test_the_level_comes_from_the_scaling_chosen_on_the_feedback_tab():
+    """The program once had a scale of its own, half at the start and full 30% above it, and none of the
+    shared scalings. A ratio that drifted up held that scale at full for minutes."""
     session = _session()
-    assert session.level_of(1.0) == 0.5
-    assert session.level_of(1.0 + session.full_at) == 1.0
-    assert session.level_of(1.0 - session.full_at) == 0.0
+    assert session.strategy_id == "rolling_minmax", "the shared default"
+    session.set_strategy("fixed_range", low=0.5, high=1.5)
+    _spied(session)
+    session.toggle_pause()
+    session.update(now=40.0)
+    session.observe()
+    assert session.signal == pytest.approx(session.training[1] - 0.5)
+
+
+def test_every_shared_mechanism_is_offered_and_the_shadow_follows_the_level():
+    session = _session()
+    assert set(session.offers) == {"sound", "shadow", "click", "music"}
+    calls = _spied(session)
+    session.feedback.shadow.enabled = True
+    session.toggle_pause()
+    session.update(now=40.0)
+    session.observe()
+    assert calls["shadow"], "the screen is driven with the other outputs"
 
 
 def test_each_new_reading_drives_the_outputs_once():
@@ -223,7 +244,6 @@ def test_each_new_reading_drives_the_outputs_once():
     session.observe()
     session.observe()                   # no new reading since: nothing is driven again
     assert len(calls["volume"]) == 1 and len(calls["music"]) == 1
-    assert session.signal == pytest.approx(session.level_of(session.training[1]))
 
 
 def test_a_shrinking_ear_pulse_lowers_the_level():
@@ -265,9 +285,10 @@ def test_a_sensor_dropping_out_silences_the_feedback():
 
 def test_settings_survive_a_stop():
     old = _session()
-    old.full_at = 0.45
+    old.set_strategy("zscore", window_s=90.0)
     old.feedback.click.enabled = False
     new = _session()
     new.adopt(old)
-    assert new.full_at == 0.45 and not new.feedback.click.enabled
+    assert new.strategy_id == "zscore" and new.strategy.window_s == 90.0
+    assert not new.feedback.click.enabled
     assert new.restore_calibration(old.calibration()) > 0
