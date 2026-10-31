@@ -51,6 +51,12 @@ the beats found rose from 30 to 35 at 2.5 and no lower setting found more."""
 NOISE_SECONDS = 2.0
 """How much of the signal before the median the noise is measured over."""
 
+OUT_OF_RANGE = "the headband reads out of range: restart it"
+"""What `trouble` says while the ambient readings are below zero. A light reading below zero has no
+meaning, and once the headband sent every reading near -900000, from its first frame until it was
+restarted, with no pulse left in them; what puts it in that state is not known. No beat is reported
+until the readings come back."""
+
 WAVEFORM_SECONDS = 64.0
 """How much of the cleaned waveform to keep, for a caller that averages it around beats."""
 
@@ -103,15 +109,28 @@ class PulseExtractor:
 
     def reset(self) -> None:
         self._clock = _FrameClock(self.rate_hz)
+        self._ambient: deque[float] = deque(maxlen=int(NOISE_SECONDS * self.rate_hz))
+        self.trouble: str | None = None
+        self.waveform: deque[tuple[float, float]] = deque(maxlen=int(WAVEFORM_SECONDS * self.rate_hz))
+        self.beats_found = 0
+        self._restart_signal()
+
+    def _restart_signal(self) -> None:
+        """Empty every filter, so readings from before a gap do not run into readings after it."""
         self._raw: deque[tuple[float, float]] = deque(maxlen=DESPIKE_SAMPLES)
         self._level: deque[tuple[float, float]] = deque(maxlen=int(DETREND_SECONDS * self.rate_hz) | 1)
         self._recent: deque[float] = deque(maxlen=int(NOISE_SECONDS * self.rate_hz))
         self._detector = PeakDetector(rate_hz=self.rate_hz, min_snr=DETECTOR_MIN_SNR)
         self._last_edge: float | None = None
-        self.waveform: deque[tuple[float, float]] = deque(maxlen=int(WAVEFORM_SECONDS * self.rate_hz))
-        self.beats_found = 0
 
     def push(self, frame: Frame) -> list[Beat]:
+        self._ambient.append(frame.p.amb)
+        if median(self._ambient) < 0.0:
+            if self.trouble is None:
+                self.trouble = OUT_OF_RANGE
+                self._restart_signal()
+            return []
+        self.trouble = None
         sample = frame.p.ir - frame.p.amb
         self._raw.append((self._clock.stamp(frame.t), sample))
         self._recent.append(sample)

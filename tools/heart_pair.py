@@ -94,19 +94,24 @@ def record(seconds: float, heart: str, address: str | None = None) -> dict:
             "reference_wave": wave, "errors": {"headband": mendi.error, "heart sensor": reference.error}}
 
 
-def analyse(recording: dict) -> tuple[Comparison, list[float]]:
+def analyse(recording: dict) -> tuple[Comparison, list[float], float]:
+    """The comparison, the forehead's beat times, and how many seconds the headband read out of range."""
     extractor = PulseExtractor()
     forehead_beats: list[float] = []
     forehead_wave: list[tuple[float, float]] = []
+    out_of_range = 0
     for row in recording["frames"]:
         forehead_beats += [b.t for b in extractor.push(_frame(row))]
+        out_of_range += extractor.trouble is not None
         if extractor.waveform and (not forehead_wave or extractor.waveform[-1][0] != forehead_wave[-1][0]):
             forehead_wave.append(extractor.waveform[-1])
     # The HeartMath's raw pulse points down (averaged, it rises slowly and falls fast); flipped upright here.
     reference_wave = ([(t, -v) for t, v in recording["reference_wave"]]
                       if recording.get("reference_wave") else None)
+    frames = recording["frames"]
+    span = frames[-1]["t"] - frames[0]["t"] if len(frames) > 1 else 0.0
     return (compare(forehead_beats, recording["reference_beats"], forehead_wave, reference_wave),
-            forehead_beats)
+            forehead_beats, span * out_of_range / max(1, len(frames)))
 
 
 def _rate(beats: list[float]) -> str:
@@ -121,12 +126,15 @@ def _sparkline(values) -> str:
     return "".join(bars[min(7, int((v - lo) / span * 8))] for v in values)
 
 
-def report(recording: dict, result: Comparison, forehead_beats: list[float]) -> str:
+def report(recording: dict, result: Comparison, forehead_beats: list[float], out_of_range_s: float = 0.0) -> str:
     reference_beats = recording["reference_beats"]
     a = result.agreement
     lines = [f"Recorded {recording['seconds']:.0f} s. Forehead: {len(forehead_beats)} beats, "
-             f"{_rate(forehead_beats)}. Heart sensor: {len(reference_beats)} beats, {_rate(reference_beats)}.",
-             "",
+             f"{_rate(forehead_beats)}. Heart sensor: {len(reference_beats)} beats, {_rate(reference_beats)}."]
+    if out_of_range_s >= 1.0:
+        lines.append(f"The headband read out of range for {out_of_range_s:.0f} s, with light readings below zero, "
+                     "and no pulse was looked for then. Restart the headband before you record again.")
+    lines += ["",
              "Agreement",
              f"  {len(a.pairs)} heartbeats seen at both sites.",
              f"  {len(a.forehead_only)} at the forehead only and {len(a.reference_only)} at the heart sensor "
@@ -204,9 +212,9 @@ def main(argv: list[str] | None = None) -> int:
     if not recording["frames"] or not recording["reference_beats"]:
         print("Nothing to compare: one of the devices sent nothing.")
         return 1
-    result, forehead_beats = analyse(recording)
+    result, forehead_beats, out_of_range_s = analyse(recording)
     print()
-    print(report(recording, result, forehead_beats))
+    print(report(recording, result, forehead_beats, out_of_range_s))
     return 0
 
 

@@ -32,7 +32,7 @@ def test_a_saved_recording_is_compared_and_reported(tmp_path):
     path = tmp_path / "pair.json.gz"
     heart_pair.save(_recording(), path)
     recording = heart_pair.load(path)
-    result, forehead = heart_pair.analyse(recording)
+    result, forehead, _ = heart_pair.analyse(recording)
     assert len(result.agreement.pairs) > 0.9 * len(recording["reference_beats"])
     assert result.contrast.late == pytest.approx(1.0, abs=0.1), "nothing tightened"
     text = heart_pair.report(recording, result, forehead)
@@ -44,7 +44,7 @@ def test_a_saved_recording_is_compared_and_reported(tmp_path):
 
 def test_over_bluetooth_the_report_says_what_it_cannot_measure():
     recording = _recording(heart="ble")
-    result, forehead = heart_pair.analyse(recording)
+    result, forehead, _ = heart_pair.analyse(recording)
     text = heart_pair.report(recording, result, forehead)
     assert "only the USB cable sends" in text
     assert "the sensor's own processing time" in text
@@ -65,8 +65,20 @@ PAIRED = Path(__file__).parent / "fixtures" / "mendi-heart-pair.json.gz"
 def test_the_recorded_pair_agrees_beat_for_beat():
     """A forehead signal that drifted, and a HeartMath that stamps the foot of its pulse."""
     recording = heart_pair.load(PAIRED)
-    result, _ = heart_pair.analyse(recording)
+    result, _, _ = heart_pair.analyse(recording)
     a = result.agreement
     assert len(a.pairs) >= 30
     assert len(a.forehead_only) <= 5 and len(a.reference_only) <= 5
     assert abs(result.delay.median_s) < 0.25, "steepest rise to steepest rise, the sites are close"
+
+
+BROKEN = Path(__file__).parent / "fixtures" / "mendi-out-of-range.json.gz"
+"""40 s with the headband stuck reading near -900000, kept on the machine it was made on."""
+
+
+@pytest.mark.skipif(not BROKEN.exists(), reason="needs the local out-of-range recording")
+def test_a_recording_out_of_range_says_to_restart_the_headband():
+    recording = heart_pair.load(BROKEN)
+    result, forehead, out_of_range_s = heart_pair.analyse(recording)
+    assert out_of_range_s > 35.0 and not forehead
+    assert "Restart the headband" in heart_pair.report(recording, result, forehead, out_of_range_s)

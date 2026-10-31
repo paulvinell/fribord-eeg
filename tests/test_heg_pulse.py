@@ -117,6 +117,32 @@ def test_a_slow_drift_under_the_pulse_does_not_hide_beats():
     assert len(beats) >= len(truth) - 4, f"{len(beats)} beats for {len(truth) - 1} intervals"
 
 
+def _broken(frames, start_s, end_s):
+    """The frames with the headband's out-of-range state between two times: every reading far below zero."""
+    from dataclasses import replace
+
+    t0 = frames[0].t
+    bad = Channel(ir=-600000.0, red=-600000.0, amb=-936000.0)
+    return [replace(f, l=bad, r=bad, p=bad) if start_s <= f.t - t0 < end_s else f for f in frames]
+
+
+def test_out_of_range_readings_give_no_beats_and_say_so():
+    """Light readings below zero mean nothing; once the headband sent them until it was restarted."""
+    frames, _ = _synthetic(seconds=60.0)
+    frames = _broken(frames, 20.0, 40.0)
+    extractor = PulseExtractor()
+    t0 = frames[0].t
+    beats, troubled = [], []
+    for f in frames:
+        beats += extractor.push(f)
+        if extractor.trouble:
+            troubled.append(f.t - t0)
+    assert troubled and min(troubled) < 21.0 and max(troubled) > 39.0, "the whole broken stretch is flagged"
+    assert extractor.trouble is None, "readings back in range clear it"
+    assert not [b for b in beats if 21.0 < b.t - t0 < 40.0], "no beat from readings that carry none"
+    assert len([b for b in beats if b.t - t0 > 42.0]) >= 10, "beats resume once the readings come back"
+
+
 def test_a_signal_with_no_pulse_gives_no_beats():
     frames, _ = _synthetic(seconds=30.0, pulse=False, flicker=False)
     extractor = PulseExtractor()
@@ -170,6 +196,21 @@ def test_the_runner_keeps_a_heart_rate_beside_the_hemoencephalography_signal():
     assert runner.state is not None, "the HEG signal still runs"
     assert runner.heart_state is not None
     assert 55.0 < runner.heart_state.hr_smoothed < 65.0, f"{runner.heart_state.hr_smoothed:.1f} bpm"
+
+
+def test_the_runner_drops_its_heart_rate_when_the_headband_reads_out_of_range():
+    from nfb_console.inputs import MendiChoice
+    from nfb_console.mendi import MendiRunner
+
+    class _EndsBroken(_Frames):
+        def frames(self):
+            frames, _ = _synthetic()
+            yield from _broken(frames, 50.0, 60.0)
+
+    runner = MendiRunner(MendiChoice(kind="simulator"))
+    runner.source = _EndsBroken()
+    runner._read(runner._generation)
+    assert runner.heart_state is None, "the last rate is not held over readings that carry none"
 
 
 def test_a_fresh_source_starts_without_the_previous_heart_rate():

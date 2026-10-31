@@ -101,6 +101,8 @@ class MendiRunner(SensorRunner):
             self.state = self.signal.push(self.processor.process(frame), self.processor.gate_fraction)
             for beat in self.pulse.push(frame):
                 self.heart_state = self.heart_processor.push(beat)
+            if self.pulse.trouble:
+                self.heart_state = None     # no heart rate from readings that carry none
             self.seen_at = time.monotonic()
         # The generator ending is how `LiveMendi` reports its BLE worker dying; its own `error` knows why.
         source = self.source
