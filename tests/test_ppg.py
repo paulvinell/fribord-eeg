@@ -162,6 +162,25 @@ def test_the_dicrotic_notch_is_not_counted_as_a_beat():
     assert missed < 0.05, f"missed {missed:.1%}"
 
 
+def test_a_beat_is_timed_between_samples_at_a_low_sample_rate():
+    """At 30 samples a second the highest sample can be 16 ms from the true peak, and beat intervals
+    come out as multiples of 33 ms. A parabola through the top three samples places each beat to a few
+    milliseconds, so a slow optical sensor still gives intervals the heart actually produced."""
+    fs = 30.0
+    rng = random.Random(7)
+    truth, at = [], 1.0
+    while at < 60.0:
+        at += 0.9 + 0.2 * rng.random()
+        truth.append(at)
+    samples = [sum(1000.0 * math.exp(-((i / fs - b) ** 2) / (2 * 0.12 ** 2)) for b in truth
+                   if abs(i / fs - b) < 0.6) for i in range(int(60.0 * fs))]
+    detector = PeakDetector(rate_hz=fs)
+    found = [r[0] for i, s in enumerate(samples) if (r := detector.push(i / fs, s)) is not None]
+    errors = [min(abs(f - b) for b in truth) for f in found]
+    assert len(found) >= len(truth) - 2
+    assert sum(errors) / len(errors) < 0.004, "beats are placed between samples, not on the grid"
+
+
 def test_the_detector_recovers_when_the_pulse_gets_smaller():
     """The amplitude floor is a fraction of the height of recently accepted beats, and rejected peaks
     never update it — so a clip coming loose could lock the detector out permanently. Measured, a step

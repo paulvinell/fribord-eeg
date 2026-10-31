@@ -190,7 +190,7 @@ class PeakDetector:
         self.min_snr = min_snr
 
         self._baseline: float | None = None
-        self._window: deque[tuple[float, float]] = deque()
+        self._window: deque[tuple[float, float, float]] = deque()   # (t, above baseline, raw)
         self._recent: deque[int] = deque(maxlen=max(3, int(rate_hz)))    # raw, for the noise floor
         self._last_beat: float | None = None
         self._amps: deque[float] = deque(maxlen=max(1, amp_beats))
@@ -204,14 +204,14 @@ class PeakDetector:
             self._baseline = float(sample)
             return None
         self._baseline += self.baseline_alpha * (sample - self._baseline)
-        self._window.append((t, sample - self._baseline))
+        self._window.append((t, sample - self._baseline, float(sample)))
         while len(self._window) > self.dwell:
             self._window.popleft()
         if len(self._window) < self.dwell:
             return None
 
-        centre_t, centre = self._window[self.dwell // 2]
-        if any(centre < x for _, x in self._window):
+        centre_t, centre, _ = self._window[self.dwell // 2]
+        if any(centre < x for _, x, _ in self._window):
             return None
         # The candidate must stand clear of the waveform's own noise floor, or a flat/weak trace with no
         # pulse in it seeds the relative gates at ~zero and fires beats at the refractory cadence. Gated
@@ -219,6 +219,7 @@ class PeakDetector:
         if centre < self.min_snr * self._noise_floor():
             return None
 
+        centre_t = self._vertex_time()
         elapsed = None if self._last_beat is None else centre_t - self._last_beat
         if elapsed is not None and elapsed < self._refractory():
             return None
@@ -232,6 +233,26 @@ class PeakDetector:
         if elapsed is not None:
             self._intervals.append(elapsed)
         return centre_t, elapsed
+
+    def _vertex_time(self) -> float:
+        """When the peak happened, between samples: the top of a parabola through the highest sample
+        and its two neighbours.
+
+        Taking the highest sample's own time rounds every beat to the sample grid. At 500 Hz that costs
+        2 ms and nobody would notice; at the 30 Hz of an optical headband it is 33 ms, and the beat
+        intervals come out as multiples of it, which reads as beat-to-beat variation the heart does not
+        have. A pulse peak is smooth, so three samples pin its top to a few milliseconds.
+        """
+        mid = self.dwell // 2
+        # Raw samples: the baseline climbs during the pulse, so subtracting it tilts the top and drags
+        # the vertex early.
+        (t_m, _, x_m), (t_0, _, x_0), (t_p, _, x_p) = (self._window[mid - 1], self._window[mid],
+                                                       self._window[mid + 1])
+        bend = x_m - 2.0 * x_0 + x_p
+        if bend >= 0.0:
+            return t_0                  # flat top: no curvature to place a vertex by
+        shift = max(-0.5, min(0.5, 0.5 * (x_m - x_p) / bend))
+        return t_0 + shift * (t_p - t_m) / 2.0
 
     def _noise_floor(self) -> float:
         """The waveform's sample-to-sample jitter, as the median absolute first difference of recent raw
