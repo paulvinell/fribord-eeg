@@ -565,6 +565,7 @@ class _AudioStream:
         self._stream = None
         self._writer = None
         self._stop = threading.Event()
+        self._swap = threading.Lock()       # `stop` and a writer rebuilding its stream must not cross
         self._last_write = 0.0
         self.dropouts = 0
         """Blocks the device ran out of data for. **Counted rather than ignored**, because a dropout and a
@@ -576,12 +577,13 @@ class _AudioStream:
     def running(self) -> bool:
         return self._stream is not None
 
-    def _open(self) -> bool:
+    def _open(self):
+        """A started output stream, or None with `error` saying why."""
         try:
             import sounddevice as sd
         except Exception as exc:
             self.error = f"sounddevice unavailable: {exc}"
-            return False
+            return None
         try:
             # **No callback: a writer thread and a deep buffer.** See `BUFFER_LATENCY` — with a callback,
             # the device waits on Python every block and every stall in this process is audible.
@@ -590,10 +592,8 @@ class _AudioStream:
             stream.start()
         except Exception as exc:
             self.error = f"no audio output: {exc}"
-            return False
-        self._stream = stream
-        self._last_write = time.monotonic()
-        return True
+            return None
+        return stream
 
     def start(self) -> bool:
         if muted():
@@ -603,11 +603,15 @@ class _AudioStream:
                 return True
             self.stop()                 # a writer stuck in a write that will never return
             self.restarts += 1
-        if not self._open():
-            self._stream = None
+        stream = self._open()
+        if stream is None:
             return False
-        self._stop.clear()
-        self._writer = threading.Thread(target=self._run, daemon=True, name=self.stream_name)
+        stop = threading.Event()
+        with self._swap:
+            self._stream, self._stop = stream, stop
+            self._last_write = time.monotonic()
+            self._writer = threading.Thread(target=self._run, args=(stream, stop), daemon=True,
+                                            name=self.stream_name)
         self._writer.start()
         self.error = None
         return True
@@ -621,34 +625,43 @@ class _AudioStream:
         except Exception:
             pass
 
-    def _reopen(self, why: str) -> bool:
-        """Build a fresh stream in place of one that has stopped playing. False once it has given up."""
-        self._shut(self._stream)
-        self._stream = None
+    def _reopen(self, stream, stop: threading.Event, why: str):
+        """A fresh stream in place of one that has stopped playing, or None once stopped or given up."""
+        self._shut(stream)
         for _ in range(REOPEN_TRIES):
-            if self._stop.wait(REOPEN_PAUSE_SECONDS):
-                return False
-            if self._open():
-                self.restarts += 1
-                self.error = None
-                return True
+            if stop.wait(REOPEN_PAUSE_SECONDS):
+                return None
+            fresh = self._open()
+            if fresh is None:
+                continue
+            with self._swap:
+                current = not stop.is_set()     # stopped while it opened: then this stream is nobody's
+                if current:
+                    self._stream = fresh
+                    self.restarts += 1
+                    self.error = None
+            if not current:
+                self._shut(fresh)
+                return None
+            return fresh
         self.error = why
-        return False
+        return None
 
-    def _run(self) -> None:
+    def _run(self, stream, stop: threading.Event) -> None:
         """Fill the buffer for as long as the stream lives. `write` blocks when it is full, so this paces
-        itself and needs no clock of its own — and how far it runs ahead is the health of the device."""
+        itself and needs no clock of its own — and how far it runs ahead is the health of the device.
+
+        The writer is handed its stream and its own stop flag and reads neither from the player, so a stop
+        returns at once and a fresh start can open the next stream while this one winds down."""
         written, began = 0, time.monotonic()
-        while not self._stop.is_set():
-            stream = self._stream
-            if stream is None:
-                return
+        while not stop.is_set():
             try:
                 block = self._block(BLOCK_FRAMES)   # inside the try: a render-time error must reopen, not die
                 if stream.write(block):
                     self.dropouts += 1
             except Exception as exc:
-                if not self._reopen(f"audio write failed: {exc}"):
+                stream = self._reopen(stream, stop, f"audio write failed: {exc}")
+                if stream is None:
                     return
                 written, began = 0, time.monotonic()
                 continue
@@ -657,7 +670,8 @@ class _AudioStream:
             written += len(block)
             verdict = self._health(written, now - began)
             if verdict == "dead":
-                if not self._reopen("the audio device stopped playing what it was given"):
+                stream = self._reopen(stream, stop, "the audio device stopped playing what it was given")
+                if stream is None:
                     return
                 written, began = 0, time.monotonic()
             elif verdict == "starved":
@@ -679,15 +693,23 @@ class _AudioStream:
         return ""
 
     def stop(self) -> None:
-        stream = self._stream
-        self._stream = None
-        self.held = False
-        self._stop.set()
-        writer = self._writer
-        self._writer = None
-        if writer is not None and writer is not threading.current_thread():
-            writer.join(timeout=1.0)
-        self._shut(stream)
+        """Silence the stream and return at once; the writer and the device wind down on a thread of their
+        own. Waited for here, the two took 0.85 s on the screen's loop at the end of a Pupil effort, long
+        enough for the trial engine to read a gap in the readings and drop the result."""
+        with self._swap:
+            stream, writer = self._stream, self._writer
+            self._stream = self._writer = None
+            self.held = False
+            self._stop.set()
+        if writer is None or writer is threading.current_thread():
+            self._shut(stream)
+            return
+
+        def wind_down() -> None:
+            writer.join(timeout=STALL_SECONDS)
+            self._shut(stream)
+
+        threading.Thread(target=wind_down, daemon=True, name=f"{self.stream_name}-stop").start()
 
 
 class NoisePlayer(_AudioStream):

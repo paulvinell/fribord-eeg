@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -565,29 +566,28 @@ def test_a_dropout_is_counted_rather_than_ignored():
 
     player = music.NoisePlayer()
     assert player.dropouts == 0
-    stream = Stream()
-    player._stream = stream
-    player._stop.set()                       # one pass and out
-    player._run()
+    stream, stop = Stream(), threading.Event()
+    stop.set()                               # one pass and out
+    player._run(stream, stop)
     assert stream.written == 0, "the flag is checked before writing, so a stopped music writes nothing"
 
-    player._stop.clear()
+    stop.clear()
     original = player._block
     calls = []
 
     def once(frames):
         calls.append(frames)
         if len(calls) >= 3:
-            player._stop.set()
+            stop.set()
         return original(frames)
 
     player._block = once
-    player._run()
+    player._run(stream, stop)
     assert stream.written == 3 and player.dropouts == 3
     stream.starved = False
-    player._stop.clear()
+    stop.clear()
     calls.clear()
-    player._run()
+    player._run(stream, stop)
     assert player.dropouts == 3, "and a block that arrived in time is not counted"
     # The slack is PortAudio's 'low' preset — measured 231 ms at this block size, ample for a GC pause
     # plus a heavy frame. A float here is only a *suggestion*, and CoreAudio inflates it: asking for
@@ -1029,6 +1029,38 @@ def test_a_stream_that_fails_is_rebuilt_rather_than_leaving_the_session_silent(m
         assert len(audio.opened) == 2, "a fresh stream, not the dead one retried"
         waitfor(lambda: audio.opened[1].written, what="sound again on the new stream")
         assert player.error is None, "and nothing left over to report"
+    finally:
+        player.stop()
+
+
+def test_stopping_a_sound_returns_at_once_and_the_device_shuts_behind_it(monkeypatch):
+    """A program stops its sound on the screen's own loop, at the end of every effort and on every pause.
+    Waiting there for the writer and the device took 0.85 s, long enough for the Pupil trial engine to read
+    a gap and drop the result, so the stop returns and the device shuts on a thread of its own."""
+    audio = FakeAudio()
+    shutting = threading.Event()
+    shut = []
+
+    def slow_stop(stream):
+        shutting.wait(5.0)
+        shut.append(stream)
+
+    monkeypatch.setattr(FakeStream, "stop", slow_stop, raising=False)
+    monkeypatch.setattr(FakeStream, "close", lambda stream: None, raising=False)
+    player = _tone(monkeypatch, audio)
+    assert player.start(), player.error
+    waitfor(lambda: audio.opened[0].written, what="the first block")
+    began = time.monotonic()
+    player.stop()
+    assert time.monotonic() - began < 0.05, "the caller does not wait for the device"
+    assert not player.running
+    assert player.start(), "and a fresh start does not wait for the old stream either"
+    try:
+        shutting.set()
+        waitfor(lambda: audio.opened[0] in shut, what="the old stream to be shut")
+        first = audio.opened[0].written
+        waitfor(lambda: audio.opened[1].written, what="sound on the new stream")
+        assert audio.opened[0].written == first, "the old writer never writes again"
     finally:
         player.stop()
 
