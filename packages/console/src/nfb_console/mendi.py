@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import time
 
-from nfb.heg import FrameProcessor, SignalProcessor
+from nfb.heg import FrameProcessor, PulseExtractor, SignalProcessor
+from nfb.hrv import HRVProcessor
 
 from .runner import SensorRunner
 
@@ -64,7 +65,9 @@ class MendiRunner(SensorRunner):
     """Owns a frame source and its processing for as long as it is running.
 
     Two things are stacked here: `FrameProcessor` (filters, motion gate, projection) and `SignalProcessor`
-    (the rolling windows), chained in `_read` so nothing above knows there are two.
+    (the rolling windows), chained in `_read` so nothing above knows there are two. Beside them the same
+    frames feed `PulseExtractor`, whose beats become `heart_state`, the headband's own heart rate in the
+    form `HeartRunner.state` takes.
     """
 
     STALE_S = 3.0
@@ -77,6 +80,9 @@ class MendiRunner(SensorRunner):
         super().__init__(choice)
         self.processor = FrameProcessor()
         self.signal = SignalProcessor()
+        self.pulse = PulseExtractor()
+        self.heart_processor = HRVProcessor()
+        self.heart_state = None             # the heart rate from the headband's own frames
 
     def _ready(self, state) -> bool:
         return state.samples_seen > 5
@@ -84,12 +90,17 @@ class MendiRunner(SensorRunner):
     def _reset(self) -> None:
         self.processor.reset()
         self.signal.reset()
+        self.pulse.reset()
+        self.heart_processor.reset()
+        self.heart_state = None
 
     def _read(self, gen: int) -> str | None:
         for frame in self.source.frames():
             if self._stop.is_set() or gen != self._generation:
                 return None
             self.state = self.signal.push(self.processor.process(frame), self.processor.gate_fraction)
+            for beat in self.pulse.push(frame):
+                self.heart_state = self.heart_processor.push(beat)
             self.seen_at = time.monotonic()
         # The generator ending is how `LiveMendi` reports its BLE worker dying; its own `error` knows why.
         source = self.source

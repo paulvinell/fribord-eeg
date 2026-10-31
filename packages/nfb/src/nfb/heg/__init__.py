@@ -9,6 +9,7 @@ liveness and per-attach resets.
 from .metrics import DEFAULT_HEG_METRIC, HEG_METRICS
 from .processor import (FrameProcessor, Processed, QUALITY_GOOD, QUALITY_MOTION,
                         QUALITY_SETTLING)
+from .pulse import PulseExtractor
 from .signals import HegState, SignalProcessor
 from .source import (Channel, Frame, FrameSource, HEG_RATE_HZ, LiveMendi, SimulatedMendi,
                      frame_source, problem)
@@ -16,5 +17,5 @@ from .source import (Channel, Frame, FrameSource, HEG_RATE_HZ, LiveMendi, Simula
 __all__ = [
     "Channel", "DEFAULT_HEG_METRIC", "Frame", "FrameProcessor", "FrameSource", "HEG_METRICS",
     "HEG_RATE_HZ", "HegState", "LiveMendi", "Processed", "QUALITY_GOOD", "QUALITY_MOTION",
-    "QUALITY_SETTLING", "SignalProcessor", "SimulatedMendi", "frame_source", "problem",
+    "PulseExtractor", "QUALITY_SETTLING", "SignalProcessor", "SimulatedMendi", "frame_source", "problem",
 ]
