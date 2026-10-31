@@ -39,7 +39,7 @@ def test_a_saved_recording_is_compared_and_reported(tmp_path):
     for heading in ("Agreement", "Forehead pulse", "Pulse height ratio", "Delay"):
         assert heading in text
     assert "about the same as at the start" in text
-    assert "Only the change can mean anything" in text
+    assert "only the change can mean anything" in text
 
 
 def test_over_bluetooth_the_report_says_what_it_cannot_measure():
@@ -47,7 +47,7 @@ def test_over_bluetooth_the_report_says_what_it_cannot_measure():
     result, forehead = heart_pair.analyse(recording)
     text = heart_pair.report(recording, result, forehead)
     assert "only the USB cable sends" in text
-    assert "mostly radio" in text
+    assert "the sensor's own processing time" in text
 
 
 def test_replaying_a_recording_needs_no_devices(tmp_path, capsys):
@@ -55,3 +55,18 @@ def test_replaying_a_recording_needs_no_devices(tmp_path, capsys):
     heart_pair.save(_recording(), path)
     assert heart_pair.main(["--replay", str(path)]) == 0
     assert "heartbeats seen at both sites" in capsys.readouterr().out
+
+
+PAIRED = Path(__file__).parent / "fixtures" / "mendi-heart-pair.json.gz"
+"""40 s of the headband and the HeartMath together, kept on the machine it was made on."""
+
+
+@pytest.mark.skipif(not PAIRED.exists(), reason="needs the local paired recording")
+def test_the_recorded_pair_agrees_beat_for_beat():
+    """A forehead signal that drifted, and a HeartMath that stamps the foot of its pulse."""
+    recording = heart_pair.load(PAIRED)
+    result, _ = heart_pair.analyse(recording)
+    a = result.agreement
+    assert len(a.pairs) >= 30
+    assert len(a.forehead_only) <= 5 and len(a.reference_only) <= 5
+    assert abs(result.delay.median_s) < 0.25, "steepest rise to steepest rise, the sites are close"

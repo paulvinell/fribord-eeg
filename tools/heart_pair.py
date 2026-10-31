@@ -102,7 +102,9 @@ def analyse(recording: dict) -> tuple[Comparison, list[float]]:
         forehead_beats += [b.t for b in extractor.push(_frame(row))]
         if extractor.waveform and (not forehead_wave or extractor.waveform[-1][0] != forehead_wave[-1][0]):
             forehead_wave.append(extractor.waveform[-1])
-    reference_wave = [tuple(p) for p in recording["reference_wave"]] if recording.get("reference_wave") else None
+    # The HeartMath's raw pulse points down (averaged, it rises slowly and falls fast); flipped upright here.
+    reference_wave = ([(t, -v) for t, v in recording["reference_wave"]]
+                      if recording.get("reference_wave") else None)
     return (compare(forehead_beats, recording["reference_beats"], forehead_wave, reference_wave),
             forehead_beats)
 
@@ -143,11 +145,13 @@ def report(recording: dict, result: Comparison, forehead_beats: list[float]) -> 
     if c is None:
         lines.append("  Needs the heart sensor's waveform, which only the USB cable sends.")
     else:
-        verdict = ("lower: the small vessels at the sensor tightened, which goes with rising arousal"
+        verdict = ("lower: the pulse shrank at the heart sensor against the forehead. Small vessels in the "
+                   "skin tightening would do that, and so would a sensor that moved"
                    if c.late < 0.9 else
-                   "higher: the small vessels at the sensor opened, which goes with relaxing"
+                   "higher: the pulse grew at the heart sensor against the forehead. Small vessels in the "
+                   "skin opening would do that, and so would a sensor that moved"
                    if c.late > 1.1 else "about the same as at the start")
-        lines.append(f"  Over the last third: {c.late:.2f}, {verdict}. A sensor that slipped changes it too.")
+        lines.append(f"  Over the last third: {c.late:.2f}, {verdict}.")
     lines += ["", "Delay, forehead to heart sensor"]
     d = result.delay
     if d is None:
@@ -155,11 +159,12 @@ def report(recording: dict, result: Comparison, forehead_beats: list[float]) -> 
     else:
         lines += [f"  Median {d.median_s * 1000:.0f} ms, spread {d.spread_s * 1000:.0f} ms, change across "
                   f"the recording {d.change_s * 1000:+.0f} ms.",
-                  "  The two devices are timed when their data arrives, over different radio links, so the "
-                  "median includes radio delay. Only the change can mean anything."]
+                  "  Each device is timed when its data arrives: the headband over Bluetooth, the heart "
+                  f"sensor over {'Bluetooth' if recording['heart'] == 'ble' else 'its cable'}. The median "
+                  "includes the difference in those delays, so only the change can mean anything."]
         if recording["heart"] == "ble":
-            lines.append("  Over Bluetooth a beat is timed when its notification arrives, so this delay is "
-                         "mostly radio.")
+            lines.append("  Over Bluetooth the heart sensor reports each beat after it has found it, so the "
+                         "delay also carries the sensor's own processing time.")
     lines += ["", "The heart sensor clips to the ear, so this compares two sites on the head. The height ratio "
               "and the delay move less than they would between a finger and the head."]
     return "\n".join(lines)
