@@ -402,7 +402,9 @@ class PpgDecoder:
     def upright(self) -> list[tuple[float, float]]:
         """The kept waveform with the pulse pointing up. The HeartMath's raw pulse points down: averaged
         around its beats it rises slowly and falls fast."""
-        return [(t, -float(v)) for t, v in self.raw]
+        # Copied in one step first: the decoder's thread appends while this runs on another, and walking
+        # the live deque item by item lets an append land mid-walk.
+        return [(t, -float(v)) for t, v in self.raw.copy()]
 
     def feed(self, data: bytes, arrival_t: float) -> list[Beat]:
         """Decode `data`, taking `arrival_t` as the moment its last sample was taken.

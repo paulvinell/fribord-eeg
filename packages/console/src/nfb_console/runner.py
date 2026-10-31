@@ -192,4 +192,4 @@ class PulseRunner(Protocol):
     @property
     def waveform(self) -> list[tuple[float, float]] | None:
         """The last minute of the pulse as `(time, value)` pairs, pulse pointing up, or None when the
-        source sends no waveform."""
+        source sends no waveform. A copy, safe to walk while the runner's thread keeps reading."""

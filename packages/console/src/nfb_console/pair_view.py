@@ -78,6 +78,7 @@ class PairSession:
         self.heart_choice = heart_choice
         self.mendi_choice = mendi_choice
         self.snapshot: Snapshot | None = None
+        self.fault: str | None = None           # the last comparison's failure, if it failed
         self.delay_series: deque[tuple[float, float]] = deque(maxlen=SERIES_KEPT)
         self.ratio_series: deque[tuple[float, float]] = deque(maxlen=SERIES_KEPT)
         self._ratio_start: float | None = None
@@ -126,10 +127,10 @@ class PairSession:
             return
         now = time.time() if now is None else now
         since = now - WINDOW_S
-        forehead = [t for t in _copy(self.mendi.beat_times) if since <= t <= now]
-        ear = [t for t in _copy(self.heart.beat_times) if since <= t <= now]
-        f_wave = [p for p in (_copy(self.mendi.waveform) or []) if since <= p[0] <= now] or None
-        e_wave = [p for p in (_copy(self.heart.waveform) or []) if since <= p[0] <= now] or None
+        forehead = [t for t in self.mendi.beat_times.copy() if since <= t <= now]
+        ear = [t for t in self.heart.beat_times.copy() if since <= t <= now]
+        f_wave = [p for p in (self.mendi.waveform or []) if since <= p[0] <= now] or None
+        e_wave = [p for p in (self.heart.waveform or []) if since <= p[0] <= now] or None
         result = compare(forehead, ear, f_wave, e_wave)
         a = result.agreement
         f_int, e_int, intervals = [], [], []
@@ -185,7 +186,12 @@ class PairSession:
     def _loop(self) -> None:
         while not self._stop:
             if self.running:
-                self.update()
+                try:
+                    self.update()
+                    self.fault = None
+                except Exception as exc:        # said in the toolbar; the comparison carries on
+                    self.fault = f"{type(exc).__name__}: {exc}"
+                    self.snapshot = None
             self._wake.wait(UPDATE_S)
 
     # --- transport, the contract the toolbar expects -----------------------------------------
@@ -259,19 +265,6 @@ class PairSession:
         return 0
 
 
-def _copy(items):
-    """A copy of a deque another thread appends to, or a list it rebuilds. Copying can meet the other
-    thread's append; one retry is enough at the rates these grow."""
-    if items is None:
-        return None
-    for _ in range(3):
-        try:
-            return list(items)
-        except RuntimeError:
-            continue
-    return []
-
-
 def _correlation(a: list[float], b: list[float]) -> float | None:
     if len(a) < 5:
         return None
@@ -319,6 +312,8 @@ PAIR_HELP = (
 
 def _instrument(session: PairSession) -> tuple[str, str, str]:
     """The toolbar chip: a short state. Which sensor is missing, and why, is said in the device panel."""
+    if session.fault:
+        return "two pulses", f"comparison failed: {session.fault}", t.BAD
     if any(r is not None and r.error for r in (session.mendi, session.heart)):
         return "two pulses", "a sensor reports a fault", t.BAD
     if session.missing():
@@ -462,7 +457,7 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
 
     def paint_trend(canvas, labels, caption, series, span_ceiling, unit, around, name) -> None:
         width = plot_width()
-        points = _copy(series) or []
+        points = list(series.copy())
         if len(points) < 2:
             canvas.shapes = []
             for label in labels:

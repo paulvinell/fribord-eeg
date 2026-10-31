@@ -141,3 +141,24 @@ def test_fed_the_program_shows_both_sensors_and_how_they_compare():
         assert shown in texts
     assert "blue = forehead, grey = ear" in texts
     assert "waiting for beats" not in texts
+
+
+def test_a_comparison_that_fails_is_said_and_the_next_one_still_runs():
+    """A fault inside one comparison once killed the comparison's thread for the rest of the session."""
+    session = _session()
+
+    class Broken(_Runner):
+        @property
+        def waveform(self):
+            raise RuntimeError("deque mutated during iteration")
+
+    good = session.heart
+    session.heart = Broken(list(good.beat_times), good.waveform)
+    session.paused = False
+    session._wake.set()                 # every wait returns at once, so the loop runs back to back
+    session.run()
+    from conftest import waitfor
+    waitfor(lambda: session.fault is not None, what="the failure is recorded")
+    session.heart = good
+    waitfor(lambda: session.fault is None, what="the next comparison runs and clears it")
+    session.stop()

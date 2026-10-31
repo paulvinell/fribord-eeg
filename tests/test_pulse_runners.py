@@ -86,3 +86,29 @@ def test_a_fresh_source_starts_without_the_previous_beats():
     for runner in (_heart(), _mendi()):
         runner._reset()
         assert not runner.beat_times
+
+
+def test_a_waveform_can_be_read_while_the_runner_keeps_appending():
+    """The comparison reads on its own thread while each runner's thread appends. Walking the live deque
+    item by item failed 199 times in 200 under this load; the waveform is copied in one step instead."""
+    import threading
+
+    heart, mendi = _heart(), _mendi()
+    targets = [heart.source.decoder.raw, mendi.pulse.waveform]
+    stop = threading.Event()
+
+    def append():
+        i = 0
+        while not stop.is_set():
+            for target in targets:
+                target.append((1e6 + i / FS, 1.0))
+            i += 1
+
+    writer = threading.Thread(target=append)
+    writer.start()
+    try:
+        for _ in range(200):
+            assert heart.waveform and mendi.waveform
+    finally:
+        stop.set()
+        writer.join()

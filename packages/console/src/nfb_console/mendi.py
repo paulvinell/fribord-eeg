@@ -121,7 +121,7 @@ class MendiRunner(SensorRunner):
     @property
     def waveform(self) -> list[tuple[float, float]]:
         """The last minute of the forehead pulse, pointing up; see `runner.PulseRunner`."""
-        return list(self.pulse.waveform)
+        return list(self.pulse.waveform.copy())    # one step; the reader thread appends meanwhile
 
     @property
     def battery_pct(self) -> int | None:
