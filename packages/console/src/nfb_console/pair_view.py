@@ -641,7 +641,8 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
         pulse_caption.value = (f"forehead pulse, averaged around each ear beat · {first:+.1f} s to {last:+.1f} s"
                                " · height fits the panel · grey = ear beat")
 
-    def paint_trend(canvas, labels, caption, series, span_ceiling, unit, around, name) -> None:
+    def paint_trend(canvas, labels, caption, series, span_ceiling, unit, around, name,
+                    floor: float | None = None) -> None:
         width = plot_width()
         points = list(series.copy())
         if len(points) < 2:
@@ -654,6 +655,8 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
         centre = around if around is not None else statistics.median(vals)
         half = span_ceiling.update(max(abs(v - centre) for v in vals), time.monotonic())
         top, bottom = centre + half, centre - half
+        if floor is not None and bottom < floor:
+            bottom = floor              # a height ratio is never below zero, so the axis stops there
         length = max(points[-1][0], 60.0)
 
         def y(v):
@@ -690,7 +693,7 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
             paint_trend(delay_canvas, delay_labels, delay_caption, session.delay_series, delay_span, "ms",
                         None, "delay, forehead to ear")
             paint_trend(ratio_canvas, ratio_labels, ratio_caption, session.ratio_series, ratio_span, "",
-                        1.0, "height ratio, dashed = the start")
+                        1.0, "height ratio, dashed = the start", floor=0.0)
         level_arc.shapes = _level_arc(ARC_SIDE, session.signal)
         if missing:
             level_note.value = "no level: needs both sensors"

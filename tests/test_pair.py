@@ -164,6 +164,17 @@ def test_fed_the_program_shows_both_sensors_and_how_they_compare():
     assert "waiting for beats" not in texts
 
 
+def test_the_height_ratio_axis_stops_at_zero():
+    """The axis is centred on the start, so a ratio that climbed to 2.2 drew down to -1.0: a height ratio
+    that cannot exist."""
+    session = _session()
+    session.update(now=90.0)
+    session.ratio_series.clear()
+    session.ratio_series.extend((float(i), 1.0 + 1.2 * i / 480) for i in range(0, 481, 5))
+    texts = _drawn(session).split(" | ")
+    assert not any(text.strip().startswith("-") for text in texts), "no negative ratio on the axis"
+
+
 def test_a_comparison_that_fails_is_said_and_the_next_one_still_runs():
     """A fault inside one comparison once killed the comparison's thread for the rest of the session."""
     session = _session()
