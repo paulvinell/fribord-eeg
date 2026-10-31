@@ -147,9 +147,12 @@ def _paired_session(module):
     session = module.session_for(BY_CODE["PAIR"], heart_choice=on, mendi_choice=on,
                                  heart_runner=_Runner(reference, r_wave, rmssd=68.0),
                                  mendi_runner=_Runner(forehead, f_wave, rmssd=66.0))
-    for now in range(36, 91, 3):
+    session.paused = False
+    for now in range(36, 91):
         session._accumulated = now - 36.0
         session.update(now=float(now))
+        session.observe()
+    session.paused = True       # set, not toggled: a still keeps the level it reached
     return session
 
 

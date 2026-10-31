@@ -22,15 +22,16 @@ import flet.canvas as cv
 
 from nfb.hrv.compare import compare, heights
 
-from . import chrome, cues, music, plan_pane, prefs, sysvolume
+from . import chrome, cues, music, plan_pane, prefs, signal_pane, sysvolume
 from . import theme as t
 from .feedback import CONDITION, FeedbackSettings
+from .hrv_view import _level_arc
 from .plan import SessionPlan
 from .plots import StickyCeiling, dashed, grid, place_value_labels, polyline, value_axis
 from .protocols import Protocol
 from .runner import PulseRunner
 from .targets import Target
-from .widgets import help_button, panel, stat_tile
+from .widgets import help_button, labelled, num_box, panel, stat_tile
 
 HANDLES = ("PAIR",)
 EEG_SOURCE = False
@@ -163,7 +164,7 @@ class PairSession:
 
     @property
     def level_source(self) -> tuple[str, str]:
-        return ("the ear pulse height against the forehead's, against the start of the session",
+        return ("ear pulse height against the forehead's, against the start",
                 f"half = as at the start · full at {self.full_at * 100:+.0f}%")
 
     @property
@@ -452,25 +453,28 @@ def session_for(protocol: Protocol, path=None, device=None, length_seconds=None,
 # --- the view -----------------------------------------------------------------------------------
 
 SIDE_W = 330
+ARC_SIDE = 148
 AXIS_W = 58
 INTERVAL_H, PULSE_H, TREND_H = 170, 120, 90
 FOREHEAD, EAR = t.ACCENT, t.MUTED
 
 PAIR_HELP = (
-    "**What you see.** The program compares two sensors on one heart: the Mendi headband on the forehead "
-    "and the HeartMath sensor on the ear. **intervals** shows the time between beats from each sensor over "
-    "the last minute. The two lines must follow each other closely. **averaged pulse** shows the forehead "
-    "pulse, averaged around each beat of the ear sensor. **over the session** shows the delay and the "
-    "height ratio from the start of the session.\n\n"
-    "**The numbers.** **agreement** shows how closely the two sensors' beat intervals follow each other, "
-    "from 0 to 1. **delay** is the time from a beat at the forehead to the same beat at the ear. It "
-    "includes the time each sensor takes to send its data, so only a change during a session tells you "
-    "something. **height ratio** is the ear pulse height divided by the forehead pulse height, against its "
-    "value at the start. Small vessels in the skin that tighten make it smaller, and so does a sensor "
-    "that moves.\n\n"
-    "**What you need.** Choose both sensors on the device screen. Connect the HeartMath with its cable for "
-    "the height ratio and the averaged pulse shape at the ear. Over Bluetooth it sends only beats. The "
-    "program trains nothing and gives no feedback."
+    "**What it trains.** The program compares two sensors on one heart: the Mendi headband on the forehead "
+    "and the HeartMath sensor on the ear. When the small vessels in the skin tighten, the pulse at the skin "
+    "gets smaller. The program trains the ear pulse height against the forehead pulse height, and it aims "
+    "that ratio up. The level is half at the ratio of your first heartbeats, and full at the value that "
+    "**full at** sets. The sound, the music and the click follow the level. Set them on the Feedback tab.\n\n"
+    "**What is not known yet.** Both sensors are on the head, and the ear can react less than a finger. Do "
+    "a first session with one minute at rest and one minute of mental arithmetic. If the ratio does not "
+    "change more than it changes at rest, it does not show arousal for you.\n\n"
+    "**What you see.** **intervals** shows the time between beats from each sensor over the last minute. "
+    "The two lines must follow each other closely. **averaged pulse** shows the forehead pulse, averaged "
+    "around each beat of the ear sensor. **over the session** shows the delay and the height ratio. "
+    "**agreement** shows how closely the two sensors' beat intervals follow each other, from 0 to 1. "
+    "**delay** is the time from a beat at the forehead to the same beat at the ear. It includes the time "
+    "each sensor takes to send its data, so only a change during a session tells you something.\n\n"
+    "**What you need.** Choose both sensors on the device screen, and connect the HeartMath with its cable. "
+    "Over Bluetooth it sends only beats, and the program cannot measure the height ratio."
 )
 
 
@@ -509,6 +513,16 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
     ratio_canvas, ratio_labels, ratio_caption, ratio_row = plot(TREND_H)
     iv_span, delay_span, ratio_span = StickyCeiling(floor=100.0), StickyCeiling(floor=20.0), StickyCeiling(floor=0.2)
 
+    level_arc = cv.Canvas(shapes=[], width=ARC_SIDE, height=ARC_SIDE)
+    level_note = ft.Text("", size=t.SMALL, color=t.FAINT)
+
+    def set_full_at(percent: float) -> None:
+        session.full_at = max(0.05, min(1.0, float(percent) / 100.0))
+
+    full_at_row = labelled("full at", num_box(session.full_at * 100.0, set_full_at, suffix="%", step=5,
+                                              low=5, high=100, width=58),
+                           note="above the start", width=72)
+
     values: dict[str, ft.Text] = {}
     units: dict[str, ft.Text] = {}
 
@@ -540,6 +554,10 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
               ratio_row, ft.Container(height=6), ratio_caption),
     ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
     right = ft.Column([
+        panel("LEVEL", ft.Row([ft.Container(content=level_arc, width=ARC_SIDE, height=ARC_SIDE)],
+                              alignment=ft.MainAxisAlignment.CENTER),
+              ft.Container(height=10), level_note, ft.Container(height=10), full_at_row),
+        ft.Container(height=12),
         panel("NOW", tiles),
         ft.Container(height=12),
         panel("DEVICES", ft.Container(content=device_texts[0], height=32), ft.Container(height=6),
@@ -547,14 +565,18 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
     ], spacing=0, width=SIDE_W, scroll=ft.ScrollMode.AUTO)
     main_tab = ft.Container(content=ft.Row([left, right], spacing=14, expand=True),
                             padding=ft.Padding(14, 12, 14, 14), expand=True)
-    panes = [main_tab, plan_pane_.control]
+    signal = signal_pane.SignalPane(page, session, inset=False)
+    feedback_tab = ft.Container(
+        content=ft.Column([signal.control], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO),
+        padding=ft.Padding(14, 12, 14, 14), expand=True, visible=False)
+    panes = [main_tab, feedback_tab, plan_pane_.control]
 
     def select_tab(index: int) -> None:
         for i, pane in enumerate(panes):
             pane.visible = i == index
         page.update()
 
-    tabs = chrome.Tabs(["Pulses", "Session"], select_tab)
+    tabs = chrome.Tabs(["Pulses", "Feedback", "Session"], select_tab)
     shown: list = [None]
     drawn: list = [object()]
 
@@ -653,6 +675,8 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
             toolbar.set_source(instrument[0], note=instrument[1], tone=instrument[2])
         toolbar.refresh(session.running, session.elapsed, session.length)
         plan_pane_.refresh()
+        if session.running:
+            session.observe()
         missing = session.missing()
         for text, line in zip(device_texts, session.device_lines()):
             text.value = line
@@ -667,6 +691,15 @@ def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
                         None, "delay, forehead to ear")
             paint_trend(ratio_canvas, ratio_labels, ratio_caption, session.ratio_series, ratio_span, "",
                         1.0, "height ratio, dashed = the start")
+        level_arc.shapes = _level_arc(ARC_SIDE, session.signal)
+        if missing:
+            level_note.value = "no level: needs both sensors"
+        elif session.signal is None:
+            level_note.value = "no level yet: press play" if not session.running else "waiting for heartbeats"
+        else:
+            headline, detail = session.level_source
+            level_note.value = f"{headline} · {detail}"
+        signal.refresh()
         page.update()
 
     toolbar.set_channels_visible(False)
