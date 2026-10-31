@@ -371,6 +371,27 @@ class BeatFinder:
         return out
 
 
+def without_slow_level(points: list[tuple[float, float]], seconds: float) -> list[tuple[float, float]]:
+    """Each value less the average of the `seconds` of signal centred on it, for evenly spaced points.
+    The ends, where no full window fits, are left out. The headband's pulse is cleaned with the same
+    centred average as it streams (`nfb.heg.pulse.DETREND_SECONDS`), so a caller that measures both
+    pulses can give them the same treatment."""
+    import numpy as np
+
+    if len(points) < 3:
+        return []
+    t = np.fromiter((p[0] for p in points), float, len(points))
+    v = np.fromiter((p[1] for p in points), float, len(points))
+    step = float(np.median(np.diff(t)))
+    width = int(round(seconds / step)) | 1 if step > 0 else 0
+    if width < 3 or width > len(v):
+        return []
+    sums = np.concatenate(([0.0], np.cumsum(v)))
+    means = (sums[width:] - sums[:-width]) / width
+    half = width // 2
+    return list(zip(t[half:half + len(means)].tolist(), (v[half:half + len(means)] - means).tolist()))
+
+
 WAVEFORM_SECONDS = 64.0
 """How much raw waveform the decoder keeps: enough for a program to compare a minute of this pulse with
 another sensor's."""

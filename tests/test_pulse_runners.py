@@ -8,6 +8,8 @@ device-specific. Driven with synthetic sources; no device, no clock.
 from __future__ import annotations
 
 import statistics
+
+import pytest
 from collections import deque
 
 from nfb.hrv.beats import Beat
@@ -112,3 +114,31 @@ def test_a_waveform_can_be_read_while_the_runner_keeps_appending():
     finally:
         stop.set()
         writer.join()
+
+
+def test_a_slow_drift_at_the_ear_does_not_count_as_pulse_height():
+    """The headband's pulse has its slow level taken off before anything measures it, and the ear's did
+    not, so a level sliding within one beat's window counted as height at the ear only. Both now pass
+    through the same one-second centred average."""
+    from nfb.hrv.compare import heights
+
+    steady, drifting = _heart(), _heart()
+    raw = drifting.source.decoder.raw
+    drifted = [(t, v + 4000.0 * t) for t, v in raw]     # a steep slide, far larger than a pulse per second
+    raw.clear()
+    raw.extend(drifted)
+    beats = list(steady.beat_times)[3:-3]
+    plain, slid = heights(steady.waveform, beats), heights(drifting.waveform, beats)
+    assert all(a is not None and b is not None for a, b in zip(plain, slid))
+    assert max(abs(b - a) / a for a, b in zip(plain, slid)) < 0.02
+
+
+def test_taking_off_the_slow_level_keeps_the_pulse_where_it_was():
+    from nfb.hrv.ppg import without_slow_level
+
+    points = [(i / 500, (i % 500 == 250) * 1.0 + 0.001 * i) for i in range(5000)]
+    cleaned = without_slow_level(points, 1.0)
+    assert cleaned[0][0] == pytest.approx(0.5, abs=0.002) and cleaned[-1][0] == pytest.approx(9.998 - 0.5, abs=0.002)
+    peaks = [t for t, v in cleaned if v > 0.5]
+    assert peaks == pytest.approx([0.5 + k for k in range(9)], abs=1e-9), "no beat moves"
+    assert abs(sum(v for _, v in cleaned) / len(cleaned)) < 0.01, "the slide is gone"

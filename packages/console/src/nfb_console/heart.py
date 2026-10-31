@@ -14,7 +14,9 @@ from __future__ import annotations
 import time
 from collections import deque
 
+from nfb.heg.pulse import DETREND_SECONDS
 from nfb.hrv import HRVProcessor
+from nfb.hrv.ppg import without_slow_level
 
 from .runner import BEATS_KEPT, SensorRunner
 
@@ -109,10 +111,11 @@ class HeartRunner(SensorRunner):
 
     @property
     def waveform(self) -> list[tuple[float, float]] | None:
-        """The last minute of the pulse, pointing up, when the source sends its waveform (the USB cable
-        does; the Bluetooth heart-rate service sends only beats)."""
+        """The last minute of the pulse, pointing up and with its slow level taken off as the headband's
+        is, when the source sends its waveform (the USB cable does; the Bluetooth heart-rate service sends
+        only beats)."""
         decoder = getattr(self.source, "decoder", None)
-        return decoder.upright() if decoder is not None else None
+        return without_slow_level(decoder.upright(), DETREND_SECONDS) if decoder is not None else None
 
     @property
     def spectrum(self):
