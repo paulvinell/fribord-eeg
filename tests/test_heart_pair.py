@@ -131,3 +131,13 @@ def test_the_two_devices_agree_on_every_interval_and_on_the_variation(path):
     rmssd = lambda xs: (sum((b - a) ** 2 for a, b in zip(xs, xs[1:])) / (len(xs) - 1)) ** 0.5
     assert corr > 0.95
     assert abs(rmssd(f) - rmssd(r)) < 0.15 * rmssd(f)
+
+
+@pytest.mark.parametrize("path", [PAIRED, LONG], ids=["40s", "3min"])
+def test_the_delay_between_the_sites_holds_steady_across_a_recording(path):
+    """On the HeartMath's old stamp the delay scattered by 87 ms and showed a false change of +45 ms over
+    three minutes, while the two waveforms stayed aligned within 10 ms. Timed at half height, it holds."""
+    if not path.exists():
+        pytest.skip("needs the local paired recording")
+    d = heart_pair.analyse(heart_pair.load(path)).comparison.delay
+    assert d.spread_s < 0.025 and abs(d.change_s) < 0.015
