@@ -32,7 +32,7 @@ from .protocols import Protocol
 from .targets import Target
 from .trials import (ACTIVE, BASELINE, CUE, CUED, ITI, NEGATIVE, POSITIVE, RESULT, VERDICT,
                      TrialRun)
-from .widgets import button, help_button, labelled, num_box, panel, pill, test_button
+from .widgets import button, help_button, labelled, num_box, panel, pill, stat_tile, test_button
 
 HANDLES = ("PUPIL",)
 EEG_SOURCE = False      # takes its own input; the replay EEG file is not opened for it
@@ -826,22 +826,6 @@ def trial_summary(run: TrialRun) -> str:
     return "\n".join(lines) if lines else "no result yet"
 
 
-def _stat_tile(label: str, width: int, value_size: int, unit: str = "", sub: bool = False):
-    """One bordered figure tile, the same shape the NOW and HEART panels use: a faint label, a large
-    value, a small unit, and an optional faint sub-line. Returns the box and the texts to update."""
-    value = ft.Text("—", size=value_size, color=t.TEXT, weight=ft.FontWeight.W_300)
-    unit_text = ft.Text(unit, size=t.SMALL, color=t.FAINT)
-    column = [ft.Text(label, size=t.SMALL, color=t.FAINT), value, unit_text]
-    sub_text = None
-    if sub:
-        sub_text = ft.Text("", size=t.SMALL, color=t.FAINT)
-        column.append(sub_text)
-    box = ft.Container(content=ft.Column(column, spacing=1), width=width,
-                       padding=ft.Padding(10, 9, 10, 9), border_radius=8,
-                       bgcolor=t.BG, border=ft.Border.all(1, t.BORDER))
-    return box, value, unit_text, sub_text
-
-
 def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
          on_stop: Callable[[], None]) -> ft.Control:
     plan_pane_ = plan_pane.PlanPane(page, session)
@@ -885,11 +869,11 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
     # --- the heart, when a source is chosen on the device screen -------------------------------
     heart_ui = (heart_panel.HeartPanel(compact=True, width_of=lambda: max(200.0, SIDE_W - 60))
                 if session.heart_on else None)
-    larger_box, larger_val, _, larger_sub = _stat_tile("larger", 158, 20, "bpm from baseline", sub=True)
-    smaller_box, smaller_val, _, smaller_sub = _stat_tile("smaller", 158, 20, "bpm from baseline", sub=True)
-    run_box, run_val, run_unit, _ = _stat_tile("run", 108, 17, "bpm")
-    effort_box, effort_val, _, _ = _stat_tile("effort", 108, 17, "bpm")
-    rest_box, rest_val, _, _ = _stat_tile("rest", 108, 17, "bpm")
+    larger_box, larger_val, _, larger_sub = stat_tile("larger", 158, 20, "bpm from baseline", sub=True)
+    smaller_box, smaller_val, _, smaller_sub = stat_tile("smaller", 158, 20, "bpm from baseline", sub=True)
+    run_box, run_val, run_unit, _ = stat_tile("run", 108, 17, "bpm")
+    effort_box, effort_val, _, _ = stat_tile("effort", 108, 17, "bpm")
+    rest_box, rest_val, _, _ = stat_tile("rest", 108, 17, "bpm")
     heart_no_data = ft.Text("no heart readings yet", size=t.SMALL, color=t.MUTED)
     heart_stats_body = ft.Column([
         ft.Row([larger_box, smaller_box], spacing=10),

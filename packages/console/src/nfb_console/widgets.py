@@ -235,6 +235,22 @@ def panel(title: str, *content: ft.Control, expand: bool = False,
         padding=ft.Padding(16, 13, 16, 14), expand=expand)
 
 
+def stat_tile(label: str, width: int, value_size: int, unit: str = "", sub: bool = False):
+    """One bordered figure tile, the shape the NOW and HEART panels use: a faint label, a large
+    value, a small unit, and an optional faint sub-line. Returns the box and the texts to update."""
+    value = ft.Text("—", size=value_size, color=t.TEXT, weight=ft.FontWeight.W_300)
+    unit_text = ft.Text(unit, size=t.SMALL, color=t.FAINT)
+    column = [ft.Text(label, size=t.SMALL, color=t.FAINT), value, unit_text]
+    sub_text = None
+    if sub:
+        sub_text = ft.Text("", size=t.SMALL, color=t.FAINT)
+        column.append(sub_text)
+    box = ft.Container(content=ft.Column(column, spacing=1), width=width,
+                       padding=ft.Padding(10, 9, 10, 9), border_radius=8,
+                       bgcolor=t.BG, border=ft.Border.all(1, t.BORDER))
+    return box, value, unit_text, sub_text
+
+
 def labelled(name: str, *controls: ft.Control, note: str = "", width: int = 96) -> ft.Control:
     """One setting: what it is on the left, the controls, and only then a note if there is one.
 
