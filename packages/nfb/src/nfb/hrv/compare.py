@@ -9,6 +9,7 @@ recording, and the delay between the sites. Waveforms are `(time, value)` pairs,
 
 from __future__ import annotations
 
+import math
 from bisect import bisect_left
 from dataclasses import dataclass
 from statistics import median
@@ -19,17 +20,15 @@ from .ppg import steepest_rise
 
 Wave = list[tuple[float, float]]
 
-MAX_LAG_S = 0.40
-"""The largest delay between sites considered when looking for it. Below half the interval of a heart
-at 75 bpm, so a beat cannot be paired with its neighbour."""
-
 MATCH_TOLERANCE_S = 0.15
 """How far, once the usual delay is known, a pair may stray from it and still be the same heartbeat."""
 
-EDGE_BEFORE_S, EDGE_AFTER_S = 0.40, 0.20
-"""Where to look for the steepest rise around a beat: back far enough for a beat stamped on its top, and
-on far enough for one stamped at the start of its rise, which at 30 samples a second needs the whole
-rise in view. The next heartbeat's rise is further on than that even at 120 bpm."""
+RISE_SEARCH_S = 0.5
+"""How far either side of the stamps to look for where a device's pulses rise steepest. Short of the
+neighbouring heartbeats' rises below 120 bpm."""
+
+EDGE_WINDOW_S = 0.15
+"""How far either side of its device's usual place a beat's own steepest rise is looked for."""
 
 
 @dataclass(frozen=True)
@@ -72,11 +71,9 @@ class Comparison:
 
 def match_beats(forehead: list[float], reference: list[float]) -> Agreement:
     """Pair beats from the same heartbeat; a beat seen at one site only is most likely an artifact there.
-    The usual delay is found first, from each reference beat's nearest forehead beat, so pairing works
-    whatever the radio latency is."""
+    The usual delay is found first, so pairing works however far apart the two devices' clocks are."""
     forehead, reference = sorted(forehead), sorted(reference)
-    nearest = [d for r in reference if (d := _nearest_gap(r, forehead)) is not None and abs(d) <= MAX_LAG_S]
-    usual = median(nearest) if nearest else 0.0
+    usual = _usual_delay(forehead, reference)
     used: set[int] = set()
     pairs: list[tuple[float, float]] = []
     for r in reference:
@@ -88,27 +85,43 @@ def match_beats(forehead: list[float], reference: list[float]) -> Agreement:
             used.add(best)
             pairs.append((forehead[best], r))
     paired_reference = {r for _, r in pairs}
+    # A beat counts as seen at one site only if the other site was recording when it happened.
+    covered_f = (reference[0] - usual - MATCH_TOLERANCE_S, reference[-1] - usual + MATCH_TOLERANCE_S) \
+        if reference else (0.0, -1.0)
+    covered_r = (forehead[0] + usual - MATCH_TOLERANCE_S, forehead[-1] + usual + MATCH_TOLERANCE_S) \
+        if forehead else (0.0, -1.0)
     return Agreement(pairs=pairs,
-                     forehead_only=[f for j, f in enumerate(forehead) if j not in used],
-                     reference_only=[r for r in reference if r not in paired_reference],
+                     forehead_only=[f for j, f in enumerate(forehead)
+                                    if j not in used and covered_f[0] <= f <= covered_f[1]],
+                     reference_only=[r for r in reference
+                                     if r not in paired_reference and covered_r[0] <= r <= covered_r[1]],
                      usual_delay_s=usual)
 
 
 def edge_times(wave: Wave, beats: list[float]) -> list[float]:
-    """Each beat moved to the steepest point of the rise near it, so two detectors that stamp beats at
-    different points of the pulse are compared at the same point."""
+    """Each beat moved to the steepest point of its pulse's rise, so two detectors that stamp beats at
+    different points of the pulse are compared at the same point.
+
+    Where that point lies relative to a stamp depends on the detector: on the rise for the headband,
+    0.28 s after the stamp for the HeartMath, which stamps the foot of its pulse. So it is found first in
+    the pulse averaged around all the stamps, and each beat is then searched for near it.
+    """
+    typical = rescue(wave, beats, before_s=RISE_SEARCH_S, after_s=RISE_SEARCH_S, rate_hz=100.0)
+    if typical is None:
+        return list(beats)
+    lag = float(typical.lags_s[int(np.argmax(np.diff(typical.shape)))])
     times = [p[0] for p in wave]
     out = []
     for b in beats:
-        lo, hi = bisect_left(times, b - EDGE_BEFORE_S), bisect_left(times, b + EDGE_AFTER_S)
-        out.append(steepest_rise(wave[lo:hi]) if hi - lo >= 5 else b)
+        lo, hi = bisect_left(times, b + lag - EDGE_WINDOW_S), bisect_left(times, b + lag + EDGE_WINDOW_S)
+        out.append(steepest_rise(wave[lo:hi]) if hi - lo >= 5 else b + lag)
     return out
 
 
 def delay(pairs: list[tuple[float, float]]) -> Delay | None:
     """Reference minus forehead time for each pair. The devices are stamped on arrival over different
-    links, so the median carries radio latency as well as the pulse's travel time; only its change across
-    a recording can mean anything."""
+    links, so the median carries the difference in their transport delays as well as the pulse's travel
+    time; only its change across a recording can mean anything."""
     if len(pairs) < 6:
         return None
     d = np.array([r - f for f, r in pairs])
@@ -152,8 +165,8 @@ def contrast(forehead_wave: Wave, reference_wave: Wave, pairs: list[tuple[float,
              start_s: float = 30.0) -> Contrast | None:
     """Reference height over forehead height for each paired heartbeat, divided by its median over the
     first `start_s` seconds (or the first third, if the recording is shorter), so 1 means as at the start.
-    Under stress the body tightens the small vessels in the skin and the pulse at the sensor shrinks, so
-    a falling ratio reads as rising arousal."""
+    Small vessels in the skin tightening shrink the pulse at a sensor on the skin, so a falling ratio can
+    mean that, though a sensor that moved changes it as well."""
     if len(pairs) < 6:
         return None
     f_h = heights(forehead_wave, [f for f, _ in pairs])
@@ -189,7 +202,22 @@ def compare(forehead_beats: list[float], reference_beats: list[float],
     )
 
 
-def _nearest_gap(r: float, sorted_times: list[float]) -> float | None:
-    i = bisect_left(sorted_times, r)
-    gaps = [r - sorted_times[j] for j in (i - 1, i) if 0 <= j < len(sorted_times)]
-    return min(gaps, key=abs) if gaps else None
+def _usual_delay(forehead: list[float], reference: list[float]) -> float:
+    """Reference minus forehead, from where the forehead beats sit within the reference beat train.
+
+    Each forehead beat's place between the two reference beats around it is a phase of the heartbeat,
+    and the phases are averaged on a circle, so a delay near half a heartbeat, which splits between "just
+    before" and "just after", still averages to one answer. Two devices stamped on arrival over different
+    links share no clock, and nothing bounds how far apart their stamps are. Beat times alone cannot tell
+    a delay from that delay plus a whole heartbeat, so the answer lies within half a heartbeat of zero.
+    """
+    angles = []
+    for f in forehead:
+        i = bisect_left(reference, f)
+        if 0 < i < len(reference) and 0.3 < reference[i] - reference[i - 1] < 2.0:
+            angles.append(2.0 * math.pi * (f - reference[i - 1]) / (reference[i] - reference[i - 1]))
+    if not angles:
+        return 0.0
+    phase = math.atan2(sum(map(math.sin, angles)), sum(map(math.cos, angles))) / (2.0 * math.pi)
+    period = median(b - a for a, b in zip(reference, reference[1:]))
+    return -phase * period

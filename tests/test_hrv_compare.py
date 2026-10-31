@@ -37,26 +37,27 @@ def _wave(beats, at, rate, seconds, height=lambda t: 1.0, noise=0.03, seed=0):
     return out
 
 
-def _heartbeats(seconds=90.0, seed=2):
+def _heartbeats(seconds=90.0, seed=2, interval=0.92):
     rng = random.Random(seed)
     beats, t = [], 1.0
     while t < seconds - 1.0:
         beats.append(t)
-        t += 0.92 + 0.08 * math.sin(2 * math.pi * 0.1 * t) + rng.gauss(0.0, 0.01)
+        t += interval + 0.08 * math.sin(2 * math.pi * 0.1 * t) + rng.gauss(0.0, 0.01)
     return beats
 
 
-def _scene(forehead_noise=0.03, drift_s=0.0):
-    beats = _heartbeats()
+def _scene(forehead_noise=0.03, drift_s=0.0, offset_s=0.0, interval=0.92):
+    beats = _heartbeats(interval=interval)
     rng = random.Random(5)
     span = beats[-1] - beats[0]
     forehead = [b + FOREHEAD_AT + rng.gauss(0.0, 0.004) for b in beats]
-    reference = [b + REFERENCE_AT + drift_s * (b - beats[0]) / span + rng.gauss(0.0, 0.004) for b in beats]
+    reference = [b + REFERENCE_AT + offset_s + drift_s * (b - beats[0]) / span + rng.gauss(0.0, 0.004)
+                 for b in beats]
     missing = forehead.pop(20)
     false_beat = (forehead[40] + forehead[41]) / 2.0
     forehead = sorted(forehead + [false_beat])
     f_wave = _wave(beats, FOREHEAD_AT, 30.0, 90.0, noise=forehead_noise, seed=1)
-    r_wave = _wave(beats, REFERENCE_AT, 100.0, 90.0, height=lambda b: 1.0 if b < 45.0 else 0.6, seed=2)
+    r_wave = _wave(beats, REFERENCE_AT + offset_s, 100.0, 90.0, height=lambda b: 1.0 if b < 45.0 else 0.6, seed=2)
     return beats, forehead, reference, f_wave, r_wave, missing, false_beat
 
 
@@ -67,6 +68,22 @@ def test_beats_from_the_same_heartbeat_are_paired_and_the_odd_ones_flagged():
     assert agreement.forehead_only == [false_beat]
     assert len(agreement.reference_only) == 1, "the heartbeat the forehead missed"
     assert agreement.usual_delay_s == pytest.approx(REFERENCE_AT - FOREHEAD_AT, abs=0.01)
+
+
+def test_beats_are_paired_when_the_two_clocks_are_half_a_second_apart():
+    """Two devices stamped on arrival share no clock. At 56 bpm, stamps 0.47 s apart are further than a
+    search for the nearest beat within 0.4 s can reach, and still within half a heartbeat."""
+    beats, forehead, reference, *_ = _scene(offset_s=-0.58, interval=1.07)
+    agreement = match_beats(forehead, reference)
+    assert agreement.usual_delay_s == pytest.approx(-0.47, abs=0.01)
+    assert len(agreement.pairs) == len(beats) - 1
+
+
+def test_beyond_half_a_heartbeat_the_delay_comes_out_one_heartbeat_over():
+    """Beat times cannot tell a delay from that delay plus a whole heartbeat. At 65 bpm, 0.47 s is more
+    than half a heartbeat, so it is reported as the equivalent delay on the other side."""
+    _, forehead, reference, *_ = _scene(offset_s=-0.58)
+    assert match_beats(forehead, reference).usual_delay_s == pytest.approx(-0.47 + 0.92, abs=0.03)
 
 
 def test_the_delay_between_sites_is_measured_on_the_same_point_of_each_pulse():
@@ -107,3 +124,12 @@ def test_without_waveforms_only_the_beat_times_are_compared():
     result = compare(forehead, reference)
     assert result.delay is not None
     assert result.rescue is None and result.contrast is None
+
+
+def test_a_beat_only_counts_as_one_site_where_both_were_recording():
+    """The tool waits for both devices before its clock starts, so one site can have beats from before the
+    other began. Those are not artifacts at either site."""
+    beats, forehead, reference, *_ = _scene()
+    late_start = [f for f in forehead if f > 30.0]
+    agreement = match_beats(late_start, reference)
+    assert all(r > 29.5 for r in agreement.reference_only), "nothing from before the forehead began"
