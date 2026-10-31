@@ -224,7 +224,8 @@ def test_help_text_is_simplified_technical_english():
     assert not found, "\n".join(found)
 
 
-HELP_SCREENS = SCREENS + [("hrv_view", "HRV", 0), ("heg_view", "HEG", 0), ("pupil_view", "PUPIL", 0)]
+HELP_SCREENS = SCREENS + [("hrv_view", "HRV", 0), ("heg_view", "HEG", 0), ("pupil_view", "PUPIL", 0),
+                          ("pair_view", "PAIR", 0)]
 
 
 @pytest.mark.parametrize("module,code,channels", HELP_SCREENS,

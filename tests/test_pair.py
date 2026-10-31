@@ -107,3 +107,37 @@ def test_a_fresh_session_keeps_the_plan_and_nothing_else():
     new = _session()
     new.adopt(old)
     assert new.plan is old.plan and new.snapshot is None and not new.delay_series
+
+
+# --- the view ---------------------------------------------------------------------------------
+
+def _drawn(session):
+    from nfb_console import pair_view
+    from test_screens import StubPage, toolbar
+    from test_ste import _texts
+
+    page = StubPage()
+    control = pair_view.view(page, session, toolbar(), lambda: None)
+    session.redraw()
+    return " | ".join(_texts(control))
+
+
+def test_with_no_devices_the_program_says_what_to_choose():
+    from nfb_console import pair_view
+    from nfb_console.protocols import BY_CODE
+
+    texts = _drawn(pair_view.session_for(BY_CODE["PAIR"], channels=0))
+    assert "no headband: choose the Mendi headband on the device screen" in texts
+    assert "no heart sensor: choose the HeartMath on the device screen" in texts
+    assert "waiting for beats" in texts
+
+
+def test_fed_the_program_shows_both_sensors_and_how_they_compare():
+    session = _session()
+    session.update(now=46.0)
+    session.update(now=90.0)
+    texts = _drawn(session)
+    for shown in ("INTERVALS", "AVERAGED PULSE", "OVER THE SESSION", "agreement", "height ratio", "62"):
+        assert shown in texts
+    assert "blue = forehead, grey = ear" in texts
+    assert "waiting for beats" not in texts

@@ -21,7 +21,7 @@ import optima
 from nfb import Device, Recorder, Settings
 
 from . import (amplitude_view, at_view, brand, chrome, device_panel, heart, heg_view, hrv_view, cfc_view,
-               ilf_view, mendi, pac_view, prefs, pupil, pupil_calibrate, pupil_camera, pupil_view, record_dialog, scp_view, session_view, sleep_view,
+               ilf_view, mendi, pac_view, pair_view, prefs, pupil, pupil_calibrate, pupil_camera, pupil_view, record_dialog, scp_view, session_view, sleep_view,
                splash, wakelock, wave_view)
 from . import theme as t
 from .inputs import HeartChoice, InputChoice, MendiChoice, PupilChoice
@@ -326,7 +326,7 @@ class Console:
     def screen_for(protocol: Protocol):
         """Which screen runs a protocol — a lookup, so adding one is a table entry."""
         return next((s for s in (amplitude_view, at_view, cfc_view, heg_view, hrv_view, ilf_view,
-                                 pac_view, pupil_view, scp_view, sleep_view, wave_view)
+                                 pac_view, pair_view, pupil_view, scp_view, sleep_view, wave_view)
                     if protocol.code in s.HANDLES), None)
 
     def resume(self, protocol: Protocol) -> None:

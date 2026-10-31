@@ -17,12 +17,18 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+import flet as ft
+import flet.canvas as cv
+
 from nfb.hrv.compare import compare, heights
 
-from . import cues, prefs
+from . import chrome, cues, plan_pane, prefs
+from . import theme as t
 from .plan import SessionPlan
+from .plots import StickyCeiling, dashed, grid, place_value_labels, polyline, value_axis
 from .protocols import Protocol
 from .runner import PulseRunner
+from .widgets import help_button, panel, stat_tile
 
 HANDLES = ("PAIR",)
 EEG_SOURCE = False
@@ -86,8 +92,8 @@ class PairSession:
 
     # --- what is missing ----------------------------------------------------------------------
 
-    def missing(self) -> list[str]:
-        """Why a device gives nothing to compare, one line each, or nothing when both are reading."""
+    def device_lines(self) -> list[str]:
+        """One line per sensor, headband first: its trouble and what to do, or its own status."""
         out = []
         for name, runner, choice, where in (
                 ("headband", self.mendi, self.mendi_choice, "choose the Mendi headband on the device screen"),
@@ -98,9 +104,17 @@ class PairSession:
                 out.append(f"{name}: {runner.error}")
             elif runner.stale:
                 out.append(f"{name}: no readings for a while")
-            elif runner.heart_state is None:
+            else:
                 out.append(f"{name}: {runner.describe()}")
         return out
+
+    def missing(self) -> list[str]:
+        """Why a sensor gives nothing to compare, one line each, or nothing when both are reading."""
+        lines = self.device_lines()
+        runners = (self.mendi, self.heart)
+        return [line for line, runner in zip(lines, runners)
+                if runner is None or line.startswith("no ") or runner.error or runner.stale
+                or runner.heart_state is None]
 
     # --- the comparison -----------------------------------------------------------------------
 
@@ -276,3 +290,233 @@ def session_for(protocol: Protocol, path=None, device=None, length_seconds=None,
     _ = path, device, source, channels, pupil_choice, pupil_runner
     return PairSession(protocol, length_seconds=length_seconds, heart_runner=heart_runner,
                        mendi_runner=mendi_runner, heart_choice=heart_choice, mendi_choice=mendi_choice)
+
+
+# --- the view -----------------------------------------------------------------------------------
+
+SIDE_W = 330
+AXIS_W = 58
+INTERVAL_H, PULSE_H, TREND_H = 170, 120, 90
+FOREHEAD, EAR = t.ACCENT, t.MUTED
+
+PAIR_HELP = (
+    "**What you see.** The program compares two sensors on one heart: the Mendi headband on the forehead "
+    "and the HeartMath sensor on the ear. **intervals** shows the time between beats from each sensor over "
+    "the last minute. The two lines must follow each other closely. **averaged pulse** shows the forehead "
+    "pulse, averaged around each beat of the ear sensor. **over the session** shows the delay and the "
+    "height ratio from the start of the session.\n\n"
+    "**The numbers.** **agreement** shows how closely the two sensors' beat intervals follow each other, "
+    "from 0 to 1. **delay** is the time from a beat at the forehead to the same beat at the ear. It "
+    "includes the time each sensor takes to send its data, so only a change during a session tells you "
+    "something. **height ratio** is the ear pulse height divided by the forehead pulse height, against its "
+    "value at the start. Small vessels in the skin that tighten make it smaller, and so does a sensor "
+    "that moves.\n\n"
+    "**What you need.** Choose both sensors on the device screen. Connect the HeartMath with its cable for "
+    "the height ratio and the averaged pulse shape at the ear. Over Bluetooth it sends only beats. The "
+    "program trains nothing and gives no feedback."
+)
+
+
+def _instrument(session: PairSession) -> tuple[str, str, str]:
+    """The toolbar chip: a short state. Which sensor is missing, and why, is said in the device panel."""
+    if any(r is not None and r.error for r in (session.mendi, session.heart)):
+        return "two pulses", "a sensor reports a fault", t.BAD
+    if session.missing():
+        return "two pulses", "needs both sensors", t.MUTED
+    if session.snapshot is None:
+        return "two pulses", "comparing", t.ACCENT
+    return "two pulses", "both sensors reading", t.GOOD
+
+
+def view(page: ft.Page, session: PairSession, toolbar: chrome.Toolbar,
+         on_stop: Callable[[], None]) -> ft.Control:
+    plan_pane_ = plan_pane.PlanPane(page, session)
+
+    def plot_width() -> float:
+        width = getattr(page, "width", None) or 1020
+        return max(260.0, width - SIDE_W - 76 - AXIS_W)
+
+    def plot(height: int):
+        canvas = cv.Canvas(shapes=[], expand=True, height=height)
+        axis, labels = value_axis(height, count=3, width=AXIS_W)
+        caption = ft.Text("waiting for beats", size=t.SMALL, color=t.FAINT)
+        row = ft.Row([axis, ft.Container(content=canvas, expand=True, height=height)], spacing=0)
+        return canvas, labels, caption, row
+
+    iv_canvas, iv_labels, iv_caption, iv_row = plot(INTERVAL_H)
+    pulse_canvas = cv.Canvas(shapes=[], expand=True, height=PULSE_H)
+    pulse_caption = ft.Text("waiting for beats", size=t.SMALL, color=t.FAINT)
+    delay_canvas, delay_labels, delay_caption, delay_row = plot(TREND_H)
+    ratio_canvas, ratio_labels, ratio_caption, ratio_row = plot(TREND_H)
+    iv_span, delay_span, ratio_span = StickyCeiling(floor=100.0), StickyCeiling(floor=20.0), StickyCeiling(floor=0.2)
+
+    values: dict[str, ft.Text] = {}
+    units: dict[str, ft.Text] = {}
+
+    def tile(key: str, label: str, unit: str) -> ft.Control:
+        box, value, unit_text, _ = stat_tile(label, 138, t.VALUE, unit)
+        values[key], units[key] = value, unit_text
+        return box
+
+    tiles = ft.Column([
+        ft.Row([tile("f_rate", "forehead", "bpm"), tile("e_rate", "ear", "bpm")], spacing=10),
+        ft.Row([tile("f_rmssd", "forehead RMSSD", "ms"), tile("e_rmssd", "ear RMSSD", "ms")], spacing=10),
+        ft.Row([tile("agreement", "agreement", "paired intervals"), tile("paired", "paired", "beats, last minute")],
+               spacing=10),
+        ft.Row([tile("delay", "delay", "ms, forehead to ear"), tile("ratio", "height ratio", "of the start")],
+               spacing=10),
+    ], spacing=10)
+    # Two lines reserved for each sensor, so a long status cannot change the panel's height.
+    device_texts = [ft.Text("", size=t.SMALL, color=t.MUTED, max_lines=2) for _ in range(2)]
+
+    left = ft.Column([
+        panel("INTERVALS", iv_row, ft.Container(height=6), iv_caption,
+              help=help_button(page, "Pulse pair", PAIR_HELP)),
+        ft.Container(height=12),
+        panel("AVERAGED PULSE", ft.Row([ft.Container(width=AXIS_W),
+                                        ft.Container(content=pulse_canvas, expand=True, height=PULSE_H)], spacing=0),
+              ft.Container(height=6), pulse_caption),
+        ft.Container(height=12),
+        panel("OVER THE SESSION", delay_row, ft.Container(height=6), delay_caption, ft.Container(height=12),
+              ratio_row, ft.Container(height=6), ratio_caption),
+    ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
+    right = ft.Column([
+        panel("NOW", tiles),
+        ft.Container(height=12),
+        panel("DEVICES", ft.Container(content=device_texts[0], height=32), ft.Container(height=6),
+              ft.Container(content=device_texts[1], height=32)),
+    ], spacing=0, width=SIDE_W, scroll=ft.ScrollMode.AUTO)
+    main_tab = ft.Container(content=ft.Row([left, right], spacing=14, expand=True),
+                            padding=ft.Padding(14, 12, 14, 14), expand=True)
+    panes = [main_tab, plan_pane_.control]
+
+    def select_tab(index: int) -> None:
+        for i, pane in enumerate(panes):
+            pane.visible = i == index
+        page.update()
+
+    tabs = chrome.Tabs(["Pulses", "Session"], select_tab)
+    shown: list = [None]
+    drawn: list = [object()]
+
+    def paint_tiles(snap: Snapshot | None) -> None:
+        def num(v, fmt):
+            return "—" if v is None else format(v, fmt)
+        values["f_rate"].value = num(snap and snap.forehead_rate, ".0f")
+        values["e_rate"].value = num(snap and snap.ear_rate, ".0f")
+        values["f_rmssd"].value = num(snap and snap.forehead_rmssd, ".0f")
+        values["e_rmssd"].value = num(snap and snap.ear_rmssd, ".0f")
+        values["agreement"].value = num(snap and snap.agreement, ".2f")
+        values["paired"].value = "—" if snap is None else str(snap.paired)
+        units["paired"].value = ("beats, last minute" if snap is None else
+                                 f"one site: {snap.forehead_only} + {snap.ear_only}")
+        values["delay"].value = num(snap and snap.delay_ms, ".0f")
+        values["ratio"].value = num(snap and snap.height_ratio, ".2f")
+
+    def paint_intervals(snap: Snapshot | None) -> None:
+        width = plot_width()
+        if snap is None or len(snap.intervals) < 2:
+            iv_canvas.shapes = []
+            for label in iv_labels:
+                label.value = ""
+            iv_caption.value = "waiting for beats"
+            return
+        ms = [v * 1000.0 for _, f, e in snap.intervals for v in (f, e)]
+        centre = round(statistics.fmean(ms) / 50.0) * 50.0
+        half = iv_span.update(max(abs(v - centre) for v in ms), time.monotonic())
+        top, bottom = centre + half, centre - half
+        end = snap.intervals[-1][0]
+
+        def x(at):
+            return width * (1.0 - (end - at) / WINDOW_S)
+
+        def y(v):
+            return INTERVAL_H * (top - v * 1000.0) / (top - bottom)
+
+        iv_canvas.shapes = grid(width, INTERVAL_H, rows=2, cols=6) + [
+            polyline([ft.Offset(x(at), y(f)) for at, f, _ in snap.intervals], FOREHEAD, 1.4),
+            polyline([ft.Offset(x(at), y(e)) for at, _, e in snap.intervals], EAR, 1.4)]
+        place_value_labels(iv_labels, INTERVAL_H, top, bottom, unit="ms")
+        iv_caption.value = "60 s across · blue = forehead, grey = ear · one point per beat interval"
+
+    def paint_pulse(snap: Snapshot | None) -> None:
+        width = plot_width()
+        if snap is None or len(snap.pulse_shape) < 3:
+            pulse_canvas.shapes = []
+            pulse_caption.value = "waiting for beats"
+            return
+        lo, hi = min(snap.pulse_shape), max(snap.pulse_shape)
+        span = (hi - lo) or 1.0
+        first, last = snap.pulse_lags[0], snap.pulse_lags[-1]
+
+        def x(lag):
+            return width * (lag - first) / (last - first)
+
+        zero = x(0.0)
+        pulse_canvas.shapes = grid(width, PULSE_H, rows=2, cols=6) + [
+            cv.Line(zero, 0, zero, PULSE_H, paint=ft.Paint(color=EAR, stroke_width=1.0)),
+            polyline([ft.Offset(x(lag), PULSE_H * (1.0 - (v - lo) / span))
+                      for lag, v in zip(snap.pulse_lags, snap.pulse_shape)], FOREHEAD, 1.6)]
+        pulse_caption.value = (f"forehead pulse, averaged around each ear beat · {first:+.1f} s to {last:+.1f} s"
+                               " · height fits the panel · grey = ear beat")
+
+    def paint_trend(canvas, labels, caption, series, span_ceiling, unit, around, name) -> None:
+        width = plot_width()
+        points = _copy(series) or []
+        if len(points) < 2:
+            canvas.shapes = []
+            for label in labels:
+                label.value = ""
+            caption.value = f"{name} · waiting"
+            return
+        vals = [v for _, v in points]
+        centre = around if around is not None else statistics.median(vals)
+        half = span_ceiling.update(max(abs(v - centre) for v in vals), time.monotonic())
+        top, bottom = centre + half, centre - half
+        length = max(points[-1][0], 60.0)
+
+        def y(v):
+            return TREND_H * (top - v) / (top - bottom)
+
+        shapes = grid(width, TREND_H, rows=2, cols=6)
+        if around is not None:
+            shapes += dashed(y(around), width, t.FAINT)
+        shapes.append(polyline([ft.Offset(width * at / length, y(v)) for at, v in points], FOREHEAD, 1.4))
+        canvas.shapes = shapes
+        place_value_labels(labels, TREND_H, top, bottom, unit=unit)
+        caption.value = f"{name} · {length / 60.0:.0f} min across"
+
+    def draw() -> None:
+        session.tick()
+        instrument = _instrument(session)
+        if instrument != shown[0]:
+            shown[0] = instrument
+            toolbar.set_source(instrument[0], note=instrument[1], tone=instrument[2])
+        toolbar.refresh(session.running, session.elapsed, session.length)
+        plan_pane_.refresh()
+        missing = session.missing()
+        for text, line in zip(device_texts, session.device_lines()):
+            text.value = line
+            text.color = t.TEXT if line in missing else t.MUTED
+        snap = session.snapshot
+        if snap is not drawn[0]:
+            drawn[0] = snap
+            paint_tiles(snap)
+            paint_intervals(snap)
+            paint_pulse(snap)
+            paint_trend(delay_canvas, delay_labels, delay_caption, session.delay_series, delay_span, "ms",
+                        None, "delay, forehead to ear")
+            paint_trend(ratio_canvas, ratio_labels, ratio_caption, session.ratio_series, ratio_span, "",
+                        1.0, "height ratio, dashed = the start")
+        page.update()
+
+    toolbar.set_channels_visible(False)
+    session.redraw = draw
+    toolbar.bind_transport(lambda _e: (session.toggle_pause(), draw()),
+                           lambda _e: (session.stop(), on_stop()))
+    toolbar.set_transport_visible(True)
+    toolbar.set_transport_enabled(True)
+    toolbar.set_crumb(session.protocol.name)
+    page.run_task(chrome.render_loop, page, session, draw, toolbar)
+
+    return ft.Column([toolbar.control, tabs.control, ft.Stack(panes, expand=True)], spacing=0, expand=True)

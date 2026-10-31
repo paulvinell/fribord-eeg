@@ -113,6 +113,10 @@ CATALOGUE = (
         "PUPIL", "Pupil",
         "Pupil size, larger or smaller",
     ),
+    Protocol(
+        "PAIR", "Pulse pair",
+        "Forehead against ear, beat for beat",
+    ),
 )
 
 BY_CODE = {p.code: p for p in CATALOGUE}
