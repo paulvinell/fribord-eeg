@@ -37,11 +37,24 @@ WINDOW_S = 60.0
 """How much of each pulse is compared at a time: long enough for the pairing to find the usual delay and
 for the averaged pulse to stand clear of the noise, short enough to follow a change within a minute."""
 
-UPDATE_S = 2.0
-"""How often the comparison is worked out again."""
+UPDATE_S = 1.0
+"""How often the comparison is worked out again, and so how often the training signal can move."""
 
-SERIES_KEPT = 1800
-"""Points kept for the session trends: an hour at one point every two seconds."""
+SERIES_KEPT = 3600
+"""Points kept for the session trends: an hour at one point a second."""
+
+SMOOTH_BEATS = 8
+"""How many heartbeats the training signal is the median of: about eight seconds at rest, enough to steady
+one beat's measurement and short enough to follow the skin's vessels, which react over several seconds. A
+starting value, not a measured one."""
+
+START_BEATS = 20
+"""How many of the session's first heartbeats set the ratio's starting value, the half-way point of the
+level. Until that many have arrived the start is provisional, so feedback runs from the first beats."""
+
+SETTLE_S = 1.2
+"""How long after a heartbeat both sensors' pulses around it have arrived: the headband's cleaned waveform
+runs about half a second behind, and a height is read up to 0.4 s past the beat."""
 
 
 @dataclass(frozen=True)
@@ -81,7 +94,10 @@ class PairSession:
         self.fault: str | None = None           # the last comparison's failure, if it failed
         self.delay_series: deque[tuple[float, float]] = deque(maxlen=SERIES_KEPT)
         self.ratio_series: deque[tuple[float, float]] = deque(maxlen=SERIES_KEPT)
-        self._ratio_start: float | None = None
+        self.beat_ratios: deque[tuple[float, float]] = deque(maxlen=4096)  # (ear beat, ear over forehead)
+        self._start_ratios: list[float] = []
+        self._last_ratio_at = float("-inf")
+        self.training: tuple[float, float] | None = None      # (ear beat, ratio against the start)
         self.finished = False
         self.paused = True
         self._stop = False
@@ -139,7 +155,7 @@ class PairSession:
                 f_int.append(f2 - f1)
                 e_int.append(e2 - e1)
                 intervals.append((f2, f2 - f1, e2 - e1))
-        ratio = self._height_ratio(f_wave, e_wave, a.pairs)
+        ratio = self._per_beat(f_wave, e_wave, a.pairs, now)
         at = self.elapsed
         if result.delay is not None:
             self.delay_series.append((at, result.delay.median_s * 1000.0))
@@ -155,24 +171,32 @@ class PairSession:
             agreement=_correlation(f_int, e_int), intervals=intervals,
             delay_ms=result.delay.median_s * 1000.0 if result.delay else None,
             delay_spread_ms=result.delay.spread_s * 1000.0 if result.delay else None,
-            height_ratio=ratio,
+            height_ratio=self.training[1] if self.training else None,
             pulse_lags=list(result.rescue.lags_s) if result.rescue else [],
             pulse_shape=list(result.rescue.shape) if result.rescue else [])
 
-    def _height_ratio(self, f_wave, e_wave, pairs) -> float | None:
-        """The ear pulse's height over the forehead's, median over the window, divided by the first such
-        median of the session, so 1 means as at the start."""
-        if not (f_wave and e_wave) or len(pairs) < 6:
+    def _per_beat(self, f_wave, e_wave, pairs, now: float) -> float | None:
+        """The training signal: the ear pulse's height over the forehead's for each heartbeat both sensors
+        saw, the median of the last `SMOOTH_BEATS`, against the median of the session's first `START_BEATS`.
+        Each heartbeat is measured once, when its pulses have arrived at both sensors."""
+        if not (f_wave and e_wave):
             return None
-        f_h = heights(f_wave, [f for f, _ in pairs])
-        e_h = heights(e_wave, [e for _, e in pairs])
-        ratios = [eh / fh for fh, eh in zip(f_h, e_h) if fh and eh]
-        if len(ratios) < 6:
+        settled = [(f, e) for f, e in pairs if self._last_ratio_at < e <= now - SETTLE_S]
+        if settled:
+            f_h = heights(f_wave, [f for f, _ in settled])
+            e_h = heights(e_wave, [e for _, e in settled])
+            for (_, e), fh, eh in zip(settled, f_h, e_h):
+                self._last_ratio_at = e
+                if fh and eh:
+                    self.beat_ratios.append((e, eh / fh))
+                    if len(self._start_ratios) < START_BEATS:
+                        self._start_ratios.append(eh / fh)
+        if not self.beat_ratios or not self._start_ratios:
             return None
-        raw = statistics.median(ratios)
-        if self._ratio_start is None:
-            self._ratio_start = raw
-        return raw / self._ratio_start
+        recent = [r for _, r in list(self.beat_ratios)[-SMOOTH_BEATS:]]
+        value = statistics.median(recent) / statistics.median(self._start_ratios)
+        self.training = (self.beat_ratios[-1][0], value)
+        return value
 
     # --- the thread ---------------------------------------------------------------------------
 

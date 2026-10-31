@@ -64,8 +64,29 @@ def test_the_height_ratio_is_against_the_start_of_the_session():
     session.update(now=46.0)
     session.update(now=90.0)
     first, last = session.ratio_series[0][1], session.ratio_series[-1][1]
-    assert first == pytest.approx(1.0)
+    assert first == pytest.approx(1.0, abs=0.05)
     assert last == pytest.approx(0.6, abs=0.12)
+
+
+def test_the_training_signal_follows_a_change_within_seconds():
+    """Each heartbeat is measured once its pulses have arrived; the signal is the median of the last eight.
+    So when the ear pulse shrinks at 45 s, the signal has moved most of the way ten seconds later, not a
+    minute later as a one-minute median would."""
+    session = _session()
+    readings = {}
+    for now in range(20, 70):
+        session.update(now=float(now))
+        readings[now] = session.training[1]
+    assert readings[44] > 0.9, "before the change, about as at the start"
+    assert readings[56] < 0.75, "ten seconds after it, most of the way down"
+
+
+def test_each_heartbeat_is_measured_once():
+    session = _session()
+    for now in (60.0, 61.0, 61.0, 62.0):
+        session.update(now=now)
+    times = [t for t, _ in session.beat_ratios]
+    assert times == sorted(set(times)), "a heartbeat seen in two comparisons is counted once"
 
 
 def test_a_device_not_chosen_is_named_and_nothing_is_compared():
