@@ -18,10 +18,12 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from nfb.heg.pulse import PulseExtractor
 from nfb.heg.source import Channel, Frame
 from nfb.hrv.compare import Comparison, compare
+from nfb.hrv.ppg import BeatFinder
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_RATE_HZ = 500.0
@@ -94,8 +96,14 @@ def record(seconds: float, heart: str, address: str | None = None) -> dict:
             "reference_wave": wave, "errors": {"headband": mendi.error, "heart sensor": reference.error}}
 
 
-def analyse(recording: dict) -> tuple[Comparison, list[float], float]:
-    """The comparison, the forehead's beat times, and how many seconds the headband read out of range."""
+class Analysis(NamedTuple):
+    comparison: Comparison
+    forehead_beats: list[float]
+    reference_beats: list[float]
+    out_of_range_s: float           # how long the headband read out of range
+
+
+def analyse(recording: dict) -> Analysis:
     extractor = PulseExtractor()
     forehead_beats: list[float] = []
     forehead_wave: list[tuple[float, float]] = []
@@ -105,13 +113,19 @@ def analyse(recording: dict) -> tuple[Comparison, list[float], float]:
         out_of_range += extractor.trouble is not None
         if extractor.waveform and (not forehead_wave or extractor.waveform[-1][0] != forehead_wave[-1][0]):
             forehead_wave.append(extractor.waveform[-1])
+    raw = recording.get("reference_wave")
+    if raw:
+        # Found again from the saved waveform, so every recording is timed the way the decoder times now.
+        finder = BeatFinder(REFERENCE_RATE_HZ)
+        reference_beats = [b.t for t, v in raw for b in finder.push(t, v)]
+    else:
+        reference_beats = list(recording["reference_beats"])
     # The HeartMath's raw pulse points down (averaged, it rises slowly and falls fast); flipped upright here.
-    reference_wave = ([(t, -v) for t, v in recording["reference_wave"]]
-                      if recording.get("reference_wave") else None)
+    reference_wave = [(t, -v) for t, v in raw] if raw else None
     frames = recording["frames"]
     span = frames[-1]["t"] - frames[0]["t"] if len(frames) > 1 else 0.0
-    return (compare(forehead_beats, recording["reference_beats"], forehead_wave, reference_wave),
-            forehead_beats, span * out_of_range / max(1, len(frames)))
+    return Analysis(compare(forehead_beats, reference_beats, forehead_wave, reference_wave),
+                    forehead_beats, reference_beats, span * out_of_range / max(1, len(frames)))
 
 
 def _rate(beats: list[float]) -> str:
@@ -126,8 +140,8 @@ def _sparkline(values) -> str:
     return "".join(bars[min(7, int((v - lo) / span * 8))] for v in values)
 
 
-def report(recording: dict, result: Comparison, forehead_beats: list[float], out_of_range_s: float = 0.0) -> str:
-    reference_beats = recording["reference_beats"]
+def report(recording: dict, analysis: Analysis) -> str:
+    result, forehead_beats, reference_beats, out_of_range_s = analysis
     a = result.agreement
     lines = [f"Recorded {recording['seconds']:.0f} s. Forehead: {len(forehead_beats)} beats, "
              f"{_rate(forehead_beats)}. Heart sensor: {len(reference_beats)} beats, {_rate(reference_beats)}."]
@@ -212,9 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     if not recording["frames"] or not recording["reference_beats"]:
         print("Nothing to compare: one of the devices sent nothing.")
         return 1
-    result, forehead_beats, out_of_range_s = analyse(recording)
     print()
-    print(report(recording, result, forehead_beats, out_of_range_s))
+    print(report(recording, analyse(recording)))
     return 0
 
 
