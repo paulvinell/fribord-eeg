@@ -53,7 +53,7 @@ FED_SECONDS = 150.0
 
 SCREENS = {"AMP": "amplitude_view", "A-T": "at_view", "CFC": "cfc_view", "ILF": "ilf_view",
            "PAC": "pac_view", "SCP": "scp_view", "SLEEP": "sleep_view", "WAVE": "wave_view",
-           "HEG": "heg_view", "HRV": "hrv_view", "PUPIL": "pupil_view"}
+           "HEG": "heg_view", "HRV": "hrv_view", "PUPIL": "pupil_view", "PAIR": "pair_view"}
 
 # Cold is not an edge case here, it is the first twenty seconds of every session — and it is where most
 # of the faults have been, because it is the state nobody opens the app to look at.
@@ -66,6 +66,7 @@ SHOTS = [("launcher", "", 0)] + [
     for channels in ((1, 4) if code == "PAC" else (2,))
 ] + [("HRV", "cold", 0), ("HEG", "cold", 0)] + [     # no EEG to feed them; their own devices drive them
     ("PUPIL", state, 0) for state in STATES] + [
+    ("PAIR", state, 0) for state in STATES] + [
     ("device", kind, 3) for kind in ("simulator", "tracker")]     # the Pupil tab, with each source
 
 
@@ -105,12 +106,17 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         from nfb_console.inputs import HeartChoice
         hc = HeartChoice(kind="simulator")
         heart_kwargs = dict(heart_choice=hc, heart_runner=heart_mod.HeartRunner(hc))
-    session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
-                                 channels=channels, **heart_kwargs)
+    if code == "PAIR" and state == "fed":
+        session = _paired_session(module)
+    else:
+        session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
+                                     channels=channels, **heart_kwargs)
     bar = chrome.Toolbar(_Device(), lambda: None, lambda: None, lambda _n: None)
     control = module.view(page, session, bar, lambda: None)
     if state == "fed" and code == "PUPIL":
         feed_pupil(session)
+        session.redraw()
+    elif state == "fed" and code == "PAIR":
         session.redraw()
     elif state == "fed":
         # Fed here rather than by the session's own thread: the whole run in a moment, so a settled
@@ -126,6 +132,25 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         session.redraw()
     control._shot_redraw = session.redraw
     return control
+
+
+def _paired_session(module):
+    """Both heart sensors on one synthetic heart, compared every 3 s over a minute, at once: the same
+    two-site heart the comparison's tests use."""
+    import types
+
+    from test_hrv_compare import _scene
+    from test_pair import _Runner
+
+    _, forehead, reference, f_wave, r_wave, *_ = _scene()
+    on = types.SimpleNamespace(on=True)
+    session = module.session_for(BY_CODE["PAIR"], heart_choice=on, mendi_choice=on,
+                                 heart_runner=_Runner(reference, r_wave, rmssd=68.0),
+                                 mendi_runner=_Runner(forehead, f_wave, rmssd=66.0))
+    for now in range(36, 91, 3):
+        session._accumulated = now - 36.0
+        session.update(now=float(now))
+    return session
 
 
 def feed_pupil(session, seconds: float = 75.0) -> None:
