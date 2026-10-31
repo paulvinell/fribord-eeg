@@ -113,6 +113,11 @@ class MendiRunner(SensorRunner):
         return (getattr(source, "error", None) if source is not None else None) \
             or "the headband stopped delivering frames"
 
+    def describe(self) -> str:
+        # The out-of-range state outranks the source's own line, though not a dead reader: the headband
+        # connects and streams, and its readings carry no pulse until it is restarted.
+        return self.error or self.pulse.trouble or super().describe()
+
     @property
     def waveform(self) -> list[tuple[float, float]]:
         """The last minute of the forehead pulse, pointing up; see `runner.PulseRunner`."""
