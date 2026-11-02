@@ -64,7 +64,7 @@ SHOTS = [("launcher", "", 0)] + [
     for code in ("AMP", "CFC", "PAC", "ILF", "A-T", "SCP", "WAVE")
     for state in STATES
     for channels in ((1, 4) if code == "PAC" else (2,))
-] + [("HRV", "cold", 0), ("HEG", "cold", 0)] + [     # no EEG to feed them; their own devices drive them
+] + [("HRV", "cold", 0)] + [("HEG", state, 0) for state in STATES] + [   # their own devices drive them
     ("PUPIL", state, 0) for state in STATES] + [
     ("PAIR", state, 0) for state in STATES] + [
     ("device", kind, 3) for kind in ("simulator", "tracker")]     # the Pupil tab, with each source
@@ -108,6 +108,8 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         heart_kwargs = dict(heart_choice=hc, heart_runner=heart_mod.HeartRunner(hc))
     if code == "PAIR" and state == "fed":
         session = _paired_session(module)
+    elif code == "HEG" and state == "fed":
+        session = _heg_trials(module)
     else:
         session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
                                      channels=channels, **heart_kwargs)
@@ -116,7 +118,7 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
     if state == "fed" and code == "PUPIL":
         feed_pupil(session)
         session.redraw()
-    elif state == "fed" and code == "PAIR":
+    elif state == "fed" and code in ("PAIR", "HEG"):
         session.redraw()
     elif state == "fed":
         # Fed here rather than by the session's own thread: the whole run in a moment, so a settled
@@ -153,6 +155,24 @@ def _paired_session(module):
         session.update(now=float(now))
         session.observe()
     session.paused = True       # set, not toggled: a still keeps the level it reached
+    return session
+
+
+def _heg_trials(module):
+    """HEG in active mode, a minute of signal and then trials until the third is under way, at once."""
+    from nfb_console.inputs import MendiChoice
+    from test_heg_trials import _push
+
+    session = module.session_for(BY_CODE["HEG"], mendi_choice=MendiChoice(kind="simulator"))
+    session.cue = lambda *_a, **_k: True
+    session.set_mode("active")
+    session.paused = False
+    t = _push(session, 70.0, 1000.0)
+    session.restart_trials()
+    while len(session.trials.results) < 2 or session.trials.phase != "active":
+        t = _push(session, 0.5, t, rise=0.6 if len(session.trials.results) else 1.2)
+    t = _push(session, 8.0, t, rise=1.0)
+    session.paused = True       # the shot is a still
     return session
 
 

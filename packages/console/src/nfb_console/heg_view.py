@@ -28,7 +28,9 @@ scaling. And no attempt to name a "good" absolute value, for the reason in the f
 from __future__ import annotations
 
 import math
+import statistics
 import time
+from collections import deque
 from typing import Callable
 
 import flet as ft
@@ -37,7 +39,7 @@ import flet.canvas as cv
 from nfb.heg import DEFAULT_HEG_METRIC, HEG_METRICS, QUALITY_MOTION
 from nfb.hrv.metrics import metric_value
 
-from . import (chrome, cues, heg_panel, mendi, normalise, plan_pane, prefs,
+from . import (chrome, cues, heart_panel, heg_panel, mendi, normalise, plan_pane, prefs,
                signal_pane)
 from . import theme as t
 from .feedback import FeedbackSettings
@@ -48,12 +50,14 @@ from .plan import SessionPlan
 from .protocols import Protocol
 from .scaling import Scaled, scaling_row
 from .targets import Target
+from .trial_training import MODES, TrialTiming, TrialTraining, TrialUnits, TrialView
+from .trials import NEGATIVE, POSITIVE
 from .widgets import help_button, labelled, num_box, panel, pill
 
 HANDLES = ("HEG",)
 EEG_SOURCE = False      # takes its own input; the replay EEG file is not opened for it
 
-SIDE_W = 330
+SIDE_W = 360
 ARC_SIDE = 148
 
 CONDITION_LEVEL = 0.5
@@ -86,7 +90,26 @@ settling" costs nothing where withholding the number costs the opening of the se
 constant at zero rather than deleted, because the thing it must not silently become again is a number."""
 
 
-class HEGSession(Scaled, LevelOutputs):
+TIMING = TrialTiming(cue_s=2.0, baseline_s=10.0, active_s=30.0, result_s=2.0, iti_s=(8.0, 12.0))
+"""Longer than Pupil's trial, because blood flow in the forehead takes several seconds to answer where a pupil
+takes one. These durations are a first guess, not a measurement."""
+
+UNITS = TrialUnits(unit="sd", full_at=2.0, min_full_at=0.2, max_full_at=6.0, max_success=4.0, step=0.1)
+"""A trial's shift in standard deviations of the signal over the minute before the trial. The headband's
+numbers have no fixed scale and HbO − HbR has no meaningful zero, so neither its own units nor a percentage
+would mean the same thing from one session to the next. One standard deviation is the signal's usual
+minute-to-minute spread."""
+
+SPREAD_S = 60.0
+"""How much of the signal the spread is measured over."""
+
+MIN_SPREAD_S = 20.0
+"""Least signal the spread needs before a trial can be judged in it."""
+
+CIRCLE_SIDE = 240
+
+
+class HEGSession(Scaled, TrialTraining, LevelOutputs):
     """The headband, the clock, and the level. Not a `TrainingSession`.
 
     Deliberately not, for the reason `HRVSession` is not: that class is built around blocks of evenly
@@ -95,9 +118,16 @@ class HEGSession(Scaled, LevelOutputs):
     The frames themselves come from a `MendiRunner`, which is the app's, not this screen's.
     """
 
+    TIMING = TIMING
+    UNITS = UNITS
+    DIRECTION_WORD = {POSITIVE: "higher", NEGATIVE: "lower"}
+    COUNTS_IN_BASELINE = False
+    """No counting task in the baseline: counting works the prefrontal cortex, which is what HEG measures."""
+    trial_waiting = "no frames from the headband yet"
+
     def __init__(self, protocol: Protocol, choice: MendiChoice | None = None,
                  length_seconds: float | None = None, runner: mendi.MendiRunner | None = None,
-                 offered: MendiChoice | None = None):
+                 offered: MendiChoice | None = None, heart_choice=None, heart_runner=None):
         self.protocol = protocol
         self.plan = SessionPlan(length_seconds)
         self.cue = cues.play
@@ -113,6 +143,9 @@ class HEGSession(Scaled, LevelOutputs):
         # simulator to the shared runner and switch the real headband off. See `adopt_offered`.
         self.offered = offered if offered is not None else choice
         self.heg = runner if runner is not None else mendi.MendiRunner(self.choice)
+        # Borrowed, not owned, as on the Pupil screen: the heart beside the trials, when one is chosen.
+        self.heart_choice = heart_choice
+        self.heart = heart_runner
         self.finished = False
 
         # The shared mechanisms, unchanged: sound is the master volume, shadow is the screen, click is a
@@ -144,6 +177,11 @@ class HEGSession(Scaled, LevelOutputs):
                                     name="signal", unit="")
         self.signal_target._settled = True
         self.targets = [self.signal_target]
+        # The metric over the last minute, for the spread a trial's shift is judged in, and that spread as
+        # it stood when the trial was cued: the trial keeps one yardstick from its baseline to its verdict.
+        self._recent: deque[tuple[float, float]] = deque()
+        self.trial_spread: float | None = None
+        self._init_trials("passive")
         self._accumulated = 0.0
         self._resumed_at: float | None = None
         self.paused = True
@@ -188,6 +226,8 @@ class HEGSession(Scaled, LevelOutputs):
         """Why there is no level while frames arrive. `HRVSession.level_note`'s twin — see there."""
         if self.error is not None or self.heg.stale or not self.heg.ready:
             return None
+        if self.mode == "active":
+            return self.no_level_note()
         if self.raw_metric is None:
             return (f"waiting for {self.metric_spec.label}",
                     "frames are arriving · this metric needs more frames before it can show a value")
@@ -218,6 +258,7 @@ class HEGSession(Scaled, LevelOutputs):
         self.metric = previous.metric
         self.direction = previous.direction
         self.set_strategy(previous.strategy_id, **previous.strategy_params)
+        self.adopt_trials(previous)
 
     def calibration(self) -> dict:
         """What `prefs` keeps between launches — the mechanisms' own whitelist and nothing else.
@@ -248,6 +289,8 @@ class HEGSession(Scaled, LevelOutputs):
         if metric_id not in HEG_METRICS:
             return
         self.metric = metric_id
+        self._recent.clear()                # the spread was measured in the old metric's units
+        self.restart_trials()
         self.direction = HEG_METRICS[metric_id].default_direction
         wanted = HEG_METRICS[metric_id].strategies
         if wanted and self.strategy_id not in wanted:
@@ -295,6 +338,9 @@ class HEGSession(Scaled, LevelOutputs):
     @property
     def level_source(self) -> tuple[str, str]:
         """What the readout says the level is, in place of the combining rule's wording."""
+        if self.mode == "active":
+            return ("the change from this trial's baseline, toward the cue",
+                    f"half = the baseline · full at ±{self.full_at:g} sd")
         spec = self.metric_spec
         scale = normalise.STRATEGIES[self.strategy_id].label
         aim = "less" if self.inverts else "more"
@@ -345,6 +391,10 @@ class HEGSession(Scaled, LevelOutputs):
             self._signal = None
             self.release_outputs()
             return
+        if self.mode == "active":
+            for state in self.due_readings(self.heg.readings):
+                self._observe_active(state)
+            return
         # **Motion is a hold, not a dropout.** The processor has held the optical channels flat for its
         # two-second cooldown, so there is nothing new to push — and pushing the held constants would
         # feed the rolling scale a stretch of perfect steadiness, which a variability metric rewards. So
@@ -384,6 +434,73 @@ class HEGSession(Scaled, LevelOutputs):
         self._level_at = now
         self._drive_outputs()
 
+    # --- active mode: the trials ----------------------------------------------------------------
+
+    @property
+    def trial_subject(self) -> str:
+        return self.metric_spec.label
+
+    @property
+    def heart_on(self) -> bool:
+        """Whether a heart-rate source is chosen, so the heart panel and stats belong on the screen."""
+        return self.heart is not None and self.heart_choice is not None and self.heart_choice.on
+
+    def _heart_rate(self) -> float | None:
+        """The latest heart rate, or None when there is no live reading to trust."""
+        if not self.heart_on or self.heart.stale or self.heart.error:
+            return None
+        state = self.heart.state
+        return state.hr_bpm if state is not None else None
+
+    def _observe_active(self, state) -> None:
+        """One frame into the trial: the metric in standard deviations of the spread the trial was cued
+        with. A frame held for motion, or one with no metric yet, is a rejected reading, as a blink is on
+        the Pupil screen; too many of them leave the trial with no result."""
+        held = state.quality == QUALITY_MOTION
+        raw = None if held else metric_value(self.metric_spec, state)
+        self.raw_metric = raw
+        if raw is not None:
+            self._recent.append((state.t, raw))
+            while self._recent and state.t - self._recent[0][0] > SPREAD_S:
+                self._recent.popleft()
+        spread = self.trial_spread
+        value = raw / spread if raw is not None and spread else None
+        self._observe_trial(state.t, value, value is not None)
+
+    def _trial_cued(self) -> None:
+        """Measure the spread a new trial is judged in, from the minute before it. None until there is
+        enough of it, and then the trial's readings are rejected and it has no result."""
+        values = [v for _, v in self._recent]
+        span = self._recent[-1][0] - self._recent[0][0] if len(self._recent) > 1 else 0.0
+        spread = statistics.pstdev(values) if span >= MIN_SPREAD_S and len(values) > 2 else 0.0
+        self.trial_spread = spread if spread > 0 else None
+
+    def _mode_changed(self) -> None:
+        self.heg.readings.clear()
+        self._signal = None
+        self.trial_spread = None
+
+    def _move_level(self, signal: float, now: float, smoothed: bool = True) -> None:
+        """A trial's level, smoothed as the passive level is, then the shared mechanisms."""
+        self._signal = signal
+        self.signal_target.observe(signal, OBSERVE_HZ)
+        tau = max(0.0, self.feedback.smoothing_seconds) if smoothed else 0.0
+        if tau <= 0 or self._level_at is None:
+            self._level = signal
+        else:
+            dt = now - self._level_at
+            if dt > 0:
+                self._level += (1.0 - math.exp(-dt / tau)) * (signal - self._level)
+        self._level_at = now
+        self._drive_outputs()
+
+    def _go_quiet(self) -> None:
+        self._signal = None
+        self._driving = False
+        self.feedback_now = False
+        self._level_at = None
+        self.release_outputs()
+
     @property
     def error(self) -> str | None:
         return self.heg.error
@@ -414,8 +531,12 @@ class HEGSession(Scaled, LevelOutputs):
         the music sings on. Resuming needs no restart — every mechanism owns its take/follow/release
         lifecycle inside `apply`."""
         if self.paused:
+            if self.mode == "active" and self.trials.done:
+                return                      # the run is over: restart it in the mode panel
             self.paused = False
             self._resumed_at = time.monotonic()
+            # What arrived while paused is not part of the run. The first reading after it is then a gap.
+            self.heg.readings.clear()
         else:
             self._accumulated = self.elapsed
             self._resumed_at = None
@@ -523,6 +644,30 @@ SIGNAL_HELP = (
 )
 
 
+MODE_HELP = (
+    "**The two modes.** In **passive** mode, the level follows the quantity that you set on the Feedback tab, "
+    "all the time. There are no trials. In **active** mode, the screen runs trials, as the Pupil screen does. "
+    "Each trial has four parts. First, a tone gives the direction: a high tone for higher, a low tone for "
+    f"lower. Then, for {TIMING.baseline_s:g} s, rest and keep still. This measures your baseline. Then, for "
+    f"{TIMING.active_s:g} s, move the signal the way the tone asked. The circle grows past the dashed ring "
+    "when the signal is above your baseline, and shrinks inside the ring when it is below. Last, the circle "
+    "turns green for a success or red for no success, and you hear the tone two times for a success.\n\n"
+    "**The unit.** The headband's numbers have no fixed scale. So a trial measures the change from the "
+    "baseline in standard deviations, shown as sd. One sd is the usual spread of the signal over the minute "
+    "before the trial. The first trials of a session need a minute of signal first. Without it, a trial has "
+    "no result.\n\n"
+    "**The direction.** \"increase\" asks for a higher signal in every trial. \"decrease\" asks for a lower "
+    "signal in every trial. \"alternating\" asks for higher and lower in turn. \"random\" asks for higher and "
+    "lower in a random order, and does not show the direction until the effort starts.\n\n"
+    "**The settings.** \"succeeds at\" sets how far past the baseline the mean of a trial must be. \"full at\" "
+    "sets the change that moves the level to its end. \"show circle for\" and \"update every\" work as on the "
+    "Pupil screen. A movement of the head holds the signal, and those frames do not count. When too many "
+    "frames in a trial do not count, the trial has no result.\n\n"
+    f"**The times.** A trial is about {TIMING.trial_s:.0f} s. Blood flow in the forehead changes more slowly "
+    "than the pupil, so these trials are longer than the Pupil trials. These times are a first estimate."
+)
+
+
 class SignalSource:
     """Two rows: which quantity, and how it is scaled into the 0…1 the mechanisms follow.
 
@@ -543,6 +688,7 @@ class SignalSource:
                                    left=0, bottom=0)
         bar = ft.Stack([ft.Container(width=140, height=5, border_radius=3, bgcolor=t.SURFACE_HI,
                                      left=0, bottom=0), self.warmup], width=140, height=5)
+        self.warmup_bar = bar
         self.control = panel(
             "SIGNAL SOURCE",
             ft.Row([self.readout, ft.Container(width=14), bar],
@@ -556,8 +702,14 @@ class SignalSource:
         session = self.session
         spec = session.metric_spec
         usual = spec.default_direction
-        self.rows.controls = [
-            labelled("feed back", self._chooser(spec), note=spec.description, width=76),
+        rows = [labelled("feed back", self._chooser(spec), note=spec.description, width=76)]
+        if session.mode == "active":
+            # The trials set the aim and judge the shift in their own unit, so neither row applies.
+            self.rows.controls = rows + [labelled("when you move", *self._motion(), width=76)]
+            self._refresh_motion()
+            self.page.update()
+            return
+        self.rows.controls = rows + [
             labelled("aim to",
                      *[pill(k, session.direction == k,
                             (lambda k_=k: lambda _e: (session.set_direction(k_), self.rebuild()))())
@@ -642,6 +794,13 @@ class SignalSource:
                                   + (f"  →  {signal:.0%}" if signal is not None else ""))
             self.readout.color = t.TEXT
             self.note.value = f"{spec.label} · {session.strategy.describe()}"
+        active = session.mode == "active"
+        self.warmup_bar.visible = not active
+        if active:
+            spread = session.trial_spread
+            self.readout.value = "—" if raw is None else f"{raw:.3g}"
+            self.note.value = (f"{spec.label} · a trial measures its change in sd of the minute before it"
+                               + (f" · 1 sd = {spread:.3g} in this trial" if spread else ""))
         self.warmup.width = 140 * session.strategy.warmup
         self.warmup.bgcolor = t.ACCENT if session.strategy.warmup >= 1.0 else t.WARN
         self._refresh_motion()
@@ -653,11 +812,11 @@ def session_for(protocol: Protocol, path=None, device=None, length_seconds=None,
                 mendi_runner: mendi.MendiRunner | None = None, pupil_choice=None,
                 pupil_runner=None) -> HEGSession:
     """Same signature as the other screens' factories, so `app.pick` need not special-case it. The EEG
-    and heart arguments are accepted and ignored: this protocol uses neither the amplifier nor a strap."""
-    _ = path, device, source, channels, heart_choice, heart_runner, pupil_choice, pupil_runner
+    arguments are accepted and ignored; a heart, when one is chosen, is shown beside the trials."""
+    _ = path, device, source, channels, pupil_choice, pupil_runner
     choice = mendi_choice if (mendi_choice is not None and mendi_choice.on) else None
     return HEGSession(protocol, choice=choice, length_seconds=length_seconds, runner=mendi_runner,
-                      offered=mendi_choice)
+                      offered=mendi_choice, heart_choice=heart_choice, heart_runner=heart_runner)
 
 
 def _instrument(session: HEGSession) -> tuple[str, str, str]:
@@ -698,6 +857,11 @@ def view(page: ft.Page, session: HEGSession, toolbar: chrome.Toolbar,
         return max(260.0, width - SIDE_W - 70 - heg_panel.AXIS_W)
 
     heg_ui = heg_panel.HEGPanel(width_of=plot_width)
+    trial_ui = TrialView(session, CIRCLE_SIDE, heart=session.heart_on)
+    heart_ui = (heart_panel.HeartPanel(compact=True, width_of=lambda: max(200.0, SIDE_W - 60))
+                if session.heart_on else None)
+    mode_rows = ft.Column(spacing=10)
+    fixation = trial_ui.fixation_panel()
 
     # The level, as an arc — the same instrument the HRV screen wraps around its breathing ring, without
     # a ring inside it. Imported rather than copied: it is one drawing of one number, and two of them
@@ -705,11 +869,23 @@ def view(page: ft.Page, session: HEGSession, toolbar: chrome.Toolbar,
     level_arc = cv.Canvas(shapes=[], width=ARC_SIDE, height=ARC_SIDE)
     level_note = ft.Text("", size=t.SMALL, color=t.FAINT)
 
+    fixation_gap = ft.Container(height=12)
     left = ft.Column([
+        fixation, fixation_gap,
         panel("BLOOD FLOW", *heg_ui.trace_rows()),
     ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
 
+    history_gap = ft.Container(height=12)
+    trial_panels: list[ft.Control] = [history_gap, trial_ui.history_panel]
+    if heart_ui is not None:
+        trial_panels += [ft.Container(height=12), trial_ui.heart_stats_panel,
+                         ft.Container(height=12),
+                         panel("HEART", *heart_ui.spectrum_rows(), ft.Container(height=10), heart_ui.tiles,
+                               ft.Container(height=8), heart_ui.source_note)]
     right = ft.Column([
+        panel("MODE", mode_rows, help=help_button(page, "HEG training", MODE_HELP)),
+        *trial_panels,
+        ft.Container(height=12),
         panel("LEVEL",
               ft.Row([ft.Container(content=level_arc, width=ARC_SIDE, height=ARC_SIDE)],
                      alignment=ft.MainAxisAlignment.CENTER),
@@ -744,6 +920,23 @@ def view(page: ft.Page, session: HEGSession, toolbar: chrome.Toolbar,
     tabs = chrome.Tabs(["Train", "Feedback", "Session"], select_tab)
     shown: list = [None]
 
+    def changed(action) -> Callable:
+        return lambda *_a: (action(*_a), rebuild(), draw())
+
+    def rebuild() -> None:
+        rows: list[ft.Control] = [
+            labelled("train", *[pill(m, session.mode == m, changed(lambda _e, m_=m: session.set_mode(m_)))
+                                for m in MODES], width=96),
+        ]
+        if session.mode == "active":
+            rows += trial_ui.settings_rows(changed)
+        else:
+            rows.append(ft.Text("the level follows the quantity set on the Feedback tab",
+                                size=t.SMALL, color=t.FAINT))
+        mode_rows.controls = rows
+        fixation.visible = fixation_gap.visible = history_gap.visible = session.mode == "active"
+        source_ui.rebuild()
+
     def draw() -> None:
         session.tick()
         # The chip is the answer to "where are these numbers coming from", and here that is the headband,
@@ -763,6 +956,11 @@ def view(page: ft.Page, session: HEGSession, toolbar: chrome.Toolbar,
         heg_ui.refresh(session)
         source_ui.refresh()
         signal.refresh()
+        trial_ui.draw_fixation("the level follows the quantity on the Feedback tab")
+        trial_ui.draw_history()
+        if heart_ui is not None:
+            heart_ui.refresh(session.heart)
+            trial_ui.draw_heart_stats()
 
         level_arc.shapes = _level_arc(ARC_SIDE, session.signal)
         if session.holding:
@@ -774,6 +972,7 @@ def view(page: ft.Page, session: HEGSession, toolbar: chrome.Toolbar,
             level_note.value = f"{headline} · {detail}"
         page.update()
 
+    rebuild()
     # No amplifier channels on this screen, so the count in the toolbar is a control for a device
     # it never touches. `app.pick` turns it back on for the screens that do.
     toolbar.set_channels_visible(False)
