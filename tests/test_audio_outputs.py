@@ -1241,3 +1241,40 @@ def test_a_stalled_click_stream_is_rebuilt_rather_than_accepting_unheard_clicks(
     cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0   # device changed: callback stopped
     assert cs.trigger("beep", 100) is True
     assert len(opened) == 2, "a stalled stream is rebuilt, not fed an unheard click"
+
+
+def test_a_stalled_click_stream_is_shut_away_from_the_thread_that_asked_for_a_sound(monkeypatch):
+    """The click stream closed a stalled stream on the thread that asked for the next sound: the screen's.
+    On a live Pupil run that close deadlocked inside CoreAudio and the whole program hung. The close now
+    runs on a thread of its own, so a close that never returns costs that thread and nothing else."""
+    import types
+
+    from nfb_console import cues
+
+    opened, never = [], threading.Event()
+
+    class FakeStream:
+        def __init__(self, **kw):
+            opened.append(self)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            never.wait(5.0)                 # the deadlock: neither call comes back
+
+        def close(self):
+            never.wait(5.0)
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=FakeStream))
+    monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
+    cs = cues._ClickStream()
+    assert cs.trigger("beep", 100)
+    cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0
+    began = time.monotonic()
+    try:
+        assert cs.trigger("beep", 100), "a fresh stream plays the sound"
+        assert time.monotonic() - began < 0.05, "the caller does not wait for the old stream to shut"
+        assert len(opened) == 2
+    finally:
+        never.set()

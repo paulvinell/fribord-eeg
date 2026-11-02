@@ -67,6 +67,8 @@ from scipy.signal import lfilter
 
 from nfb.dsp import Band, CFIREnvelope, bandpass
 
+from .cues import shut_aside
+
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".wav", ".aiff", ".aif", ".flac", ".ogg")
 SAMPLE_RATE = 48000
 BLOCK_FRAMES = 2048        # 43 ms per block; see NoisePlayer.start
@@ -694,22 +696,14 @@ class _AudioStream:
 
     def stop(self) -> None:
         """Silence the stream and return at once; the writer and the device wind down on a thread of their
-        own. Waited for here, the two took 0.85 s on the screen's loop at the end of a Pupil effort, long
-        enough for the trial engine to read a gap in the readings and drop the result."""
+        own (`cues.shut_aside`). Waited for here, the two took 0.85 s on the screen's loop at the end of a
+        Pupil effort, long enough for the trial engine to read a gap in the readings and drop the result."""
         with self._swap:
             stream, writer = self._stream, self._writer
             self._stream = self._writer = None
             self.held = False
             self._stop.set()
-        if writer is None or writer is threading.current_thread():
-            self._shut(stream)
-            return
-
-        def wind_down() -> None:
-            writer.join(timeout=STALL_SECONDS)
-            self._shut(stream)
-
-        threading.Thread(target=wind_down, daemon=True, name=f"{self.stream_name}-stop").start()
+        shut_aside(stream, writer)
 
 
 class NoisePlayer(_AudioStream):

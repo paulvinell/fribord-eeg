@@ -376,6 +376,33 @@ def play_file(path: "Path | str | None", volume: float | None = None) -> bool:
         return False
 
 
+SHUT_WAIT_SECONDS = 2.0
+"""How long `shut_aside` waits for a stream's writer to finish its last write before it shuts the stream."""
+
+
+def shut_aside(stream, writer: threading.Thread | None = None) -> None:
+    """Stop and close an audio stream on a thread of its own, after its writer, if given, has finished.
+
+    Never on the thread that asked for a sound. That is the screen's thread, and closing there hung the
+    whole program: the screen's thread waited inside CoreAudio for a lock held by CoreAudio's own thread,
+    which was running PortAudio's start-and-stop callback and waited for a lock the screen's thread held.
+    If the close deadlocks here, only this thread is lost.
+    """
+    if stream is None:
+        return
+
+    def shut() -> None:
+        if writer is not None and writer is not threading.current_thread():
+            writer.join(timeout=SHUT_WAIT_SECONDS)
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass                        # a stream that will not shut has nothing more to give anyone
+
+    threading.Thread(target=shut, daemon=True, name="audio-shut").start()
+
+
 class _ClickStream:
     """A pre-opened output stream that mixes already-rendered buffers on demand.
 
@@ -410,10 +437,7 @@ class _ClickStream:
 
     def _rebuild(self) -> None:
         """Drop a stalled stream so `start` opens a fresh one. A deliberate rebuild gets a new attempt."""
-        try:
-            self._stream.close()
-        except Exception:
-            pass
+        shut_aside(self._stream)
         self._stream = None
         self._tried = False
         self._last_callback = None
