@@ -101,7 +101,7 @@ class MendiRunner(SensorRunner):
         for frame in self.source.frames():
             if self._stop.is_set() or gen != self._generation:
                 return None
-            self.state = self.signal.push(self.processor.process(frame), self.processor.gate_fraction)
+            self._keep(self.signal.push(self.processor.process(frame), self.processor.gate_fraction))
             for beat in self.pulse.push(frame):
                 self.heart_state = self.heart_processor.push(beat)
                 self.beat_times.append(beat.t)

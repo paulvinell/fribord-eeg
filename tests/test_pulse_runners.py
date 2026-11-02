@@ -142,3 +142,12 @@ def test_taking_off_the_slow_level_keeps_the_pulse_where_it_was():
     peaks = [t for t, v in cleaned if v > 0.5]
     assert peaks == pytest.approx([0.5 + k for k in range(9)], abs=1e-9), "no beat moves"
     assert abs(sum(v for _, v in cleaned) / len(cleaned)) < 0.01, "the slide is gone"
+
+
+def test_the_headband_keeps_every_reading_in_order_as_the_eye_does():
+    """A program that reads only the newest state sees a slow frame as a gap in the readings. HEG's trials
+    need every reading, as Pupil's do, so the headband's reader keeps them too."""
+    runner = _mendi()
+    times = [s.t for s in runner.readings]
+    assert len(times) > 100 and times == sorted(times)
+    assert runner.readings[-1] is runner.state

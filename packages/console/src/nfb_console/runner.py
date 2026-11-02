@@ -40,6 +40,8 @@ class SensorRunner:
     a cable plugged in late is not a reason to send the operator back to the device screen)."""
 
     _THREAD_NAME = "sensor"
+    READINGS_KEPT = 600
+    """How many readings wait in `readings` for a program to take them, oldest first."""
     NO_SOURCE = "no source — choose one on the device screen"
 
     def __init__(self, choice=None):
@@ -48,6 +50,9 @@ class SensorRunner:
         self.state = None
         self.error: str | None = None
         self.seen_at: float | None = None    # monotonic arrival of the last reading, written by _read only
+        self.readings: deque = deque(maxlen=self.READINGS_KEPT)
+        """Every processed reading, oldest first, for a program to take in order. `state` is only the newest,
+        and a program that read only that saw a slow frame as a gap in the readings."""
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         # Each reader carries its generation, so a stale one that outlived its join cannot write onto a
@@ -133,6 +138,7 @@ class SensorRunner:
         # source continuity is not lost: an attach onto a running reader returns above.
         self._reset()
         self.state = None
+        self.readings.clear()
         self.seen_at = None
         self.error = None
         self._on_attach()
@@ -174,6 +180,11 @@ class SensorRunner:
         thread, self._thread = self._thread, None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
+
+    def _keep(self, state) -> None:
+        """A new reading: the newest `state`, and the next one in `readings`. Called by `_read` only."""
+        self.state = state
+        self.readings.append(state)
 
     def describe(self) -> str:
         if self.error:
