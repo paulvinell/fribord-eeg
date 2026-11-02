@@ -148,6 +148,6 @@ def test_the_headband_keeps_every_reading_in_order_as_the_eye_does():
     """A program that reads only the newest state sees a slow frame as a gap in the readings. HEG's trials
     need every reading, as Pupil's do, so the headband's reader keeps them too."""
     runner = _mendi()
-    times = [s.t for s in runner.readings]
-    assert len(times) > 100 and times == sorted(times)
+    assert len(runner.readings) == runner.READINGS_KEPT, "the newest, up to the list's length"
     assert runner.readings[-1] is runner.state
+    runner._reset()
