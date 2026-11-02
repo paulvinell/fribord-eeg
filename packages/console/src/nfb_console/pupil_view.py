@@ -22,10 +22,11 @@ from typing import Callable
 import flet as ft
 import flet.canvas as cv
 
-from . import chrome, cues, heart_panel, normalise, plan_pane, prefs, pupil, signal_pane, sysvolume, music
+from . import chrome, cues, heart_panel, normalise, plan_pane, prefs, pupil, signal_pane
 from . import theme as t
-from .feedback import CONDITION, FeedbackSettings
+from .feedback import FeedbackSettings
 from .inputs import PupilChoice
+from .outputs import LevelOutputs
 from .plan import SessionPlan
 from .plots import dashed, grid, mark_shapes, place_value_labels, polyline, value_axis
 from .protocols import Protocol
@@ -208,7 +209,7 @@ class HeartTrials:
         return self._effort_all.mean, self._rest_all.mean
 
 
-class PupilSession:
+class PupilSession(LevelOutputs):
     """The eye, the trials and the level. Not a `TrainingSession`, for the reason `HEGSession` is not:
     there are no sample blocks here, and the readings come from a runner the app owns."""
 
@@ -231,8 +232,7 @@ class PupilSession:
         self.finished = False
 
         self.feedback = FeedbackSettings()
-        self.output_volume = sysvolume.SystemVolume()
-        self.music = music.MusicOutput()
+        self._init_outputs()
         for name, mech in self.feedback.mechanisms.items():
             if name not in self.offers:
                 mech.enabled = False
@@ -267,7 +267,6 @@ class PupilSession:
         self.shown_shift: float | None = None
         self.feedback_now = False
         self._driving = False
-        self._last_click: float | None = None
         self.signal_target = Target(0, None, "increase", threshold=0.5, mode="fixed",
                                     name="pupil", unit="")
         self.signal_target._settled = True
@@ -590,22 +589,6 @@ class PupilSession:
         self._level_at = None
         self.release_outputs()
 
-    def _drive_outputs(self) -> None:
-        met = self.feedback.on_target(self.channel_targets(CONDITION))
-        snd = self.feedback.sound
-        self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(self._level))
-        self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met),
-                         balance=self.state_balance, level=self._level)
-        click = self.feedback.click
-        if not click.enabled or not met:
-            if not click.enabled:
-                self._last_click = None
-            return
-        now = time.monotonic()
-        if self._last_click is None or now - self._last_click >= click.interval_seconds:
-            self._last_click = now
-            self.cue(click.sound, click.volume)
-
     def _sound(self, event) -> None:
         """The cue tone at the start of a trial, and the same tone twice on a success. A trial that did
         not succeed is silent, as on the slow-potential screen."""
@@ -614,10 +597,6 @@ class PupilSession:
             self.cue(cues.tone_at(pitch), CUE_VOLUME)
         elif event.kind == VERDICT and event.trial is not None and event.trial.success:
             self.cue(cues.held(cues.tone_at(CUE_PITCH[event.required])), CUE_VOLUME)
-
-    def release_outputs(self) -> None:
-        self.output_volume.release()
-        self.music.release()
 
     @property
     def error(self) -> str | None:
@@ -681,13 +660,14 @@ class PupilSession:
     def run(self) -> None:
         self.adopt_offered()
         self.eye.attach(self.choice)
+        self.start_outputs()
 
     def stop(self) -> None:
         self._stop = True
         self.paused = True
         prefs.remember(self.protocol.code, self)
         self.eye.steer(0.0)
-        self.release_outputs()
+        self.stop_outputs()
         self.eye.release()
         if self._invented:
             self.eye.choice = PupilChoice(kind="off")

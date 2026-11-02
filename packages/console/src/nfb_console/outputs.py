@@ -16,7 +16,11 @@ what a test that drives a session directly gets) both run inline on the caller.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Callable
+
+from . import music, shadow, sysvolume
+from .feedback import CONDITION
 
 
 class OutputPump:
@@ -91,3 +95,67 @@ class OutputPump:
             from .training import slog          # here, not at the top: `training` imports this module
 
             slog(f"{self._name}: {type(exc).__name__}: {exc}")
+
+
+class LevelOutputs:
+    """The outputs of a program that computes one level and is not a `TrainingSession`: HEG, HRV, Pupil and
+    Pulse pair. The screen, the volume and the music go through an `OutputPump`; the click is a one-shot
+    sound and plays where the level is computed.
+
+    The session supplies `feedback`, `_level`, `state_balance`, `channel_targets` and `cue`, calls
+    `_init_outputs` once, `_drive_outputs` on every new level, `release_outputs` when the level stops,
+    `start_outputs` when it starts to run and `stop_outputs` when it ends.
+    """
+
+    def _init_outputs(self) -> None:
+        self.display = shadow.DisplayShadow()
+        self.output_volume = sysvolume.SystemVolume()
+        self.music = music.MusicOutput()
+        self._last_click: float | None = None
+        self._outputs = OutputPump(self._apply_outputs, self._release_now)
+
+    def start_outputs(self) -> None:
+        self._outputs.start()
+
+    def stop_outputs(self) -> None:
+        self._outputs.stop()
+
+    def _met(self) -> bool:
+        """Whether the condition holds, for the click and the music's hold."""
+        return self.feedback.on_target(self.channel_targets(CONDITION))
+
+    def _drive_outputs(self) -> None:
+        met = self._met()
+        self._outputs.publish((self._level, met, self.state_balance))
+        self._maybe_click(met)
+
+    def _apply_outputs(self, state: tuple) -> None:
+        level, met, balance = state
+        sh = self.feedback.shadow
+        follows = balance if sh.follows == "state" and balance is not None else level
+        self.display.apply(sh.enabled and sh.supported, sh.screen, *sh.ends(), sh.map(follows))
+        snd = self.feedback.sound
+        self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(level))
+        self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met), balance=balance,
+                         level=level)
+
+    def _maybe_click(self, met: bool) -> None:
+        """The discrete mark, on the same interval rule as everywhere else."""
+        click = self.feedback.click
+        if not click.enabled or not met:
+            if not click.enabled:
+                self._last_click = None
+            return
+        now = time.monotonic()
+        if self._last_click is None or now - self._last_click >= click.interval_seconds:
+            self._last_click = now
+            self.cue(click.sound, click.volume)
+
+    def release_outputs(self) -> None:
+        """Hand back the screen, the volume and the music, through the pump when it runs."""
+        self._outputs.release()
+
+    def _release_now(self) -> None:
+        self.display.release()
+        self.output_volume.release()
+        self.music.release()

@@ -22,17 +22,18 @@ import flet.canvas as cv
 
 from nfb.hrv.compare import compare, heights
 
-from . import chrome, cues, music, plan_pane, prefs, shadow, signal_pane, sysvolume
+from . import chrome, cues, plan_pane, prefs, signal_pane
 from . import theme as t
-from .feedback import CONDITION, FeedbackSettings
+from .feedback import FeedbackSettings
 from .hrv_view import _level_arc
+from .outputs import LevelOutputs
 from .plan import SessionPlan
 from .plots import StickyCeiling, dashed, grid, place_value_labels, polyline, value_axis
 from .protocols import Protocol
 from .runner import PulseRunner
 from .scaling import Scaled, scaling_row
 from .targets import Target
-from .widgets import help_button, labelled, num_box, panel, stat_tile
+from .widgets import help_button, panel, stat_tile
 
 HANDLES = ("PAIR",)
 EEG_SOURCE = False
@@ -84,7 +85,7 @@ class Snapshot:
     pulse_shape: list[float] = field(default_factory=list)      # the forehead pulse averaged around them
 
 
-class PairSession(Scaled):
+class PairSession(Scaled, LevelOutputs):
     """The two borrowed runners, the comparison, the level it drives and the session clock."""
 
     def __init__(self, protocol: Protocol, length_seconds: float | None = None,
@@ -106,9 +107,7 @@ class PairSession(Scaled):
         self._last_ratio_at = float("-inf")
         self.training: tuple[float, float] | None = None      # (ear beat, ratio against the start)
         self.feedback = FeedbackSettings()
-        self.display = shadow.DisplayShadow()
-        self.output_volume = sysvolume.SystemVolume()
-        self.music = music.MusicOutput()
+        self._init_outputs()
         for name, mech in self.feedback.mechanisms.items():
             if name not in self.offers:
                 mech.enabled = False
@@ -124,7 +123,6 @@ class PairSession(Scaled):
         self._level = 0.0
         self._level_at: float | None = None
         self._driven: float | None = None       # the ear beat of the training reading last driven
-        self._last_click: float | None = None
         self.finished = False
         self.paused = True
         self._stop = False
@@ -303,39 +301,17 @@ class PairSession(Scaled):
         self._level_at = now
         self._drive_outputs()
 
-    def _drive_outputs(self) -> None:
-        met = self.feedback.on_target(self.channel_targets(CONDITION))
-        sh = self.feedback.shadow
-        self.display.apply(sh.enabled and sh.supported, sh.screen, *sh.ends(), sh.map(self._level))
-        snd = self.feedback.sound
-        self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(self._level))
-        self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met),
-                         balance=self.state_balance, level=self._level)
-        click = self.feedback.click
-        if not click.enabled or not met:
-            if not click.enabled:
-                self._last_click = None
-            return
-        now = time.monotonic()
-        if self._last_click is None or now - self._last_click >= click.interval_seconds:
-            self._last_click = now
-            self.cue(click.sound, click.volume)
-
     def _go_quiet(self) -> None:
         self._signal = None
         self._level_at = None
         self.release_outputs()
-
-    def release_outputs(self) -> None:
-        self.display.release()
-        self.output_volume.release()
-        self.music.release()
 
     # --- the thread ---------------------------------------------------------------------------
 
     def run(self) -> None:
         """Start the comparison's own thread if it is not already running; the app calls this again on
         resume. The runners read their devices on their own threads, so nothing else needs starting."""
+        self.start_outputs()
         if self._worker is None or not self._worker.is_alive():
             self._worker = threading.Thread(target=self._loop, daemon=True, name="pair-compare")
             self._worker.start()
@@ -395,7 +371,7 @@ class PairSession(Scaled):
         self.paused = True
         self._wake.set()
         prefs.remember(self.protocol.code, self)
-        self.release_outputs()
+        self.stop_outputs()
 
     # --- going to the device screen and coming back ------------------------------------------
 

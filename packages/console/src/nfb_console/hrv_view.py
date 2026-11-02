@@ -71,11 +71,12 @@ from nfb.hrv import (DEFAULT_METRIC, HRV_METRICS, NARROW_HALF_RANGE_HZ, TARGET_R
                      metric_value)
 from nfb.hrv.metrics import RSA_MIN_BEATS
 
-from . import (chrome, cues, heart, heart_panel, music, normalise, plan_pane, prefs, shadow,
-               signal_pane, sysvolume)
+from . import (chrome, cues, heart, heart_panel, normalise, plan_pane, prefs,
+               signal_pane)
 from . import theme as t
-from .feedback import CONDITION, LEVEL, FeedbackSettings
+from .feedback import FeedbackSettings
 from .inputs import HeartChoice
+from .outputs import LevelOutputs
 from .plan import SessionPlan
 from .protocols import Protocol
 from .scaling import Scaled, scaling_row
@@ -185,7 +186,7 @@ breath a minute apart."""
 # snapped to half a second and feeding that back would drag the target off wherever it was set.
 
 
-class HRVSession(Scaled):
+class HRVSession(Scaled, LevelOutputs):
     """The heart, the clock, and the pacer. Not a `TrainingSession`.
 
     Deliberately not: that class is built around blocks of evenly spaced samples with an artifact gate and
@@ -242,9 +243,7 @@ class HRVSession(Scaled):
         # were the mechanisms reimplemented — the noise mask in particular is `music` on noise with
         # `sound.invert`, which is the Quiet Reward arrangement and already existed.
         self.feedback = FeedbackSettings()
-        self.display = shadow.DisplayShadow()
-        self.output_volume = sysvolume.SystemVolume()
-        self.music = music.MusicOutput()
+        self._init_outputs()
         for name, mech in self.feedback.mechanisms.items():
             if name not in self.offers:
                 mech.enabled = False
@@ -279,7 +278,6 @@ class HRVSession(Scaled):
         self._signal: float | None = None
         self._level = 0.0
         self._level_at: float | None = None
-        self._last_click: float | None = None
         # One target, and it exists for three specific jobs rather than to hold a threshold: it is what the
         # shared pane draws a contribution row for, what tells that pane data is arriving, and what the click
         # asks. Its value is the **already-normalised** signal and its threshold is the middle of that range,
@@ -623,13 +621,8 @@ class HRVSession(Scaled):
         state = self.state
         return bool(state is not None and state.spectrum.ready and state.spectrum.split)
 
-    def _drive_outputs(self) -> None:
-        """Hand the level to the mechanisms. The same four every other screen has.
-
-        Written here rather than inherited because this is not a `TrainingSession` — but it is the same eight
-        lines, and if a third screen ever needs them they should move rather than be copied again.
-
-        **The split fails the condition.** Measured across all eleven metrics: RMSSD and pNN50 read
+    def _met(self) -> bool:
+        """**The split fails the condition.** Measured across all eleven metrics: RMSSD and pNN50 read
         *better* during the deliberate split than at perfect resonance, and both are trained upward — so
         without this, the beginner metrics pay clicks for the exact failure the spectrum panel is
         warning about in red. The level is left alone: it is a continuous display and the operator can
@@ -637,39 +630,7 @@ class HRVSession(Scaled):
         one state in this protocol where nothing is. CFC's inhibit bins are the same interlock on the
         EEG side, which is where the shape of this comes from.
         """
-        met = self.feedback.on_target(self.channel_targets(CONDITION)) and not self.splitting
-        sh = self.feedback.shadow
-        follows = self.state_balance if sh.follows == "state" else self._level
-        self.display.apply(sh.enabled and sh.supported, sh.screen, *sh.ends(),
-                           sh.map(follows if follows is not None else self._level))
-        snd = self.feedback.sound
-        self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(self._level))
-        self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met),
-                         balance=self.state_balance, level=self._level)
-        self._maybe_click(met)
-
-    def _maybe_click(self, met: bool) -> None:
-        """The discrete mark, on the same interval rule as everywhere else.
-
-        It is offered here — an earlier version of this screen refused it, on the grounds that a coherence
-        measure wanders across a threshold and would fire in clusters. That is what `interval_seconds` is
-        for, and it is the same flicker every other screen's condition has; the gate does not care where the
-        flicker came from.
-        """
-        click = self.feedback.click
-        if not click.enabled or not met:
-            if not click.enabled:
-                self._last_click = None
-            return
-        now = time.monotonic()
-        if self._last_click is None or now - self._last_click >= click.interval_seconds:
-            self._last_click = now
-            self.cue(click.sound, click.volume)
-
-    def release_outputs(self) -> None:
-        self.display.release()
-        self.output_volume.release()
-        self.music.release()
+        return super()._met() and not self.splitting
 
     @property
     def error(self) -> str | None:
@@ -743,13 +704,14 @@ class HRVSession(Scaled):
         """Reading beats is the runner's own thread, so this only has to ask for it."""
         self.adopt_offered()
         self.heart.attach(self.choice)
+        self.start_outputs()
 
     def stop(self) -> None:
         self._stop = True
         self.paused = True
         # Keep what was set by ear, as every other screen does on the way out.
         prefs.remember(self.protocol.code, self)
-        self.release_outputs()
+        self.stop_outputs()
         self.heart.release()
         if self._invented:
             # The simulator was this screen's default, never the operator's choice. Hand the shared

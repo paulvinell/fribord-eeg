@@ -63,6 +63,45 @@ def test_stop_releases_and_drops_what_arrives_after_it():
     pump.start()
     pump.stop()
     waitfor(lambda: log and log[-1][0] == "release", what="the release on the way out")
-    pump.publish(0.9)                       # a straggler after the session stopped
-    time.sleep(0.02)
+    pump.publish(0.9)                       # a straggler after the session stopped: dropped, not applied inline
     assert ("apply", 0.9) not in [(kind, state) for kind, state, _ in log]
+
+
+def test_the_programs_outside_the_eeg_sessions_apply_their_outputs_on_the_output_thread():
+    """HEG, HRV, Pupil and Pulse pair applied the screen, the volume and the music on the screen's thread,
+    the thread a CoreAudio deadlock once hung the console from. They now go through the same pump as the
+    EEG programs."""
+    from test_pair import _session as pair_session
+    from test_pupil import _session as pupil_session, _steady
+
+    def spy(session) -> list[str]:
+        threads: list[str] = []
+        session.output_volume.apply = lambda *a, **k: threads.append(threading.current_thread().name)
+        session.output_volume.release = lambda: None
+        session.music.apply = lambda *a, **k: None
+        session.music.release = lambda: None
+        session.display.apply = lambda *a, **k: None
+        session.display.release = lambda: None
+        return threads
+
+    pair = pair_session()
+    threads = spy(pair)
+    pair.start_outputs()
+    try:
+        pair.toggle_pause()
+        pair.update(now=40.0)
+        pair.observe()
+        waitfor(lambda: threads, what="the pair program's outputs")
+    finally:
+        pair.stop_outputs()
+    assert set(threads) == {"outputs"}
+
+    pupil = pupil_session(mode="passive")
+    threads = spy(pupil)
+    pupil.start_outputs()
+    try:
+        _steady(pupil, 1000.0, 3.0)
+        waitfor(lambda: threads, what="the pupil program's outputs")
+    finally:
+        pupil.stop_outputs()
+    assert set(threads) == {"outputs"}

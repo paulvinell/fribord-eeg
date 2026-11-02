@@ -37,12 +37,13 @@ import flet.canvas as cv
 from nfb.heg import DEFAULT_HEG_METRIC, HEG_METRICS, QUALITY_MOTION
 from nfb.hrv.metrics import metric_value
 
-from . import (chrome, cues, heg_panel, mendi, music, normalise, plan_pane, prefs, shadow,
-               signal_pane, sysvolume)
+from . import (chrome, cues, heg_panel, mendi, normalise, plan_pane, prefs,
+               signal_pane)
 from . import theme as t
-from .feedback import CONDITION, FeedbackSettings
+from .feedback import FeedbackSettings
 from .hrv_view import _level_arc
 from .inputs import MendiChoice
+from .outputs import LevelOutputs
 from .plan import SessionPlan
 from .protocols import Protocol
 from .scaling import Scaled, scaling_row
@@ -85,7 +86,7 @@ settling" costs nothing where withholding the number costs the opening of the se
 constant at zero rather than deleted, because the thing it must not silently become again is a number."""
 
 
-class HEGSession(Scaled):
+class HEGSession(Scaled, LevelOutputs):
     """The headband, the clock, and the level. Not a `TrainingSession`.
 
     Deliberately not, for the reason `HRVSession` is not: that class is built around blocks of evenly
@@ -118,9 +119,7 @@ class HEGSession(Scaled):
         # discrete mark, music is the continuous sound — each with its own floor, ceiling and calibration,
         # each persisted, each configured through the pane every other protocol uses.
         self.feedback = FeedbackSettings()
-        self.display = shadow.DisplayShadow()
-        self.output_volume = sysvolume.SystemVolume()
-        self.music = music.MusicOutput()
+        self._init_outputs()
         for name, mech in self.feedback.mechanisms.items():
             if name not in self.offers:
                 mech.enabled = False
@@ -138,7 +137,6 @@ class HEGSession(Scaled):
         self._signal: float | None = None
         self._level = 0.0
         self._level_at: float | None = None
-        self._last_click: float | None = None
         # One target, for three specific jobs rather than to hold a threshold: it is what the shared pane
         # draws a contribution row for, what tells that pane data is arriving, and what the click asks.
         # Its value is the **already-normalised** signal and its threshold is the middle of that range.
@@ -386,41 +384,6 @@ class HEGSession(Scaled):
         self._level_at = now
         self._drive_outputs()
 
-    def _drive_outputs(self) -> None:
-        """Hand the level to the mechanisms. The same four every other screen has.
-
-        Written here rather than inherited because this is not a `TrainingSession` — but it is the same
-        eight lines as on the HRV screen, and a third copy should become a shared function rather than a
-        fourth.
-        """
-        met = self.feedback.on_target(self.channel_targets(CONDITION))
-        sh = self.feedback.shadow
-        follows = self.state_balance if sh.follows == "state" else self._level
-        self.display.apply(sh.enabled and sh.supported, sh.screen, *sh.ends(),
-                           sh.map(follows if follows is not None else self._level))
-        snd = self.feedback.sound
-        self.output_volume.apply(snd.enabled, *snd.ends(), snd.map(self._level))
-        self.music.apply(self.feedback.music, hold=self.feedback.music.holds(met),
-                         balance=self.state_balance, level=self._level)
-        self._maybe_click(met)
-
-    def _maybe_click(self, met: bool) -> None:
-        """The discrete mark, on the same interval rule as everywhere else."""
-        click = self.feedback.click
-        if not click.enabled or not met:
-            if not click.enabled:
-                self._last_click = None
-            return
-        now = time.monotonic()
-        if self._last_click is None or now - self._last_click >= click.interval_seconds:
-            self._last_click = now
-            self.cue(click.sound, click.volume)
-
-    def release_outputs(self) -> None:
-        self.display.release()
-        self.output_volume.release()
-        self.music.release()
-
     @property
     def error(self) -> str | None:
         return self.heg.error
@@ -484,13 +447,14 @@ class HEGSession(Scaled):
         """Reading frames is the runner's own thread, so this only has to ask for it."""
         self.adopt_offered()
         self.heg.attach(self.choice)
+        self.start_outputs()
 
     def stop(self) -> None:
         self._stop = True
         self.paused = True
         # Keep what was set by ear, as every other screen does on the way out.
         prefs.remember(self.protocol.code, self)
-        self.release_outputs()
+        self.stop_outputs()
         self.heg.release()
         if self._invented:
             # The simulator was this screen's default, never the operator's choice. Hand the shared
