@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import flet as ft
 
@@ -285,10 +286,18 @@ class Console:
 
         Calibration holds the tracker itself, and the reader cannot share it, so the reader is released
         first and started again on the way back — to the Pupil tab, where calibration was launched."""
-        self.pupil.release()
-        self.show(pupil_calibrate.view(
+        self._hand_over_tracker(lambda: self.show(pupil_calibrate.view(
             self.page, self.pupil_choice,
-            lambda: self._after_calibrate(return_to)))
+            lambda: self._after_calibrate(return_to))))
+
+    def _hand_over_tracker(self, show: Callable[[], None]) -> None:
+        """Release the tracker's reader, then `show` the view that takes the tracker over. The release
+        waits up to two seconds for the reader to end, so it runs on a thread of its own and the view is
+        shown on Flet's loop once the tracker is free."""
+        async def on_loop() -> None:
+            show()
+
+        self.pupil.release_aside(lambda: self.page.run_task(on_loop))
 
     def _after_calibrate(self, return_to: Protocol | None) -> None:
         """Back to the Pupil tab, and start the shared reader again. Calibration held the tracker on its
@@ -313,8 +322,8 @@ class Console:
     def show_camera(self, return_to: Protocol | None) -> None:
         """Take the tracker over for its infrared camera view, then hand it back. The camera and the gaze
         reader cannot share the device, so the reader is released while the camera is up."""
-        self.pupil.release()
-        self.show(pupil_camera.view(self.page, lambda: self._after_calibrate(return_to)))
+        self._hand_over_tracker(lambda: self.show(pupil_camera.view(
+            self.page, lambda: self._after_calibrate(return_to))))
 
     def source_label(self) -> str:
         """What the samples are coming from, when it is not the amplifier. Empty for a live session."""

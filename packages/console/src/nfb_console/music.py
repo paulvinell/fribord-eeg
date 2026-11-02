@@ -470,30 +470,34 @@ class TrackPlayer:
         self.volume = volume
         if not self.files:
             return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="music")
+        self._stop = threading.Event()          # this run's own: a stopped run never sees a later one clear it
+        self._thread = threading.Thread(target=self._run, args=(self._stop,), daemon=True, name="music")
         self._thread.start()
 
-    def _run(self) -> None:
-        while not self._stop.is_set() and self.files:
+    def _run(self, stop: threading.Event) -> None:
+        while not stop.is_set() and self.files:
             track = self.files[self.index % len(self.files)]
             gain = f"{min(100.0, max(0.0, self.volume)) / 100:.3f}"
             try:
-                self._proc = subprocess.Popen(["afplay", "-v", gain, str(track)],
-                                              stdout=subprocess.DEVNULL,
-                                              stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen(["afplay", "-v", gain, str(track)],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError:
+                return
+            self._proc = proc
+            if stop.is_set():               # stopped while it launched: the stop never saw this child
+                proc.terminate()
                 return
             # A hold requested before this child existed set `held` with nothing to signal. Apply it to the
             # fresh child, or it plays un-paused while the player reports it held.
             if self.held:
                 try:
-                    self._proc.send_signal(signal.SIGSTOP)
+                    proc.send_signal(signal.SIGSTOP)
                 except OSError:
                     pass
-            self._proc.wait()
-            self._proc = None
-            if self._stop.is_set():
+            proc.wait()
+            if self._proc is proc:
+                self._proc = None
+            if stop.is_set():
                 return
             self.index += 1
 
@@ -534,10 +538,9 @@ class TrackPlayer:
                 proc.terminate()
             except Exception:
                 pass
-        thread = self._thread
+        # Not joined: the thread ends once its terminated player exits, and a stop must not wait for that on
+        # the thread that asked, which can be the screen's.
         self._thread = None
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
 
 
 class _AudioStream:

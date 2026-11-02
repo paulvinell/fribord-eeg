@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 class SensorRunner:
@@ -53,6 +53,7 @@ class SensorRunner:
         # Each reader carries its generation, so a stale one that outlived its join cannot write onto a
         # healthy replacement — a handshake can block well past the stop event.
         self._generation = 0
+        self._pending: threading.Thread | None = None   # the last release or attach handed to a thread
 
     @property
     def running(self) -> bool:
@@ -70,7 +71,50 @@ class SensorRunner:
         return self.state is not None and self._ready(self.state)
 
     def attach(self, choice=None) -> bool:
-        """Start reading, if a source is chosen. Idempotent."""
+        """Start reading, if a source is chosen. Idempotent.
+
+        After a `release_aside` that has not finished, the start waits its turn on a thread of its own and
+        this returns True at once: starting first would let the release end the new reader, and waiting
+        here would hold up the screen's thread."""
+        if choice is not None:
+            self.choice = choice
+        if self.running and self._reads_something_else():
+            self.release_aside()
+        pending = self._pending
+        if pending is not None and pending.is_alive():
+            self._in_turn(lambda: self._attach(choice))
+            return True
+        return self._attach(choice)
+
+    def _reads_something_else(self) -> bool:
+        """Whether the running reader reads a different device from the one now chosen, so it must be
+        released before the chosen one opens. A subclass that can tell says so."""
+        return False
+
+    def release_aside(self, then: Callable[[], None] | None = None) -> None:
+        """`release`, on a thread of its own, then `then`. For the screen's thread, which must not wait:
+        a release waits up to two seconds for the reader to end, and a source's close can block."""
+        def work() -> None:
+            self.release()
+            if then is not None:
+                then()
+
+        self._in_turn(work)
+
+    def _in_turn(self, work: Callable[[], None]) -> None:
+        """Run `work` on a new thread once the previous one handed over has finished, so a release and a
+        start asked for in that order also happen in that order."""
+        previous = self._pending
+
+        def run() -> None:
+            if previous is not None:
+                previous.join()
+            work()
+
+        self._pending = threading.Thread(target=run, daemon=True, name=f"{self._THREAD_NAME}-turn")
+        self._pending.start()
+
+    def _attach(self, choice=None) -> bool:
         if choice is not None:
             self.choice = choice
         if self.choice is None or not self.choice.on:

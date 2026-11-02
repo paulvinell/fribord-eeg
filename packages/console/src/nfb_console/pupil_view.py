@@ -668,13 +668,20 @@ class PupilSession(LevelOutputs):
         prefs.remember(self.protocol.code, self)
         self.eye.steer(0.0)
         self.stop_outputs()
-        self.eye.release()
-        if self._invented:
-            self.eye.choice = PupilChoice(kind="off")
-            self.eye.state = None
-            self.eye.error = None
-            self.eye.seen_at = None
-            self.eye.processor.reset()
+        if not self._invented:
+            self.eye.release_aside()
+            return
+        # Cleared after the release, or the reader writes into it again.
+        self.eye.choice = PupilChoice(kind="off")
+        runner = self.eye
+
+        def clear() -> None:
+            runner.state = None
+            runner.error = None
+            runner.seen_at = None
+            runner.processor.reset()
+
+        runner.release_aside(clear)
 
     def suspend(self) -> None:
         if not self.paused:

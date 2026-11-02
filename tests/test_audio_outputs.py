@@ -1312,3 +1312,39 @@ def test_opening_the_click_stream_never_holds_up_the_caller(monkeypatch):
         assert time.monotonic() - began < 0.05
     finally:
         never.set()
+
+
+def test_stopping_the_file_player_does_not_wait_for_its_player_to_exit(monkeypatch, tmp_path):
+    """The stop waited up to a second for the player's thread, on whichever thread asked. A player
+    process that is slow to exit must not hold up the caller."""
+    monkeypatch.setattr(music, "muted", lambda: False)
+    wedged = threading.Event()
+
+    class SlowProc:
+        def __init__(self, argv, **kw):
+            pass
+
+        def wait(self):
+            wedged.wait(5.0)
+
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            pass
+
+        def terminate(self):
+            pass                            # it takes its time
+
+    monkeypatch.setattr(music.subprocess, "Popen", SlowProc)
+    track = tmp_path / "t.wav"
+    track.write_bytes(b"\x00")
+    player = music.TrackPlayer()
+    player.start([track], volume=40)
+    waitfor(lambda: player._proc is not None, what="the player process")
+    began = time.monotonic()
+    try:
+        player.stop()
+        assert time.monotonic() - began < 0.05
+    finally:
+        wedged.set()

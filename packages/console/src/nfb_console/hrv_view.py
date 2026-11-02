@@ -712,16 +712,23 @@ class HRVSession(Scaled, LevelOutputs):
         # Keep what was set by ear, as every other screen does on the way out.
         prefs.remember(self.protocol.code, self)
         self.stop_outputs()
-        self.heart.release()
-        if self._invented:
-            # The simulator was this screen's default, never the operator's choice. Hand the shared
-            # runner back switched off with the simulated state cleared — CFC borrows it, and drawing
-            # invented beats beside a real EEG is exactly what its own docstring forbids.
-            self.heart.choice = HeartChoice(kind="off")
-            self.heart.state = None
-            self.heart.error = None
-            self.heart.seen_at = None
-            self.heart.processor.reset()
+        if not self._invented:
+            self.heart.release_aside()
+            return
+        # The simulator was this screen's default, never the operator's choice. Hand the shared runner back
+        # switched off with the simulated state cleared — CFC borrows it, and drawing invented beats beside
+        # a real EEG is exactly what its own docstring forbids. Cleared after the release, or the reader
+        # writes into it again.
+        self.heart.choice = HeartChoice(kind="off")
+        runner = self.heart
+
+        def clear() -> None:
+            runner.state = None
+            runner.error = None
+            runner.seen_at = None
+            runner.processor.reset()
+
+        runner.release_aside(clear)
 
     # --- going to the device screen and coming back ------------------------------------------
     # The chip on the shared toolbar calls these on whatever session is up, and this one not having

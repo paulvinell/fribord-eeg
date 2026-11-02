@@ -66,6 +66,9 @@ class HeartRunner(SensorRunner):
         c = self.choice
         return (getattr(c, "kind", None), getattr(c, "address", ""), getattr(c, "port", ""))
 
+    def _reads_something_else(self) -> bool:
+        return self._reading != self._wanted()
+
     def _already_serving(self) -> bool:
         # A retrying reader is still running, so keep the live one only when it is reading what is now asked;
         # a different choice replaces it.

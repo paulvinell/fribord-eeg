@@ -455,17 +455,23 @@ class HEGSession(Scaled, LevelOutputs):
         # Keep what was set by ear, as every other screen does on the way out.
         prefs.remember(self.protocol.code, self)
         self.stop_outputs()
-        self.heg.release()
-        if self._invented:
-            # The simulator was this screen's default, never the operator's choice. Hand the shared
-            # runner back switched off with the invented state cleared, so nothing else in the app finds
-            # simulated frames it never asked for.
-            self.heg.choice = MendiChoice(kind="off")
-            self.heg.state = None
-            self.heg.error = None
-            self.heg.seen_at = None
-            self.heg.processor.reset()
-            self.heg.signal.reset()
+        if not self._invented:
+            self.heg.release_aside()
+            return
+        # The simulator was this screen's default, never the operator's choice. Hand the shared runner back
+        # switched off with the invented state cleared, so nothing else in the app finds simulated frames
+        # it never asked for. Cleared after the release, or the reader writes into it again.
+        self.heg.choice = MendiChoice(kind="off")
+        runner = self.heg
+
+        def clear() -> None:
+            runner.state = None
+            runner.error = None
+            runner.seen_at = None
+            runner.processor.reset()
+            runner.signal.reset()
+
+        runner.release_aside(clear)
 
     # --- going to the device screen and coming back ------------------------------------------
     # The chip on the shared toolbar calls these on whatever session is up. There is no exclusive device
