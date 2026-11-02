@@ -713,6 +713,8 @@ def test_a_click_plays_through_the_open_stream_not_a_fresh_process(monkeypatch):
     launched = []
     monkeypatch.setattr(cues.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
     monkeypatch.setattr(cues, "_stream", cues._ClickStream())
+    assert not cues._stream.start(), "the stream opens on its own thread, not the caller's"
+    waitfor(lambda: cues._stream._stream is not None, what="the click stream to open")
 
     assert cues.play("tick", volume=50)
     assert not launched, "no child process for a synthesised sound"
@@ -742,7 +744,7 @@ def test_the_click_falls_back_to_afplay_when_no_stream_opens(monkeypatch):
 
     assert cues.play("tick")
     assert launched and launched[0][0] == "afplay", "the click still sounds, just the slow way"
-    assert not cues._stream._tried or cues._stream.error
+    waitfor(lambda: cues._stream.error, what="the failed open to be reported")
 
 
 def test_the_stream_mixes_overlapping_sounds_and_retires_finished_ones():
@@ -1235,12 +1237,15 @@ def test_a_stalled_click_stream_is_rebuilt_rather_than_accepting_unheard_clicks(
     monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
 
     cs = cues._ClickStream()
-    assert cs.trigger("beep", 100) is True          # opens the stream and queues a voice
+    cs.start()
+    waitfor(lambda: cs._stream is not None, what="the stream to open")
+    assert cs.trigger("beep", 100) is True
     assert len(opened) == 1 and cs._alive(), "a just-opened stream counts alive"
 
     cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0   # device changed: callback stopped
+    assert cs.trigger("beep", 100) is False, "not fed an unheard click: the caller plays it another way"
+    waitfor(lambda: len(opened) == 2 and cs._stream is opened[1], what="the stalled stream to be rebuilt")
     assert cs.trigger("beep", 100) is True
-    assert len(opened) == 2, "a stalled stream is rebuilt, not fed an unheard click"
 
 
 def test_a_stalled_click_stream_is_shut_away_from_the_thread_that_asked_for_a_sound(monkeypatch):
@@ -1269,12 +1274,41 @@ def test_a_stalled_click_stream_is_shut_away_from_the_thread_that_asked_for_a_so
     monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=FakeStream))
     monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
     cs = cues._ClickStream()
-    assert cs.trigger("beep", 100)
+    cs.start()
+    waitfor(lambda: cs._stream is not None, what="the stream to open")
     cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0
     began = time.monotonic()
     try:
-        assert cs.trigger("beep", 100), "a fresh stream plays the sound"
+        cs.trigger("beep", 100)
         assert time.monotonic() - began < 0.05, "the caller does not wait for the old stream to shut"
-        assert len(opened) == 2
+        waitfor(lambda: cs._stream is opened[-1] and len(opened) == 2, what="a fresh stream")
+        assert cs.trigger("beep", 100), "and the fresh stream plays"
+    finally:
+        never.set()
+
+
+def test_opening_the_click_stream_never_holds_up_the_caller(monkeypatch):
+    """Opening a stream calls into CoreAudio, and the first click or cue tone of a session asked for it on
+    the screen's thread. A stream that is slow to open, or never opens, must cost its own thread only."""
+    import types
+
+    from nfb_console import cues
+
+    never = threading.Event()
+
+    class SlowStream:
+        def __init__(self, **kw):
+            never.wait(5.0)
+
+        def start(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=SlowStream))
+    monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
+    cs = cues._ClickStream()
+    began = time.monotonic()
+    try:
+        assert cs.trigger("beep", 100) is False, "the caller plays this one another way"
+        assert time.monotonic() - began < 0.05
     finally:
         never.set()

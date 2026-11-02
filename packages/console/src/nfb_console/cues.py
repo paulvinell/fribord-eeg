@@ -445,6 +445,9 @@ class _ClickStream:
             self._voices = []           # a dead stream never played them; do not carry them over
 
     def start(self) -> bool:
+        """Whether the stream can play a sound now. When it cannot yet, the stream opens on a thread of its
+        own and this says no, so the caller plays that one sound another way: opening a stream calls into
+        CoreAudio, and the caller is often the screen's thread, where a call that blocks hangs the program."""
         if self._stream is not None:
             if self._alive():
                 return True
@@ -452,22 +455,24 @@ class _ClickStream:
         if self._tried:                          # one failure per process, not one per click
             return False
         self._tried = True
+        threading.Thread(target=self._open, daemon=True, name="click-stream-open").start()
+        return False
+
+    def _open(self) -> None:
         try:
             import sounddevice as sd
         except Exception as exc:
             self.error = f"sounddevice unavailable: {exc}"
-            return False
+            return
         try:
-            self._stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="float32",
-                                           blocksize=256, latency="low",
-                                           callback=self._callback)
-            self._stream.start()
+            stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=256,
+                                     latency="low", callback=self._callback)
+            stream.start()
         except Exception as exc:
             self.error = f"no audio output: {exc}"
-            self._stream = None
-            return False
+            return
         self._last_callback = time.monotonic()   # trust a just-opened stream until its first callback
-        return True
+        self._stream = stream
 
     def trigger(self, name: str, volume: float | None) -> bool:
         if not self.start():
