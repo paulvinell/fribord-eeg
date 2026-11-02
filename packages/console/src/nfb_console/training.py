@@ -43,6 +43,7 @@ from nfb.stream import Block, Gap
 
 from . import cues, music, prefs, quality, sentry, shadow, sysvolume
 from .feedback import CONDITION, HOLD_FRACTION, LEVEL, STATE, FeedbackSettings
+from .outputs import OutputPump
 from .plan import SessionPlan
 from .protocols import Protocol
 from .spectrum_pane import SpectrumSource
@@ -442,11 +443,9 @@ class TrainingSession:
         # What the level's own range turns out to be, so `sensitivity` has something to be a gain *of*.
         # Session history, like a threshold's calibration, so it is not carried across a stop by `adopt`.
         self.level_range = LevelRange()
-        # The output pump: run() starts it, _drive_outputs feeds it, stop() joins it. None means "apply
-        # inline", which is what unit tests that drive the internals directly get.
-        self._output_state: tuple | None = None
-        self._output_wake = threading.Event()
-        self._output_thread: threading.Thread | None = None
+        # The output pump: run() starts it, _drive_outputs feeds it, stop() ends it. Never started, it
+        # applies inline, which is what unit tests that drive the internals directly get.
+        self._outputs = OutputPump(self._apply_snapshot, self._release_outputs)
         self._last_click: float | None = None
         # (time, met) over the last hold window — a *duty cycle*, not a run length. See `HOLD_FRACTION`:
         # the raw condition flickers at about 3 Hz, so a continuity test can never pass.
@@ -1216,12 +1215,7 @@ class TrainingSession:
         if self._stop or self.paused:
             return
         met = self.feedback.on_target(self.channel_targets(CONDITION))
-        self._output_state = (self._level, met, self.shadow_input(), self.state_balance)
-        pump = self._output_thread
-        if pump is not None and pump.is_alive():
-            self._output_wake.set()
-        else:
-            self._apply_outputs(*self._output_state)
+        self._outputs.publish((self._level, met, self.shadow_input(), self.state_balance))
 
     def _apply_outputs(self, level: float, met: bool, shadow_in: float,
                        balance: float | None) -> None:
@@ -1245,22 +1239,6 @@ class TrainingSession:
         music_in = float(balance) if music.follows == STATE and balance is not None else level
         self.music.apply(music, rate_hz=self.rate,
                          hold=self.music_hold(met), balance=balance, level=music_in)
-
-    def _output_pump(self) -> None:
-        """Apply output snapshots for as long as the session runs, one at a time, freshest wins.
-
-        A dedicated thread so the feed thread never waits on CoreAudio or the window server. It also
-        serialises apply against release: while the pump is alive, both go through here, so a release
-        requested mid-apply lands after it rather than interleaved with it.
-        """
-        while not self._stop:
-            if not self._output_wake.wait(timeout=0.5):
-                continue
-            self._output_wake.clear()
-            try:
-                self._apply_snapshot(self._output_state)
-            except Exception as exc:
-                slog(f"output pump: {type(exc).__name__}: {exc}")
 
     def _apply_snapshot(self, state: tuple | None) -> None:
         """One step of the pump: apply a snapshot, or hand the outputs back.
@@ -1494,12 +1472,7 @@ class TrainingSession:
         session never started, or already stopping — the release runs inline, which is also what keeps
         the pause/suspend tests synchronous.
         """
-        pump = self._output_thread
-        if pump is not None and pump.is_alive():
-            self._output_state = None
-            self._output_wake.set()
-        else:
-            self._release_outputs()
+        self._outputs.release()
 
     def _release_outputs(self) -> None:
         """Hand back the display, the system volume and the audio. Safe to call repeatedly."""
@@ -1583,12 +1556,9 @@ class TrainingSession:
         # The pump first: wake it so it sees _stop and exits, wait for any in-flight apply to finish,
         # then release inline. The join has a timeout because stop() must never hang on a wedged
         # CoreAudio call, and release is idempotent so releasing after a straggling apply still wins.
-        pump, self._output_thread = self._output_thread, None
-        if pump is not None and pump.is_alive():
-            self._output_wake.set()
-            pump.join(timeout=1.0)
-        # never leave the operator's machine dimmed, muted, or playing music
-        self._release_outputs()
+        # Never leave the operator's machine dimmed, muted, or playing music: the pump releases on its way
+        # out, and the screen's thread does not wait for it, so a wedged CoreAudio call cannot hang a stop.
+        self._outputs.stop()
         try:
             self.source.close()
         except Exception:
@@ -1695,10 +1665,7 @@ class TrainingSession:
         # Give the starvation watchdog an origin before the first block, so a device connected but switched
         # off (which never delivers one) still trips the starved branch.
         self.sentry.saw_block()
-        if self._output_thread is None or not self._output_thread.is_alive():
-            self._output_thread = threading.Thread(target=self._output_pump, daemon=True,
-                                                   name="outputs")
-            self._output_thread.start()
+        self._outputs.start()
         next_report = time.monotonic() + 2.0
         try:
             for item in self.source.blocks():

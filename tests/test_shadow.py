@@ -205,7 +205,9 @@ def test_the_session_gives_the_display_back_when_it_stops(fake):
     session.music = type("M", (), {"release": lambda self: None})()
     session._level = 0.0
     session._stop = False
-    session._output_thread = None       # no pump: outputs apply and release inline, as before it existed
+    from nfb_console.outputs import OutputPump
+
+    session._outputs = OutputPump(session._apply_snapshot, session._release_outputs)   # never started: inline
     session.paused = False
     session.device = None
     session.source = type("S", (), {"close": lambda self: None})()

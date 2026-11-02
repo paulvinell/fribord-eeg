@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from nfb_console.outputs import OutputPump
 from nfb_console.plan import SessionPlan
 
 
@@ -111,10 +112,9 @@ def test_the_session_fires_cues_through_a_swappable_player(monkeypatch):
     session._resumed_at = None
     # Completion now hands the outputs back (it did not before), so the hand-built session needs the
     # output objects and pump handle `_outputs_off` touches.
-    session._output_thread = None
-    session._output_state = None
     for _name in ("display", "output_volume", "music"):
         setattr(session, _name, types.SimpleNamespace(release=lambda: None, apply=lambda *a, **k: None))
+    session._outputs = OutputPump(session._apply_snapshot, session._release_outputs)
     played: list[str] = []
     session.cue = played.append
 

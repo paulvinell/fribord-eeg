@@ -4666,7 +4666,7 @@ def test_pausing_hands_the_outputs_back_even_when_a_block_was_in_flight():
     try:
         pump(session)
         session._stop = False
-        session._output_thread = None
+        session._outputs = type(session._outputs)(session._apply_snapshot, session._release_outputs)
         session.paused = False
         session.toggle_pause()
         assert session.paused and log and log[-1] == "release", "the pause itself hands them back"
