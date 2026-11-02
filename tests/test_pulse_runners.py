@@ -150,4 +150,3 @@ def test_the_headband_keeps_every_reading_in_order_as_the_eye_does():
     runner = _mendi()
     assert len(runner.readings) == runner.READINGS_KEPT, "the newest, up to the list's length"
     assert runner.readings[-1] is runner.state
-    runner._reset()

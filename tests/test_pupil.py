@@ -15,6 +15,7 @@ from nfb_console.inputs import HeartChoice, PupilChoice
 from nfb_console.protocols import BY_CODE
 from nfb_console.trials import ACTIVE, BASELINE, ITI, LEADIN_S, NEGATIVE, POSITIVE, RESULT, TrialRun
 from nfb_console.pupil_view import ITI_S, OBSERVE_HZ, RESULT_S
+from nfb_console.trial_training import CUE_PITCH_NEUTRAL
 
 from test_screens import StubPage, toolbar
 from test_ste import _help_faults, _texts
@@ -131,7 +132,7 @@ def test_the_cue_phase_keeps_the_answer_to_the_tone_out_of_the_baseline():
 # --- the session ------------------------------------------------------------------------------
 
 def test_a_strong_eye_succeeds_in_most_trials_of_both_directions():
-    session = _session("strong", direction="alternating", n_trials=6)
+    session = _session("strong", trial_direction="alternating", n_trials=6)
     try:
         _drive(session, 6 * 32.0)
         run = session.trials
@@ -143,7 +144,7 @@ def test_a_strong_eye_succeeds_in_most_trials_of_both_directions():
 
 
 def test_the_trials_panel_shows_the_mean_shift_per_direction():
-    from nfb_console.pupil_view import trial_summary
+    from nfb_console.trial_training import trial_summary
     from nfb_console.trials import Trial
 
     def trial(required, score, valid=True):
@@ -151,18 +152,18 @@ def test_the_trials_panel_shows_the_mean_shift_per_direction():
                      success=valid and (score > 0 if required == POSITIVE else score < 0))
 
     run = TrialRun()
-    assert trial_summary(run) == "no trials yet"
+    assert trial_summary(run, {POSITIVE: "larger", NEGATIVE: "smaller"}, "mm") == "no trials yet"
     run.results = [trial(POSITIVE, 0.20), trial(POSITIVE, 0.10),
                    trial(NEGATIVE, -0.08), trial(NEGATIVE, 0.02),
                    trial(POSITIVE, 0.0, valid=False)]
-    text = trial_summary(run)
+    text = trial_summary(run, {POSITIVE: "larger", NEGATIVE: "smaller"}, "mm")
     assert "larger: 2 of 2 · mean +0.15 mm" in text, "the larger mean is the signed average shift"
     assert "smaller: 1 of 2 · mean -0.03 mm" in text, "the smaller mean leans negative"
     assert "1 with no result" in text, "a void trial is counted, not averaged"
 
 
 def test_the_within_trial_fade_turns_the_circle_off_after_the_set_time():
-    session = _session("strong", direction="increase", n_trials=1)
+    session = _session("strong", trial_direction="increase", n_trials=1)
     session.feedback_window_s = 5.0
     on_at, off_at = [], []
     original = session.observe
@@ -184,7 +185,7 @@ def test_the_within_trial_fade_turns_the_circle_off_after_the_set_time():
 
 
 def test_the_stepwise_update_holds_the_circle_between_blocks():
-    session = _session("strong", direction="increase", n_trials=1)
+    session = _session("strong", trial_direction="increase", n_trials=1)
     session.update_s = 3.0
     shown = []
     original = session.observe
@@ -209,7 +210,7 @@ def test_the_sound_steps_with_the_circle_and_does_not_glide_between_blocks():
     """The bug: the circle stepped, but the smoother ran on the sound's level too, so the sound glided
     across the steps the circle jumped. Stepwise feedback is already quantised; the continuous smoother
     must not run on top of it, whatever the smoothing is set to."""
-    session = _session("strong", direction="increase", n_trials=1)
+    session = _session("strong", trial_direction="increase", n_trials=1)
     session.update_s = 3.0
     session.feedback.smoothing_seconds = 0.5      # on: the smoother is what dissolves the steps
     levels = []
@@ -233,7 +234,7 @@ def test_the_sound_steps_with_the_circle_and_does_not_glide_between_blocks():
 
 def test_live_feedback_still_smooths_the_level():
     """The other side of it: with no stepping, the smoother still runs, so the level moves every reading."""
-    session = _session("strong", direction="increase", n_trials=1)
+    session = _session("strong", trial_direction="increase", n_trials=1)
     session.update_s = 0.0
     session.feedback.smoothing_seconds = 0.5
     levels = []
@@ -255,7 +256,7 @@ def test_live_feedback_still_smooths_the_level():
 
 
 def test_no_feedback_trials_are_counted_on_their_own():
-    from nfb_console.pupil_view import trial_summary
+    from nfb_console.trial_training import trial_summary
     from nfb_console.trials import Trial
 
     def trial(required, score, transfer):
@@ -265,7 +266,7 @@ def test_no_feedback_trials_are_counted_on_their_own():
     run = TrialRun()
     run.results = [trial(POSITIVE, 0.10, False), trial(POSITIVE, 0.04, True),
                    trial(NEGATIVE, -0.06, False), trial(NEGATIVE, -0.02, True)]
-    text = trial_summary(run)
+    text = trial_summary(run, {POSITIVE: "larger", NEGATIVE: "smaller"}, "mm")
     assert "feedback · larger: 1 of 1 · mean +0.10 mm" in text
     assert "no feedback · larger: 1 of 1 · mean +0.04 mm" in text
     assert "feedback · smaller: 1 of 1 · mean -0.06 mm" in text
@@ -276,7 +277,7 @@ def test_random_direction_hides_the_aim_until_the_effort_starts():
     import nfb_console.pupil_view as pv
     from nfb_console.trials import ACTIVE, BASELINE, CUED, RESULT
 
-    session = _session("strong", direction="random", n_trials=4)
+    session = _session("strong", trial_direction="random", n_trials=4)
     pitches: list[float] = []
     real_tone = pv.cues.tone_at
     pv.cues.tone_at = lambda hz: pitches.append(hz) or real_tone(hz)
@@ -294,15 +295,15 @@ def test_random_direction_hides_the_aim_until_the_effort_starts():
         assert known_in.get(CUED, {False}) == {False}, "the cue phase never shows the aim"
         assert known_in.get(ACTIVE) == {True}, "the effort shows the aim"
         assert {r.required for r in session.trials.results} == {POSITIVE, NEGATIVE}
-        assert pv.CUE_PITCH_NEUTRAL in pitches, "the cue tone is the middle tone, not a direction"
+        assert CUE_PITCH_NEUTRAL in pitches, "the cue tone is the middle tone, not a direction"
     finally:
         pv.cues.tone_at = real_tone
         session.stop()
 
 
 def test_an_eye_with_no_control_does_not_succeed_by_chance_in_most_trials():
-    session = _session("none", direction="increase", n_trials=8)
-    session.success_mm = 0.1
+    session = _session("none", trial_direction="increase", n_trials=8)
+    session.success_at = 0.1
     session.restart_trials()
     try:
         _drive(session, 8 * 32.0)
@@ -312,7 +313,7 @@ def test_an_eye_with_no_control_does_not_succeed_by_chance_in_most_trials():
 
 
 def test_the_level_runs_only_in_the_effort_window_and_rises_toward_the_cue():
-    session = _session("strong", direction="decrease", n_trials=3)
+    session = _session("strong", trial_direction="decrease", n_trials=3)
     seen_outside, seen_inside = [], []
     original = session.observe
 
@@ -332,7 +333,7 @@ def test_the_level_runs_only_in_the_effort_window_and_rises_toward_the_cue():
 
 
 def test_a_trial_without_feedback_has_no_level_but_is_scored():
-    session = _session("strong", direction="increase", n_trials=3, transfer_fraction=1.0)
+    session = _session("strong", trial_direction="increase", n_trials=3, transfer_fraction=1.0)
     try:
         _drive(session, 3 * 32.0)
         assert session.signal is None
@@ -353,7 +354,7 @@ def test_passive_mode_follows_the_pupil_with_no_trials():
 
 
 def test_a_pause_releases_the_outputs_and_stops_the_effort():
-    session = _session("strong", direction="increase")
+    session = _session("strong", trial_direction="increase")
     released = []
     session.release_outputs = lambda: released.append(True)
     try:
@@ -557,7 +558,7 @@ def test_the_circle_mirrors_the_pupil_not_the_goal():
 
     s = PupilSession(BY_CODE["PUPIL"], choice=PupilChoice(kind="simulator"))
     try:
-        s.set_range(0.3)
+        s.set_full_at(0.3)
         assert s.circle_level(+0.3) > 0.9 and s.circle_level(-0.3) < 0.1, "bigger pupil, bigger circle"
         assert s.circle_level(0.0) == pytest.approx(0.5)
         # same pupil shift gives the same circle size regardless of the trial's direction
@@ -570,7 +571,7 @@ def test_the_circle_mirrors_the_pupil_not_the_goal():
 
 
 def test_the_feedback_circle_draws_direction_arrows():
-    from nfb_console.pupil_view import circle_shapes
+    from nfb_console.trial_training import circle_shapes
 
     plain = circle_shapes(280, 0.5, "#2e6bc2")
     shrink = circle_shapes(280, 0.5, "#2e6bc2", arrows="shrink")
@@ -624,7 +625,7 @@ def test_the_camera_shows_lit_frames_and_holds_through_the_strobe_dark_ones():
 
 def _feed_trial(h, trial, direction, base_bpm, effort_bpm, base_n=5, effort_n=5, result_beat=True):
     """One trial through the heart aggregator: a baseline window, an effort window, then the result."""
-    from nfb_console.pupil_view import HeartTrials
+    from nfb_console.trial_training import HeartTrials
     for _ in range(base_n):
         h.feed(BASELINE, trial, direction, base_bpm)
     for _ in range(effort_n):
@@ -633,8 +634,8 @@ def _feed_trial(h, trial, direction, base_bpm, effort_bpm, base_n=5, effort_n=5,
 
 
 def test_heart_stats_are_the_change_from_baseline_split_by_direction():
-    from nfb_console.pupil_view import HeartTrials
-    h = HeartTrials()
+    from nfb_console.trial_training import HeartTrials
+    h = HeartTrials({POSITIVE: "larger", NEGATIVE: "smaller"})
     _feed_trial(h, 1, POSITIVE, 60.0, 66.0)        # larger: +6 bpm
     _feed_trial(h, 2, POSITIVE, 62.0, 66.0)        # larger: +4 bpm  -> mean +5
     _feed_trial(h, 3, NEGATIVE, 70.0, 66.0)        # smaller: -4 bpm
@@ -644,22 +645,22 @@ def test_heart_stats_are_the_change_from_baseline_split_by_direction():
 
 
 def test_a_trial_is_scored_even_with_no_beat_at_the_result_instant():
-    from nfb_console.pupil_view import HeartTrials
-    h = HeartTrials()
+    from nfb_console.trial_training import HeartTrials
+    h = HeartTrials({POSITIVE: "larger", NEGATIVE: "smaller"})
     _feed_trial(h, 1, POSITIVE, 60.0, 66.0, result_beat=False)
     assert h.direction_summary()[0][1] == pytest.approx(6.0), "the window is scored when it ends"
 
 
 def test_a_thin_heart_window_has_no_result():
-    from nfb_console.pupil_view import HeartTrials, HEART_MIN_READINGS
-    h = HeartTrials()
+    from nfb_console.trial_training import HeartTrials, HEART_MIN_READINGS
+    h = HeartTrials({POSITIVE: "larger", NEGATIVE: "smaller"})
     _feed_trial(h, 1, POSITIVE, 60.0, 66.0, base_n=HEART_MIN_READINGS - 1)
     assert h.direction_summary() == [], "too few baseline readings means no heart result for the trial"
 
 
 def test_the_session_heart_view_is_overall_and_effort_against_rest():
-    from nfb_console.pupil_view import HeartTrials
-    h = HeartTrials()
+    from nfb_console.trial_training import HeartTrials
+    h = HeartTrials({POSITIVE: "larger", NEGATIVE: "smaller"})
     for _ in range(5):
         h.feed(BASELINE, 1, POSITIVE, 60.0)
     for _ in range(5):
@@ -673,8 +674,8 @@ def test_the_session_heart_view_is_overall_and_effort_against_rest():
 
 
 def test_a_missing_reading_does_not_enter_the_stats():
-    from nfb_console.pupil_view import HeartTrials
-    h = HeartTrials()
+    from nfb_console.trial_training import HeartTrials
+    h = HeartTrials({POSITIVE: "larger", NEGATIVE: "smaller"})
     for _ in range(5):
         h.feed(ACTIVE, 1, POSITIVE, 70.0)
     h.feed(ACTIVE, 1, POSITIVE, None)              # a dropped beat: skipped, not counted as zero
@@ -703,7 +704,7 @@ class _PhaseHeart:
 
 
 def test_driving_with_a_heart_source_fills_the_stats_from_the_effort():
-    session = _session("strong", direction="increase", n_trials=1)
+    session = _session("strong", trial_direction="increase", n_trials=1)
     session.heart_choice = HeartChoice(kind="simulator")
     session.heart = _PhaseHeart(session)
     session.heart_trials.reset()        # the heart runner was set after the session was built
