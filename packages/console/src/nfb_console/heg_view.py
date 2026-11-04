@@ -404,6 +404,9 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
             return
         raw = metric_value(self.metric_spec, self.state)
         self.raw_metric = raw
+        if raw is not None:
+            # Kept in passive mode too, so a switch to active mode finds the minute its first trial needs.
+            self._keep_recent(self.state.t, raw)
         if raw is None:
             self._signal = None
             self.release_outputs()
@@ -460,18 +463,36 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
         raw = None if held else metric_value(self.metric_spec, state)
         self.raw_metric = raw
         if raw is not None:
-            self._recent.append((state.t, raw))
-            while self._recent and state.t - self._recent[0][0] > SPREAD_S:
-                self._recent.popleft()
+            self._keep_recent(state.t, raw)
         spread = self.trial_spread
         value = raw / spread if raw is not None and spread else None
         self._observe_trial(state.t, value, value is not None)
+
+    def _keep_recent(self, t: float, raw: float) -> None:
+        if self._recent and t <= self._recent[-1][0]:
+            if t == self._recent[-1][0]:
+                return                      # the same frame, observed again
+            self._recent.clear()            # a step back in time is a new source
+        self._recent.append((t, raw))
+        while self._recent and t - self._recent[0][0] > SPREAD_S:
+            self._recent.popleft()
+
+    def _recent_span(self) -> float:
+        return self._recent[-1][0] - self._recent[0][0] if len(self._recent) > 1 else 0.0
+
+    def trial_hold(self) -> str | None:
+        """The first trial waits for the signal its spread is measured in."""
+        short = MIN_SPREAD_S - self._recent_span()
+        if short <= 0:
+            return None
+        return (f"the first trial needs {MIN_SPREAD_S:g} s of signal before it · "
+                f"{math.ceil(short):.0f} s more")
 
     def _trial_cued(self) -> None:
         """Measure the spread a new trial is judged in, from the minute before it. None until there is
         enough of it, and then the trial's readings are rejected and it has no result."""
         values = [v for _, v in self._recent]
-        span = self._recent[-1][0] - self._recent[0][0] if len(self._recent) > 1 else 0.0
+        span = self._recent_span()
         spread = statistics.pstdev(values) if span >= MIN_SPREAD_S and len(values) > 2 else 0.0
         self.trial_spread = spread if spread > 0 else None
 

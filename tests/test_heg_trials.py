@@ -83,13 +83,31 @@ def test_a_signal_that_does_not_move_does_not_succeed_past_a_margin():
     assert result.valid and not result.success
 
 
-def test_a_trial_without_a_minute_of_signal_before_it_has_no_result():
-    """The spread needs signal to be measured in. Cued with too little of it, the trial cannot be judged,
-    and says so, rather than dividing by a spread made of a few readings."""
+def test_the_first_trial_waits_for_the_signal_its_spread_needs():
+    """Opened straight into active mode, the run holds its first cue until there are 20 s of signal, and
+    the screen says so. The first trial then has a spread and a result."""
+    from nfb_console.heg_view import MIN_SPREAD_S
+
     session = _session(trial_direction="increase", n_trials=1)
-    result, _ = _first_result(session, 1000.0, rise=1.0)
-    assert session.trial_spread is None
-    assert not result.valid
+    t = _push(session, MIN_SPREAD_S / 2, 1000.0)
+    assert not session.trials.started
+    assert "s more" in session.trial_hold()
+    result, _ = _first_result(session, t, rise=1.0)
+    assert session.trial_spread is not None
+    assert result.valid and result.success
+
+
+def test_signal_in_passive_mode_counts_toward_the_first_trial():
+    """A minute in passive mode, then a switch to active: the first trial starts at once, with its spread
+    measured in the passive minute."""
+    session = _session(trial_direction="increase", n_trials=1)
+    session.set_mode("passive")
+    t = _push(session, 70.0, 1000.0)
+    session.set_mode("active")
+    assert session.trial_hold() is None
+    result, _ = _first_result(session, t, rise=1.0, spread=0.5)
+    assert result.valid
+    assert session.trial_spread == pytest.approx(0.5, rel=0.15)
 
 
 def test_motion_in_the_effort_rejects_its_frames_and_leaves_the_trial_without_a_result():

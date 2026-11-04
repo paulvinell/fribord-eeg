@@ -357,6 +357,8 @@ class TrialTraining:
         run = self.trials
         if run.done:
             return
+        if not run.started and self.trial_hold() is not None:
+            return
         kept = valid and value is not None
         for event in run.feed(t, value if kept else 0.0, valid=kept):
             self._trial_sound(event)
@@ -396,6 +398,12 @@ class TrialTraining:
 
     def _trial_cued(self) -> None:
         """A trial has just been cued. Nothing, by default."""
+
+    def trial_hold(self) -> str | None:
+        """Why the run cannot start yet, in words for the screen, or None when it can. The run waits for
+        it before its first reading, so a trial is never cued that the program cannot judge. Never, by
+        default."""
+        return None
 
     def _start_block(self, t: float) -> None:
         """At the start of an effort window, begin a fresh block. The circle sits at the baseline until the
@@ -645,6 +653,13 @@ class TrialView:
             self.direction_text.value, self.direction_text.color = "waiting", t.FAINT
             self.count_text.value = ""
             self.phase_text.value = session.trial_waiting
+            self.circle.shapes = circle_shapes(self.circle_side, None, t.ACCENT)
+            return
+        hold = None if run.started else session.trial_hold()
+        if hold is not None:
+            self.direction_text.value, self.direction_text.color = "waiting", t.FAINT
+            self.count_text.value = ""
+            self.phase_text.value = hold
             self.circle.shapes = circle_shapes(self.circle_side, None, t.ACCENT)
             return
         if run.done:

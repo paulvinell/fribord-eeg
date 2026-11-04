@@ -200,6 +200,11 @@ class TrialRun:
         return len(self.results) >= self.n_trials
 
     @property
+    def started(self) -> bool:
+        """Whether the run has had its first reading, which starts the lead-in to the first cue."""
+        return self._t is not None
+
+    @property
     def feedback_live(self) -> bool:
         """Whether the level should be driven right now: an active window, and not a transfer trial."""
         return self.phase == ACTIVE and not self.transfer
