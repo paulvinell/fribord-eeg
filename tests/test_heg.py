@@ -84,8 +84,10 @@ def test_settling_then_good_and_the_projection_arithmetic():
     out = [proc.process(f) for f in frames(15.0)]
     assert out[0].quality == QUALITY_SETTLING
     assert out[-1].quality == QUALITY_GOOD
-    # flat 20000 L/R against 19000 P: the projection is the difference, filtered to the same DC
-    assert out[-1].hbo == pytest.approx(1000.0, abs=1.0)
+    # flat 20000 L/R against 19000 P: the projection is the middle less the sides, filtered to the same DC.
+    # That sign is a measurement: a breath hold raises the blood flow and made the sides' light fall
+    # against the middle's, so this way round the number rises with it.
+    assert out[-1].hbo == pytest.approx(-1000.0, abs=1.0)
     assert out[-1].raw_ir == pytest.approx(20000.0, abs=1.0)
 
 

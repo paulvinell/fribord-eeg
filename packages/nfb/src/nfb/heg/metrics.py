@@ -45,9 +45,7 @@ HEG_METRICS: dict[str, MetricSpec] = {
         detail=("The mainline activation signal: rises when oxygen-rich blood reaches the "
                 "prefrontal cortex, which usually means more neural activity there. Smoothed over "
                 "two seconds; the projection's absolute scale is arbitrary, so pair it with a "
-                "self-calibrating scaling rather than reading the number itself.\n\n"
-                "Note the sign convention: the projection is IR intensity, and more arterial HbO "
-                "absorbs more IR — the direction row is where polarity lives, as everywhere else."),
+                "self-calibrating scaling rather than reading the number itself."),
         extract=lambda s: s.smoothed_hbo, ready=_ready(READY_SECONDS_MIN_SAMPLES),
         strategies=("zscore", "rolling_minmax", "fixed_range"),
     ),

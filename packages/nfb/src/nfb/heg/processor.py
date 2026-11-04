@@ -8,8 +8,9 @@ length. This does something simpler: bilateral L/R averaging with common-mode re
 channel, which sits between the two and was empirically observed to move far less — the signature of a
 short-separation/reference pickup. The absolute scale is therefore arbitrary; every strategy
 downstream normalises, so what matters is only that the number is *monotonic* in cortical
-hemodynamics. Sign convention: more arterial HbO absorbs more IR → lower IR intensity → lower `hbo`;
-the direction row on the screen owns polarity, as it does for every metric in this repo.
+hemodynamics. **The sign is the middle channel less the sides**, so the numbers rise with blood flow. On a
+breath hold, which raises the blood flow in the head, the sides' light fell against the middle's, and with
+the sides less the middle every level on the HEG screen trained the wrong way.
 
 Quality semantics on every processed frame:
     1.0  good — filtered, clean, past settling
@@ -163,8 +164,8 @@ class Processed:
     """One frame after the chain: the projection, plus what a screen needs to say about it."""
 
     t: float
-    hbo: float                  # mean(L.ir, R.ir) − P.ir, filtered
-    hbr: float                  # mean(L.red, R.red) − P.red, filtered
+    hbo: float                  # P.ir − mean(L.ir, R.ir), filtered
+    hbr: float                  # P.red − mean(L.red, R.red), filtered
     raw_ir: float               # bilateral IR mean, unsubtracted — the display's raw trace
     quality: float              # QUALITY_GOOD / QUALITY_SETTLING / QUALITY_MOTION
     temp_c: float
@@ -248,8 +249,10 @@ class FrameProcessor:
         p = self._filtered("p", frame.p)
         bilateral_ir = 0.5 * (l.ir + r.ir)
         bilateral_red = 0.5 * (l.red + r.red)
-        hbo = float(bilateral_ir - p.ir)
-        hbr = float(bilateral_red - p.red)
+        # The middle against the sides, not the sides against the middle: measured on a breath hold, which
+        # raises the blood flow in the head, the sides' light fell against the middle's.
+        hbo = float(p.ir - bilateral_ir)
+        hbr = float(p.red - bilateral_red)
 
         if self._start_t is None:
             self._start_t = frame.t
