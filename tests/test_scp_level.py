@@ -547,3 +547,15 @@ def test_the_verdict_says_what_was_asked_and_how_far_the_signal_went():
         assert " µV " in seen[0]
     finally:
         session.stop()
+
+
+def test_music_is_offered_with_every_source_but_the_eeg_rhythm():
+    """Music runs under the trials, as on Pupil and HEG. The EEG rhythm is the one source left out: it
+    sonifies a fast band, and a slow potential has no rhythm in it for an ear to follow."""
+    session = _session()
+    try:
+        assert "music" in session.offers
+        assert set(session.music_sources) == {"tone", "crossfade", "noise", "shepard", "file"}
+        assert session.state_balance is None, "no crossfade position between feedback windows"
+    finally:
+        session.stop()

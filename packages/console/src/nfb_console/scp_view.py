@@ -19,10 +19,9 @@ same reason alpha-theta's two reward tones are far apart: they have to be told f
 closed. The verdict is the same tone doubled on a success, and **silence otherwise**, which is the shape
 every discrete mechanism in this repo takes: the absence is the message.
 
-**Two things are deliberately absent from the feedback.** There is no music, because continuous music under
-discrete trials would blur the one boundary the protocol is made of; and no alert, because the condition is
-crossed constantly by construction — half a trial's readings are on the wrong side of a baseline by
-definition, so an alert would fire on the ordinary behaviour of the signal.
+**One thing is deliberately absent from the feedback: the alert**, because the condition is crossed
+constantly by construction — half a trial's readings are on the wrong side of a baseline by definition, so
+an alert would fire on the ordinary behaviour of the signal. Music is offered, as on the other trial screens.
 
 **A transfer trial has a cue and a verdict and no display.** That is what weans the skill off the screen,
 and it is why the live bar is *hidden* rather than frozen during one: a bar that stopped moving reads as a
@@ -209,11 +208,17 @@ class SCPSession(TrialTraining, TrainingSession):
     DEFAULT_DIRECTION = "shuffled"
     trial_subject = "the slow potential"
 
-    offers = ("sound", "shadow", "click")
-    """No music: continuous music under discrete trials would blur the one boundary the protocol is made
-    of, and the audio channel is already carrying the cue and the verdict. No alert: the condition here is
-    a trial's own baseline, which the signal crosses constantly by construction, so an alert would fire on
-    the ordinary behaviour of the signal rather than on an exception."""
+    offers = ("sound", "shadow", "click", "music")
+    """No alert: the condition here is a trial's own baseline, which the signal crosses constantly by
+    construction, so an alert would fire on the ordinary behaviour of the signal rather than on an
+    exception. Music is offered, as on Pupil and HEG, whose trials run under it."""
+
+    music_sources = ("tone", "crossfade", "noise", "shepard", "file")
+    """Every source but `eeg`, for the slow-wave screen's reason: it sonifies a fast band, and a slow
+    potential has no rhythm in it for an ear to follow. `crossfade` has its two states here: the shift the
+    cued way, and the shift the other way."""
+
+    state_ends = ("other way", "cued way")
 
     combines = ("weighted",)
     """One target, so every rule reduces to the same thing. Stated rather than offered."""
@@ -309,6 +314,11 @@ class SCPSession(TrialTraining, TrainingSession):
 
     def _heart_rate(self) -> float | None:
         return None
+
+    @property
+    def state_balance(self) -> float | None:
+        """Where a crossfade sits: the oriented level, already 0…1, and nothing between feedback windows."""
+        return self._signal
 
     @property
     def range_uv(self) -> float:
