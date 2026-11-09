@@ -82,6 +82,7 @@ class TrialUnits:
     max_full_at: float
     max_success: float
     step: float
+    decimals: int = 2           # how many decimals a shift is written with
 
 
 def _duration(seconds: float) -> str:
@@ -216,10 +217,18 @@ class TrialTraining:
     UNITS: TrialUnits
     DIRECTION_WORD: dict[str, str]
     COUNTS_IN_BASELINE = False
+    DIRECTIONS = DIRECTIONS
+    """The direction choices this program offers, by name. A program can add its own."""
+    DEFAULT_DIRECTION = "alternating"
+
+    @property
+    def trial_metric_hz(self) -> float:
+        """How many readings a second reach the trial engine, for its check that a baseline has enough."""
+        return OBSERVE_HZ
 
     def _init_trials(self, mode: str) -> None:
         self.mode = mode
-        self.trial_direction = "alternating"
+        self.trial_direction = self.DEFAULT_DIRECTION
         self.n_trials = DEFAULT_TRIALS
         self.transfer_fraction = 0.0
         self.success_at = 0.0
@@ -248,9 +257,9 @@ class TrialTraining:
         return TrialRun(n_trials=self.n_trials, baseline_s=timing.baseline_s, active_s=timing.active_s,
                         result_s=timing.result_s, iti_s=timing.iti_s, cue_s=timing.cue_s,
                         transfer_fraction=self.transfer_fraction,
-                        directions=DIRECTIONS[self.trial_direction],
+                        directions=self.DIRECTIONS[self.trial_direction],
                         alternate=self.trial_direction == "alternating",
-                        success_uv=self.success_at, metric_hz=OBSERVE_HZ)
+                        success_uv=self.success_at, metric_hz=self.trial_metric_hz)
 
     def restart_trials(self) -> None:
         """A new run with the current settings. The results go: they were scored under the old ones."""
@@ -272,7 +281,7 @@ class TrialTraining:
         """What a program resets when the mode changes, beyond the trials. Nothing, by default."""
 
     def set_trial_direction(self, direction: str) -> None:
-        if direction not in DIRECTIONS or direction == self.trial_direction:
+        if direction not in self.DIRECTIONS or direction == self.trial_direction:
             return
         self.trial_direction = direction
         self.restart_trials()
@@ -494,7 +503,8 @@ def circle_shapes(side: float, level: float | None, colour: str, baseline: bool 
     return out
 
 
-def _direction_lines(pool: list, prefix: str, words: dict[str, str], unit: str) -> list[str]:
+def _direction_lines(pool: list, prefix: str, words: dict[str, str], unit: str,
+                     decimals: int = 2) -> list[str]:
     """One line per direction that has trials: the success count and the signed mean shift."""
     out = []
     for required in (POSITIVE, NEGATIVE):
@@ -502,11 +512,11 @@ def _direction_lines(pool: list, prefix: str, words: dict[str, str], unit: str) 
         if trials:
             mean = sum(r.score_uv for r in trials) / len(trials)
             out.append(f"{prefix}{words[required]}: {sum(r.success for r in trials)} of {len(trials)} "
-                       f"· mean {mean:+.2f} {unit}")
+                       f"· mean {mean:+.{decimals}f} {unit}")
     return out
 
 
-def trial_summary(run: TrialRun, words: dict[str, str], unit: str) -> str:
+def trial_summary(run: TrialRun, words: dict[str, str], unit: str, decimals: int = 2) -> str:
     """The TRIALS panel text: per direction, how many trials succeeded and the mean shift from the
     baseline. When the run has no-feedback trials, they are counted on their own, because a shift held
     without the circle is the real test of control. The signed mean says more than the count: a pool that
@@ -515,10 +525,11 @@ def trial_summary(run: TrialRun, words: dict[str, str], unit: str) -> str:
         return "no trials yet"
     valid = run.valid_results
     if any(r.transfer for r in run.results):
-        lines = (_direction_lines([r for r in valid if not r.transfer], "feedback · ", words, unit)
-                 + _direction_lines([r for r in valid if r.transfer], "no feedback · ", words, unit))
+        lines = (_direction_lines([r for r in valid if not r.transfer], "feedback · ", words, unit, decimals)
+                 + _direction_lines([r for r in valid if r.transfer], "no feedback · ", words, unit,
+                                    decimals))
     else:
-        lines = _direction_lines(valid, "", words, unit)
+        lines = _direction_lines(valid, "", words, unit, decimals)
     void = sum(1 for r in run.results if not r.valid)
     if void:
         lines.append(f"{void} with no result")
@@ -603,7 +614,7 @@ class TrialView:
             labelled("direction",
                      ft.Row([pill(d, session.trial_direction == d,
                                   changed(lambda _e, d_=d: session.set_trial_direction(d_)))
-                             for d in DIRECTIONS], spacing=6, wrap=True, expand=True),
+                             for d in session.DIRECTIONS], spacing=6, wrap=True, expand=True),
                      width=96),
             labelled("trials", num_box(session.n_trials, changed(set_trials), step=5, low=1, high=200,
                                        width=52),

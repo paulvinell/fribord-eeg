@@ -47,23 +47,18 @@ from .protocols import Protocol
 from .targets import Target
 from .traces import RawRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession, true_metric_hz
-from .trials import (ACTIVE, ACTIVE_S, BASELINE, CUE, DEFAULT_TRIALS, ITI, NEGATIVE, POSITIVE,
-                     RESULT, TRANSFER_FRACTION, VERDICT, TrialRun)
+from .trial_training import DIRECTIONS, TrialTiming, TrialTraining, TrialUnits
+from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, DEFAULT_TRIALS, ITI, ITI_RANGE_S, NEGATIVE,
+                     POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
 from .target_card import NOTE_H
 from .widgets import button, help_button, labelled, num_box, panel, pill, test_button
 
 HANDLES = ("SCP",)
 
-CUE_PITCH = {POSITIVE: 620.0, NEGATIVE: 310.0}
-"""The two cue tones, an octave apart.
+from .trial_training import CUE_PITCH, CUE_VOLUME  # noqa: E402  (the cue tones are the trial piece's)
 
-Same reasoning as alpha-theta's reward tones, which are two and a half octaves apart for it: the whole job
-of these is to be told from each other by somebody who is not looking at the screen, and an octave is the
-interval the ear reads as "the other one" rather than as "the same one, slightly off"."""
-
-CUE_VOLUME = 25
-"""As the alert's, and above the click's 15: a cue that is missed is a trial that is not run. The scale is
-linear amplitude, not loudness, so 25 is about −12 dB."""
+TIMING = TrialTiming(cue_s=0.0, baseline_s=BASELINE_S, active_s=ACTIVE_S, result_s=RESULT_S, iti_s=ITI_RANGE_S)
+"""The published slow-potential trial: the baseline starts at the cue, two seconds of it, six of feedback."""
 
 DEFAULT_RANGE_UV = 10.0
 """The feedback sensitivity, ±µV of mean shift for the level's full travel. Ten is the size of shift a
@@ -72,6 +67,14 @@ trained trainee produces; the box is there because that is a person-by-person nu
 MIN_RANGE_UV = 1.0
 """A floor, for the reason `wave_view.MIN_RANGE_UV` gives: below it the level is a picture of electrode
 noise."""
+
+UNITS = TrialUnits(unit="µV", full_at=DEFAULT_RANGE_UV, min_full_at=MIN_RANGE_UV, max_full_at=100.0,
+                   max_success=50.0, step=1.0, decimals=1)
+
+SCP_DIRECTIONS = {**DIRECTIONS, "shuffled": DIRECTIONS["random"]}
+"""The shared choices, and **shuffled**: both directions in a shuffled order, each named at its cue. That is
+the published protocol and this screen's default. The shared **random** shuffles too, but hides the
+direction until the feedback starts."""
 
 BEST_CORNER_HZ = 0.01
 SURVIVAL_FLOOR = 0.5
@@ -166,13 +169,20 @@ RUN_HELP = (
 )
 
 
-class SCPSession(TrainingSession):
+class SCPSession(TrialTraining, TrainingSession):
     """One channel, one slow signal, and a run of trials over it.
 
     Everything generic is `TrainingSession`. What is here is the metric, the trial engine, the cues the
     engine's events sound, and a level that exists **only during a trial's feedback window** — which is
     the one thing that makes this session shape unlike every other on this screen's shelf.
     """
+
+    TIMING = TIMING
+    UNITS = UNITS
+    DIRECTION_WORD = {POSITIVE: "up", NEGATIVE: "down"}
+    DIRECTIONS = SCP_DIRECTIONS
+    DEFAULT_DIRECTION = "shuffled"
+    trial_subject = "the slow potential"
 
     offers = ("sound", "shadow", "click")
     """No music: continuous music under discrete trials would blur the one boundary the protocol is made
@@ -210,24 +220,14 @@ class SCPSession(TrainingSession):
         self.rings = {i: RawRing(2.0, s.rate_hz, SPECTRUM_LO, SPECTRUM_HI, 1.0)
                       for i, s in self.specs.items()}
 
-        # What the operator sets about the run itself. Held on the session rather than read off the
-        # engine, because the engine is *rebuilt* whenever one of them changes and a setting that lived
-        # only inside it would be lost with it.
-        self.n_trials = DEFAULT_TRIALS
-        self.transfer_fraction = TRANSFER_FRACTION
-        self.success_uv = 0.0
-        self.range_uv = DEFAULT_RANGE_UV
-
         self.raw_shift: float | None = None
         self._signal: float | None = None
-        # Whether the last reading actually drove the level. The transition out of it is what releases the
-        # outputs: without that the sound and the shadow hold their last value through the whole rest
-        # interval, which says "you are still doing it" while nobody is doing anything.
-        self._driving = False
-
         self.metric: SlowShift | None = None
         self.wave: WaveRing | None = None
-        self.trials = TrialRun(metric_hz=true_metric_hz(self.rate))
+        # The run and what the operator sets about it, from the shared trial piece. Only active mode: the
+        # protocol is the trials. A run starts with a third of its trials without a display.
+        self._init_trials("active")
+        self.transfer_fraction = TRANSFER_FRACTION
 
         # One target, for the three jobs `wave_view` lists: the shared pane draws a contribution row for
         # it, it is how that pane knows data is arriving, and it is what the click asks. Its value is the
@@ -260,23 +260,37 @@ class SCPSession(TrainingSession):
         self.amplitudes.pop(("scp",), None)
         self.restart_trials()
 
-    def restart_trials(self) -> None:
-        """Throw the run away and start a new one with the settings as they now stand.
+    @property
+    def trial_metric_hz(self) -> float:
+        """Every reading of the metric reaches the engine, not a thinned stream."""
+        return true_metric_hz(self.rate)
 
-        A fresh seed — the sequence of directions and transfer slots is drawn anew, because a second run
-        with the same order would let a trainee learn the order rather than the cue.
-        """
-        self.trials = TrialRun(n_trials=max(1, int(self.n_trials)),
-                               transfer_fraction=self.transfer_fraction,
-                               success_uv=self.success_uv,
-                               metric_hz=true_metric_hz(self.rate))
+    def set_mode(self, mode: str) -> None:
+        """One mode only: the protocol is the trials."""
+
+    def _go_quiet(self) -> None:
+        """No level, and the outputs handed back: without that the sound and the shadow hold their last
+        value through the whole rest interval, which says "you are still doing it" while nobody is."""
         self._signal = None
         self._driving = False
-        self.finished = False
         self._outputs_off()
 
+    def _move_level(self, signal: float, t: float, smoothed: bool = True) -> None:
+        """The trial's level, oriented toward the cue by the trial piece. Stepwise feedback is already in
+        steps, so it skips the session's smoother: the outputs jump with the bar instead of gliding."""
+        self._signal = signal
+        if not smoothed:
+            self._level = signal
+
+    def _heart_rate(self) -> float | None:
+        return None
+
+    @property
+    def range_uv(self) -> float:
+        return self.full_at
+
     def set_range(self, half_range_uv: float) -> None:
-        self.range_uv = max(MIN_RANGE_UV, float(half_range_uv))
+        self.set_full_at(half_range_uv)
 
     @property
     def settled(self) -> bool:
@@ -306,7 +320,7 @@ class SCPSession(TrainingSession):
     @property
     def level_source(self) -> tuple[str, str]:
         return (f"the mean shift against this trial's own baseline, toward the cued direction · "
-                f"±{self.range_uv:g} µV",
+                f"±{self.full_at:g} µV",
                 "half = the trial's baseline itself")
 
     @property
@@ -367,59 +381,23 @@ class SCPSession(TrainingSession):
             self.amplitudes[("scp",)] = r.value
             if metric.warmup < 1.0 or self.paused:
                 continue
-            valid = usable and accepted
-            for event in self.trials.feed(r.t, r.value, valid=valid):
-                self._sound(event)
-            shift = self.trials.shift
-            driving = self.trials.feedback_live and valid and shift is not None
-            if driving:
-                # Oriented, so that the level always rises toward the direction that was asked for. Every
-                # mechanism reads one number and none of them knows which way this trial goes, so the
-                # orientation has to happen here or a down trial would darken the screen for compliance.
-                oriented = shift if self.trials.required == POSITIVE else -shift
-                self._signal = min(1.0, max(0.0, 0.5 + oriented / (2 * self.range_uv)))
+            # The trial piece orients the level toward the cue, sounds the cue and the verdict (a success
+            # is the cue tone doubled; a failure and a void trial are silent), and ends the run. Its end
+            # stops the clock, as `tick()` does for a timed plan: the run *is* the session's length here.
+            self._observe_trial(r.t, r.value, usable and accepted)
+            if self._driving:
                 fresh.add(("scp",))
-            else:
-                self._signal = None
-                if self._driving:
-                    self._outputs_off()
-            self._driving = driving
         if self.wave is not None:
             self.wave.feed(metric.wave_start, {self.channel: metric.waveform})
-        if self.trials.done and not self.finished:
-            # The same completion path `tick()` takes for a timed plan: the run *is* the session's length
-            # here, so its end stops the clock rather than leaving it running over a screen with nothing
-            # left to happen on it.
-            self.finished = True
-            self._accumulated = self.elapsed
-            self._resumed_at = None
-            self.paused = True
-            self._signal = None
-            self._driving = False
-            self._outputs_off()
         return fresh
-
-    def _sound(self, event) -> None:
-        """The two sounds this protocol has, both through `self.cue` so a test can silence them.
-
-        A success is the trial's own cue tone **doubled** — "you did the thing you were cued", said with
-        the sound that cued it, which needs no second pitch and cannot be confused with the cue itself.
-        Failure and void are silent.
-        """
-        if event.kind == CUE:
-            self.cue(cues.tone_at(CUE_PITCH[event.required]), CUE_VOLUME)
-        elif event.kind == VERDICT and event.trial is not None and event.trial.success:
-            self.cue(cues.held(cues.tone_at(CUE_PITCH[event.required])), CUE_VOLUME)
 
     # --- surviving a stop -------------------------------------------------------------------
 
     def adopt_view(self, previous) -> None:
         super().adopt_view(previous)
         self.wave_uv = getattr(previous, "wave_uv", self.wave_uv)
-        self.range_uv = getattr(previous, "range_uv", self.range_uv)
-        self.n_trials = getattr(previous, "n_trials", self.n_trials)
-        self.transfer_fraction = getattr(previous, "transfer_fraction", self.transfer_fraction)
-        self.success_uv = getattr(previous, "success_uv", self.success_uv)
+        if isinstance(previous, TrialTraining):
+            self.adopt_trials(previous)
 
     def adopt_targets(self, previous) -> None:
         """What an operator set is which electrode and how the run is shaped, and both are carried by
@@ -566,7 +544,7 @@ class SCPCard:
                                          suffix="%", step=10, low=0, high=100, width=52),
                      ft.Container(width=6),
                      ft.Text("no display", size=t.SMALL, color=t.FAINT), width=76),
-            labelled("succeeds at", num_box(session.success_uv, self._set_margin, suffix="µV",
+            labelled("succeeds at", num_box(session.success_at, self._set_margin, suffix="µV",
                                             step=1, low=0, high=50, width=52),
                      ft.Container(width=6),
                      ft.Text("past the baseline", size=t.SMALL, color=t.FAINT), width=76),
@@ -603,7 +581,7 @@ class SCPCard:
         self._restart()
 
     def _set_margin(self, uv: float) -> None:
-        self.session.success_uv = max(0.0, float(uv))
+        self.session.success_at = max(0.0, float(uv))
         self._restart()
 
     def _restart(self) -> None:

@@ -293,7 +293,7 @@ def test_a_run_carries_its_settings_across_a_stop_and_not_its_results():
         first.set_range(25.0)
         first.n_trials = 12
         first.transfer_fraction = 0.5
-        first.success_uv = 3.0
+        first.success_at = 3.0
         first.restart_trials()
         _drive(first, 5.0, uv=lambda _s: 0.0)
         _drive(first, 40.0, uv=_compliant, start=int(5 * RATE))
@@ -304,7 +304,7 @@ def test_a_run_carries_its_settings_across_a_stop_and_not_its_results():
             second.adopt(first)
             assert second.channel == 1
             assert second.range_uv == 25.0
-            assert (second.n_trials, second.transfer_fraction, second.success_uv) == (12, 0.5, 3.0)
+            assert (second.n_trials, second.transfer_fraction, second.success_at) == (12, 0.5, 3.0)
             assert second.trials.n_trials == 12 and second.trials.success_uv == 3.0
             assert second.trials.results == [], "the run's results are the session's, not the setup's"
             assert second.metric is not None and second.metric.spec.index == 1
@@ -466,5 +466,57 @@ def test_session_for_ignores_the_other_sources():
                                    mendi_choice=object(), mendi_runner=object())
     try:
         assert isinstance(session, scp_view.SCPSession)
+    finally:
+        session.stop()
+
+
+def test_a_fresh_run_is_the_published_protocol():
+    """The shared trial piece brings settings the published protocol does not use. Each starts where that
+    protocol is: both directions, shuffled and named at the cue, the baseline at the cue, a third of the
+    trials without a display, feedback for the whole window, live, full at 10 µV, any shift succeeds."""
+    session = _session()
+    try:
+        assert session.trial_direction == "shuffled" and not session.hides_direction
+        assert session.transfer_fraction == pytest.approx(1 / 3)
+        assert session.feedback_window_s == session.TIMING.active_s and session.update_s == 0.0
+        assert (session.full_at, session.success_at) == (10.0, 0.0)
+        run = session.trials
+        assert set(run.directions) == {POSITIVE, NEGATIVE} and not run.alternate
+        assert run.baseline_s == 2.0 and run.active_s == 6.0 and run.cue_s == 0.0
+    finally:
+        session.stop()
+
+
+def test_the_cue_tones_are_an_octave_apart_and_a_success_doubles_its_tone():
+    """620 Hz for up and 310 Hz for down, told apart with the eyes closed; the verdict on a success is the
+    cue tone held twice, and a failure is silent."""
+    from nfb_console import cues
+
+    session = _session()
+    try:
+        heard: list = []
+        session.cue = lambda sound, volume=None: heard.append((sound, volume))
+        session.toggle_pause()
+        _run(session, n_trials=2)
+        nxt = _drive(session, 3.0, uv=lambda _s: 0.0)
+        _drive(session, 30.0, uv=_compliant, start=nxt)
+        expected = {cues.tone_at(620.0), cues.tone_at(310.0),
+                    cues.held(cues.tone_at(620.0)), cues.held(cues.tone_at(310.0))}
+        assert heard and {sound for sound, _ in heard} <= expected
+        assert all(volume == 25 for _, volume in heard)
+        assert any(sound in (cues.held(cues.tone_at(620.0)), cues.held(cues.tone_at(310.0)))
+                   for sound, _ in heard), "a compliant trial succeeds and doubles its tone"
+    finally:
+        session.stop()
+
+
+def test_no_trial_starts_while_the_filter_settles():
+    """The run's first reading, which starts the lead-in to the first cue, waits for the metric to settle,
+    so no trial is cued, baselined or scored on a filter that is still a transient."""
+    session = _session()
+    try:
+        session.toggle_pause()
+        _drive(session, 1.0, uv=lambda _s: 5.0)
+        assert not session.settled and not session.trials.started
     finally:
         session.stop()
