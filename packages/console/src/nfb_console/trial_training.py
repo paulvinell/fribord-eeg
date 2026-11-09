@@ -531,6 +531,17 @@ def _direction_lines(pool: list, prefix: str, words: dict[str, str], unit: str,
     return out
 
 
+def verdict_line(last, words: dict[str, str], subject: str, units: TrialUnits) -> str:
+    """What the last trial asked for and what the signal did, with the amount: the line under a verdict."""
+    asked = words[last.required]
+    if not last.valid:
+        return "too many readings were rejected in this trial"
+    if last.score_uv == 0:
+        return f"asked for {asked} · {subject} did not change"
+    went = words[POSITIVE] if last.score_uv > 0 else words[NEGATIVE]
+    return f"asked for {asked} · {subject} went {abs(last.score_uv):.{units.decimals}f} {units.unit} {went}"
+
+
 def trial_summary(run: TrialRun, words: dict[str, str], unit: str, decimals: int = 2) -> str:
     """The TRIALS panel text: per direction, how many trials succeeded and the mean shift from the
     baseline. When the run has no-feedback trials, they are counted on their own, because a shift held
@@ -746,12 +757,7 @@ class TrialView:
                 colour = t.GOOD if last.success else t.BAD
                 self.direction_text.value = f"{'✓' if last.success else '✗'}  {asked}"
                 self.direction_text.color = colour
-                if last.score_uv == 0:
-                    self.verdict_text.value = f"asked for {asked} · {session.trial_subject} did not change"
-                else:
-                    went = words[POSITIVE] if last.score_uv > 0 else words[NEGATIVE]
-                    self.verdict_text.value = (f"asked for {asked} · {session.trial_subject} went "
-                                               f"{abs(last.score_uv):.2f} {unit} {went}")
+                self.verdict_text.value = verdict_line(last, words, session.trial_subject, session.UNITS)
         arrows = None
         if (run.phase in (CUED, BASELINE, ACTIVE) and not run.transfer and required is not None
                 and session.direction_known()

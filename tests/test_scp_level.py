@@ -405,7 +405,7 @@ def test_every_tab_draws_with_trials_running_through_it():
         assert session.error is None, session.error
         joined = " | ".join(c.value for c in _texts(control) if c.value)
         assert "up" in joined and "down" in joined
-        assert "void" in joined, "the history reports what it excluded from the rates"
+        assert "mean +" in joined or "mean -" in joined, "each direction's line carries its mean shift"
         assert "settling" not in joined, "it settled; the empty state should be gone"
     finally:
         session.stop()
@@ -518,5 +518,32 @@ def test_no_trial_starts_while_the_filter_settles():
         session.toggle_pause()
         _drive(session, 1.0, uv=lambda _s: 5.0)
         assert not session.settled and not session.trials.started
+    finally:
+        session.stop()
+
+
+def test_the_verdict_says_what_was_asked_and_how_far_the_signal_went():
+    """A tone says success or nothing; the line under the bar says how much, and which way, so a near miss
+    and a large shift the wrong way read differently."""
+    from nfb_console.trials import RESULT
+
+    page, session = _page(), _session()
+    try:
+        control = scp_view.view(page, session, _toolbar(), lambda: None)
+        session.toggle_pause()
+        _run(session, n_trials=3)
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        seen: list[str] = []
+
+        def watch():
+            if session.trials.phase == RESULT and not seen:
+                session.redraw()
+                seen.append(" | ".join(c.value for c in _texts(control) if c.value))
+
+        _drive(session, 30.0, uv=_compliant, start=nxt, watch=watch)
+        assert seen, "a trial reached its verdict"
+        assert "asked for up · the slow potential went" in seen[0] or \
+            "asked for down · the slow potential went" in seen[0]
+        assert " µV " in seen[0]
     finally:
         session.stop()

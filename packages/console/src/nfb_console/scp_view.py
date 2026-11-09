@@ -47,7 +47,8 @@ from .protocols import Protocol
 from .targets import Target
 from .traces import RawRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession, true_metric_hz
-from .trial_training import DIRECTIONS, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows
+from .trial_training import (DIRECTIONS, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows, trial_summary,
+                             verdict_line)
 from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, CUED, DEFAULT_TRIALS, ITI, ITI_RANGE_S,
                      NEGATIVE, POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
 from .target_card import NOTE_H
@@ -106,30 +107,40 @@ RUN_LABEL_W = 104
 TRIAL_HELP = (
     "One trial runs in order: a cue, a baseline, a feedback window, a verdict, then a rest.\n\n"
     "The cue names the direction and sounds a tone: high for up, low for down. The two tones are an "
-    "octave apart, so you can tell them apart with your eyes closed.\n\n"
+    "octave apart, so you can tell them apart with your eyes closed. With the *random* direction, the cue "
+    "sounds a tone between the two and shows a question mark. The direction tone then sounds when the "
+    "feedback starts.\n\n"
     "The baseline is the average of the first two seconds. Everything after it is measured against this "
     "baseline.\n\n"
     "Six seconds of feedback follow. The bar shows the shift against the baseline. Right is always the "
     "cued direction, so on a down trial, a fall fills the bar to the right. The trial is scored on the "
     "mean of those six seconds, not on any single instant. A brief spike does not earn the trial, and a "
     "brief lapse does not lose it.\n\n"
-    "A success sounds the trial's cue tone twice. A failure and a void trial stay silent.\n\n"
-    "A transfer trial has the cue and the verdict, but no display. The bar stays hidden for the whole "
-    "trial instead of freezing.\n\n"
-    "A trial is **void** if too much of its signal was artifacted, or if its baseline was too thin to "
-    "use. A void trial appears in the history but is excluded from every rate. A blink's deflection lies "
-    "in the same band this protocol trains, so scoring a blink scores the blink instead of the trained "
-    "signal."
+    "A success sounds the trial's cue tone twice. A failure and a trial with no result stay silent. The "
+    "line under the bar then says what the trial asked for, and how far and which way the slow potential "
+    "went.\n\n"
+    "A trial without feedback has the cue and the verdict, but no display. The bar stays hidden for the "
+    "whole trial instead of freezing.\n\n"
+    "A trial has *no result* if too much of its signal was artifacted, or if its baseline was too thin "
+    "to use. It appears in the history but is excluded from every count. A blink's deflection lies in the "
+    "same band this protocol trains, so scoring a blink scores the blink instead of the trained signal."
 )
 
 HISTORY_HELP = (
     "Every completed trial, in order, oldest at the left.\n\n"
-    "A filled cell is a success, an outlined one a failure, a muted one a void trial — artifacted, or "
-    "with too thin a baseline to mean anything. A dot under a cell marks a transfer trial.\n\n"
-    "The two rates are kept apart because the skill is *differentiation*. Somebody who has learned to "
-    "produce one direction, and drifts through the other, has a good overall figure. But that person has "
-    "not learned the thing being trained. Void trials are in neither rate and are counted on their own. "
-    "A run with many of them is a wiring problem rather than a poor session."
+    "A filled cell is a success, and an outlined one is a failure. A muted cell is a trial with no result. "
+    "Its signal was artifacted, or its baseline was too thin to mean anything. A dot under a cell marks a "
+    "trial without feedback.\n\n"
+    "Under the cells, each direction has its own line: how many trials succeeded, and the mean shift from "
+    "the baseline. The directions are kept apart because the skill is *differentiation*. Somebody who has "
+    "learned to produce one direction, and drifts through the other, has a good overall figure. But that "
+    "person has not learned the thing being trained.\n\n"
+    "The mean shift says more than the count. A direction whose mean leans the cued way shows control "
+    "that grows before many trials pass the success margin. A mean the wrong way shows a strategy that "
+    "works backwards.\n\n"
+    "When the run has trials without feedback, they get their own lines. A shift held without the bar is "
+    "the real test of control. Trials with no result are in no line and are counted on their own. A run "
+    "with many of them is a wiring problem rather than a poor session."
 )
 
 SHIFT_HELP = (
@@ -622,6 +633,7 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
     # Always present: hiding it between trials changed the panel's height every twelve seconds.
     trial_bar = ft.Container(content=trial_track)
     trial_caption = ft.Text("", size=t.SMALL, color=t.FAINT)
+    verdict_text = ft.Text("", size=t.SMALL, color=t.MUTED)
 
     # ---- the history strip ----
     history_cells = ft.Row(spacing=3, wrap=True)
@@ -664,7 +676,7 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
                       ft.Container(expand=True)],
                      vertical_alignment=ft.CrossAxisAlignment.CENTER),
               ft.Container(height=10), trial_bar,
-              ft.Container(height=6), trial_caption, transfer_note,
+              ft.Container(height=6), trial_caption, verdict_text, transfer_note,
               help=help_button(page, "How a trial runs", TRIAL_HELP)),
         ft.Container(height=12),
         panel("HISTORY", history_cells, ft.Container(height=8), history_text,
@@ -747,6 +759,12 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
             trial_caption.value = "hold it · the bar is off"
         else:
             trial_caption.value = "no feedback in this window"
+        last = run.last
+        if run.phase == RESULT and last is not None:
+            verdict_text.value = verdict_line(last, session.DIRECTION_WORD, session.trial_subject, session.UNITS)
+            verdict_text.color = t.MUTED if not last.valid else t.GOOD if last.success else t.BAD
+        else:
+            verdict_text.value = ""
 
     def draw_history() -> None:
         run = session.trials
@@ -760,26 +778,15 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
                 colour, border = None, t.BAD
             cell = ft.Container(width=CELL_W, height=CELL_H, border_radius=3, bgcolor=colour,
                                 border=ft.Border.all(1, border))
-            cells.append(ft.Column([cell, ft.Container(height=2),
-                                    ft.Container(width=5, height=5, border_radius=3,
-                                                 bgcolor=t.MUTED if result.transfer else None)],
-                                   spacing=0,
-                                   horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+            # A fixed width, or each cell's column takes the whole row and the cells stack.
+            cells.append(ft.Container(width=CELL_W, content=ft.Column(
+                [cell, ft.Container(height=2),
+                 ft.Container(width=5, height=5, border_radius=3,
+                              bgcolor=t.MUTED if result.transfer else None)],
+                spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER)))
         history_cells.controls = cells
-        if not run.results:
-            history_text.value = "no trials yet"
-            return
-        up, down = run.success_rate(POSITIVE), run.success_rate(NEGATIVE)
-        ups = [r for r in run.valid_results if r.required == POSITIVE]
-        downs = [r for r in run.valid_results if r.required == NEGATIVE]
-        void = sum(1 for r in run.results if not r.valid)
-        parts = []
-        if up is not None:
-            parts.append(f"{sum(r.success for r in ups)}/{len(ups)} up")
-        if down is not None:
-            parts.append(f"{sum(r.success for r in downs)}/{len(downs)} down")
-        parts.append(f"{void} void")
-        history_text.value = " · ".join(parts)
+        history_text.value = trial_summary(run, session.DIRECTION_WORD, session.UNITS.unit,
+                                           session.UNITS.decimals)
 
     def draw() -> None:
         session.tick()
