@@ -47,9 +47,9 @@ from .protocols import Protocol
 from .targets import Target
 from .traces import RawRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession, true_metric_hz
-from .trial_training import DIRECTIONS, TrialTiming, TrialTraining, TrialUnits
-from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, DEFAULT_TRIALS, ITI, ITI_RANGE_S, NEGATIVE,
-                     POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
+from .trial_training import DIRECTIONS, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows
+from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, CUED, DEFAULT_TRIALS, ITI, ITI_RANGE_S,
+                     NEGATIVE, POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
 from .target_card import NOTE_H
 from .widgets import button, help_button, labelled, num_box, panel, pill, test_button
 
@@ -101,6 +101,7 @@ TRACE_H = 74
 BAR_W = 200
 LEVEL_H = 22
 CELL_W, CELL_H = 11, 16
+RUN_LABEL_W = 104
 
 TRIAL_HELP = (
     "One trial runs in order: a cue, a baseline, a feedback window, a verdict, then a rest.\n\n"
@@ -143,7 +144,7 @@ SHIFT_HELP = (
 SIGNAL_HELP = (
     "One channel, lowpassed, signed. The level sent to every output is the mean shift from this trial's "
     "baseline, oriented so the cued direction always reads as a rise.\n\n"
-    "**full at ±** sets the sensitivity. At ±10 µV, the level reads 100% for a 10 µV shift the cued way. "
+    "**full at** sets the sensitivity. At 10 µV, the level reads 100% for a 10 µV shift the cued way. "
     "It reads 0% for a 10 µV shift the wrong way, and 50% at the baseline. The condition, and so the "
     "click, starts at 50%. Narrow the range and small shifts swing the output further, but the output "
     "then stays at 0% or 100% more often. Widen the range and the output moves less.\n\n"
@@ -157,13 +158,26 @@ SIGNAL_HELP = (
 )
 
 RUN_HELP = (
-    "Changing any of these settings starts the run again. Results measured under one setting are not "
-    "results under another.\n\n"
+    "Changing **direction**, **trials**, **baseline starts**, **without feedback** or **succeeds at** "
+    "starts the run again. Results measured under one setting are not results under another.\n\n"
+    "**direction** sets which shifts the run asks for. *shuffled* mixes up and down trials in a "
+    "shuffled order, and the tone at the cue names the direction. This is the usual protocol. "
+    "*alternating* asks for up and down in turn. *increase* and *decrease* ask for one direction only. "
+    "*random* mixes the two directions, but the tone at the cue does not name the direction. The "
+    "direction tone sounds when the feedback starts. Then you cannot push the signal the other way "
+    "during the baseline to make the shift look larger.\n\n"
     f"**trials** sets the block size. A trial takes about 12 s, so {DEFAULT_TRIALS} trials take about "
     f"{round(DEFAULT_TRIALS * 12 / 60)} minutes.\n\n"
-    f"**transfer** sets the share of trials that run without a display. It starts at "
+    "**baseline starts** sets the time from the tone to the start of the baseline. At 0 s the baseline "
+    "starts at the tone, as in the usual protocol. A longer time keeps the brain's answer to the tone "
+    "out of the baseline.\n\n"
+    f"**without feedback** sets the share of trials that run without a display. It starts at "
     f"{TRANSFER_FRACTION:.0%}, a typical share for an experienced trainee. For a first session, set it "
     "to 0%.\n\n"
+    "**show bar for** sets how long the bar shows in each feedback window. After that time, the bar goes "
+    "off and you hold the shift without it. The trial is still scored on the whole window.\n\n"
+    "**update every** sets how often the bar moves. At 0 s the bar follows the shift live. At 2 s the bar "
+    "shows the mean of the last 2 s and moves in steps.\n\n"
     "**succeeds at** sets how far past the baseline the mean shift must go to count. A run starts at "
     "0 µV, so any shift in the cued direction counts. Raise it when the direction is reliable."
 )
@@ -433,7 +447,7 @@ def session_for(*args, heart_choice=None, heart_runner=None, mendi_choice=None,
 
 # --- names for what is on screen ----------------------------------------------------------------
 
-PHASE_NAME = {BASELINE: "baseline", ACTIVE: "feedback", RESULT: "verdict", ITI: "rest"}
+PHASE_NAME = {CUED: "cue", BASELINE: "baseline", ACTIVE: "feedback", RESULT: "verdict", ITI: "rest"}
 
 DIRECTION_TEXT = {POSITIVE: "▲ shift up", NEGATIVE: "▼ shift down"}
 
@@ -472,7 +486,6 @@ class SCPCard:
                         self.fill, self.notch], width=BAR_W, height=14)
         self.scale_text = ft.Text("", size=t.SMALL, color=t.FAINT)
         self.filter_text = ft.Text("", size=t.SMALL, color=t.FAINT)
-        self.range_row = ft.Row(spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         self.run_rows = ft.Column(spacing=9)
         self.note = ft.Text("", size=t.SMALL, color=t.WARN)
         # Two lines reserved whether or not there is a note — this card's notes run to two lines, and a
@@ -494,7 +507,6 @@ class SCPCard:
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Container(height=4), self.scale_text,
                 ft.Container(height=4), self.filter_text,
-                ft.Container(height=9), self.range_row,
                 ft.Container(height=10), self.run_rows,
                 self.note_box,
             ], spacing=0),
@@ -524,42 +536,12 @@ class SCPCard:
             ft.Container(expand=True),
             help_button(self.page, "What is measured", SIGNAL_HELP),
         ]
-        self.range_row.controls = [
-            ft.Text("full at ±", size=t.SMALL, color=t.MUTED, width=76),
-            num_box(session.range_uv, self._set_range, suffix="µV", step=1,
-                    low=MIN_RANGE_UV, width=52),
-            ft.Container(width=8),
-            ft.Text("of mean shift", size=t.SMALL, color=t.FAINT),
-        ]
-        # Where a threshold's mode row goes on every other card. What is chosen here is the run's shape,
-        # and the panel's `?` — not each row — says that changing one starts the run again: three notes
-        # saying the same thing is the failure `labelled`'s own rule is about.
-        self.run_rows.controls = [
-            labelled("trials", num_box(session.n_trials, self._set_trials, step=5, low=1,
-                                       high=200, width=52),
-                     ft.Container(width=6),
-                     ft.Text(f"≈ {_duration(session.n_trials * 12.0)}", size=t.SMALL,
-                             color=t.FAINT), width=76),
-            labelled("transfer", num_box(round(session.transfer_fraction * 100), self._set_transfer,
-                                         suffix="%", step=10, low=0, high=100, width=52),
-                     ft.Container(width=6),
-                     ft.Text("no display", size=t.SMALL, color=t.FAINT), width=76),
-            labelled("succeeds at", num_box(session.success_at, self._set_margin, suffix="µV",
-                                            step=1, low=0, high=50, width=52),
-                     ft.Container(width=6),
-                     ft.Text("past the baseline", size=t.SMALL, color=t.FAINT), width=76),
-            ft.Row([button("restart run", lambda _e: self._restart()),
-                    ft.Container(expand=True),
-                    help_button(self.page, "The run", RUN_HELP)],
-                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            # Both cue tones and the success mark, auditioned before trial one. This protocol is run
-            # watching the trainee rather than the screen, so the sounds are the whole channel — and the
-            # alternative is discovering after eight minutes that one of them was inaudible.
-            ft.Row([test_button("up", lambda _e: self._audition(POSITIVE)),
-                    test_button("down", lambda _e: self._audition(NEGATIVE)),
-                    test_button("success", lambda _e: self._audition(POSITIVE, mark=True))],
-                   spacing=6),
-        ]
+        # Where a threshold's mode row goes on every other card. What is chosen here is the run's shape:
+        # the shared trial rows, with the bar as what the feedback shows and the wait from the cue to the
+        # baseline, which only this screen sets. The panel's `?` says that changing one starts the run again.
+        self.run_rows.controls = trial_settings_rows(
+            session, self._changed, display="bar", cue_gap=True,
+            help=help_button(self.page, "The run", RUN_HELP), width=RUN_LABEL_W)
         self.page.update()
 
     def _set_channel(self, channel: int) -> None:
@@ -567,36 +549,16 @@ class SCPCard:
         self.rebuild()
         self.on_change()
 
-    def _set_range(self, uv: float) -> None:
-        self.session.set_range(uv)
-        self.rebuild()
-        self.on_change()
-
-    def _set_trials(self, n: float) -> None:
-        self.session.n_trials = int(n)
-        self._restart()
-
-    def _set_transfer(self, percent: float) -> None:
-        self.session.transfer_fraction = max(0.0, min(1.0, percent / 100.0))
-        self._restart()
-
-    def _set_margin(self, uv: float) -> None:
-        self.session.success_at = max(0.0, float(uv))
-        self._restart()
-
-    def _restart(self) -> None:
-        self.session.restart_trials()
-        self.rebuild()
-        self.on_change()
-
-    def _audition(self, required: str, mark: bool = False) -> None:
-        sound = cues.tone_at(CUE_PITCH[required])
-        self.session.cue(cues.held(sound) if mark else sound, CUE_VOLUME)
+    def _changed(self, action) -> Callable:
+        return lambda *a: (action(*a), self.rebuild(), self.on_change())
 
     def refresh(self) -> None:
         session = self.session
         run = session.trials
-        shift, full = run.shift, max(session.range_uv, MIN_RANGE_UV)
+        # What the feedback shows, not the live shift: in a trial without a display, after the bar fades
+        # and between steps, a live number here would be the feedback the trial withholds.
+        shift = session.shown_shift if session.feedback_now else None
+        full = max(session.full_at, MIN_RANGE_UV)
         if shift is None:
             self.value_text.value = "—"
             self.value_text.color = t.FAINT
@@ -744,10 +706,13 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
 
     def draw_trial() -> None:
         run = session.trials
-        running = run.required is not None and run.phase in (BASELINE, ACTIVE, RESULT)
+        running = run.required is not None and run.phase in (CUED, BASELINE, ACTIVE, RESULT)
         if run.done:
             direction_text.value = f"done · {len(run.results)} trials"
             direction_text.color = t.MUTED
+        elif running and not session.direction_known():
+            direction_text.value = "?"
+            direction_text.color = t.FAINT
         elif running:
             direction_text.value = DIRECTION_TEXT[run.required]
             direction_text.color = t.ACCENT
@@ -756,6 +721,8 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
             direction_text.color = t.FAINT
         phase_text.value = (f"{PHASE_NAME.get(run.phase, run.phase)} · "
                             f"{run.phase_remaining():.1f} s")
+        if running and not session.direction_known():
+            phase_text.value += " · wait for the tone"
         count_text.value = f"trial {run.trial_number}/{run.n_trials}"
         transfer = bool(running and run.transfer)
         transfer_badge.opacity = 1.0 if transfer else 0.0
@@ -769,13 +736,15 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
         trial_fill.width = 0 if signal_value is None else bar_w * signal_value
         if signal_value is not None:
             trial_fill.bgcolor = t.ACCENT if signal_value >= 0.5 else t.ACCENT_DIM
-            shift = run.shift or 0.0
+            shift = session.shown_shift or 0.0
             trial_caption.value = (f"{shift:+.1f} µV against this trial's baseline · full at "
-                                   f"±{session.range_uv:g} µV · mark = the baseline")
+                                   f"±{session.full_at:g} µV · mark = the baseline")
         elif not session.settled:
             trial_caption.value = "the filter is still settling — nothing is fed back yet"
         elif run.done:
             trial_caption.value = "the run is over · restart it from the card"
+        elif run.phase == ACTIVE and not run.transfer and not session.feedback_now:
+            trial_caption.value = "hold it · the bar is off"
         else:
             trial_caption.value = "no feedback in this window"
 

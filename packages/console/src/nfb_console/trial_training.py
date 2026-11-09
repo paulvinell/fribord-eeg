@@ -56,6 +56,9 @@ average, so the trial has no heart result rather than a number made from one or 
 
 CELL_W, CELL_H = 9, 14
 
+MAX_CUE_GAP_S = 5.0
+"""Longest wait from the cue to the baseline that the operator can set."""
+
 
 @dataclass(frozen=True)
 class TrialTiming:
@@ -197,7 +200,7 @@ class HeartTrials:
 
 
 TRIAL_SETTINGS = ("mode", "trial_direction", "n_trials", "transfer_fraction", "success_at", "full_at",
-                  "feedback_window_s", "update_s")
+                  "feedback_window_s", "update_s", "cue_s")
 """What `adopt` carries from a stopped session to the next: the operator's settings, not the results."""
 
 
@@ -235,6 +238,9 @@ class TrialTraining:
         self.full_at = self.UNITS.full_at
         self.feedback_window_s = self.TIMING.active_s
         self.update_s = 0.0
+        self.cue_s = self.TIMING.cue_s
+        """Time from the cue to the start of the baseline. A program that lets the operator set it shows a
+        row for it; the others keep their `TIMING`."""
         self.heart_trials = HeartTrials(self.DIRECTION_WORD)
         self.trials = self._new_run()
         self.count_from: int | None = None
@@ -255,7 +261,7 @@ class TrialTraining:
     def _new_run(self) -> TrialRun:
         timing = self.TIMING
         return TrialRun(n_trials=self.n_trials, baseline_s=timing.baseline_s, active_s=timing.active_s,
-                        result_s=timing.result_s, iti_s=timing.iti_s, cue_s=timing.cue_s,
+                        result_s=timing.result_s, iti_s=timing.iti_s, cue_s=self.cue_s,
                         transfer_fraction=self.transfer_fraction,
                         directions=self.DIRECTIONS[self.trial_direction],
                         alternate=self.trial_direction == "alternating",
@@ -284,6 +290,15 @@ class TrialTraining:
         if direction not in self.DIRECTIONS or direction == self.trial_direction:
             return
         self.trial_direction = direction
+        self.restart_trials()
+
+    @property
+    def trial_seconds(self) -> float:
+        """One trial with its rest, on average, as the run is set now."""
+        return self.TIMING.trial_s - self.TIMING.cue_s + self.cue_s
+
+    def set_cue_gap(self, seconds: float) -> None:
+        self.cue_s = max(0.0, min(MAX_CUE_GAP_S, float(seconds)))
         self.restart_trials()
 
     def set_full_at(self, value: float) -> None:
@@ -536,6 +551,88 @@ def trial_summary(run: TrialRun, words: dict[str, str], unit: str, decimals: int
     return "\n".join(lines) if lines else "no result yet"
 
 
+def trial_settings_rows(session: TrialTraining, changed: Callable[[Callable], Callable], display: str = "circle",
+                        cue_gap: bool = False, help: ft.Control | None = None,
+                        width: int = 96) -> list[ft.Control]:
+    """The rows that set a run: direction, length, trials without feedback, the fade, the steps, the
+    success margin and the sensitivity, then the restart and the three test sounds. `changed` wraps a
+    setter so the screen rebuilds. `display` names what the feedback shows ("circle", "bar"). `cue_gap`
+    adds the row for the wait from the cue to the baseline. `help` goes at the end of the restart row."""
+    timing, units, words = session.TIMING, session.UNITS, session.DIRECTION_WORD
+    active_s = timing.active_s
+
+    def set_trials(n: float) -> None:
+        session.n_trials = int(n)
+        session.restart_trials()
+
+    def set_transfer(percent: float) -> None:
+        session.transfer_fraction = max(0.0, min(1.0, percent / 100.0))
+        session.restart_trials()
+
+    def set_margin(value: float) -> None:
+        session.success_at = max(0.0, float(value))
+        session.restart_trials()
+
+    def set_feedback_window(s: float) -> None:
+        session.feedback_window_s = max(1.0, min(active_s, float(s)))
+
+    def set_update(s: float) -> None:
+        session.update_s = max(0.0, min(active_s, float(s)))
+
+    def audition(required: str, mark: bool = False) -> None:
+        sound = cues.tone_at(CUE_PITCH[required])
+        session.cue(cues.held(sound) if mark else sound, CUE_VOLUME)
+
+    rows = [
+        labelled("direction",
+                 ft.Row([pill(d, session.trial_direction == d,
+                              changed(lambda _e, d_=d: session.set_trial_direction(d_)))
+                         for d in session.DIRECTIONS], spacing=6, wrap=True, expand=True),
+                 width=width),
+        labelled("trials", num_box(session.n_trials, changed(set_trials), step=5, low=1, high=200,
+                                   width=52),
+                 note=f"about {_duration(session.n_trials * session.trial_seconds)}", width=width),
+    ]
+    if cue_gap:
+        rows.append(labelled("baseline starts",
+                             num_box(session.cue_s, changed(session.set_cue_gap), suffix="s", step=0.5,
+                                     low=0, high=MAX_CUE_GAP_S, width=58),
+                             note=("at the tone" if session.cue_s <= 0 else "after the tone"),
+                             width=width))
+    rows += [
+        labelled("without feedback",
+                 num_box(round(session.transfer_fraction * 100), changed(set_transfer),
+                         suffix="%", step=10, low=0, high=100, width=52),
+                 note="of the trials", width=width),
+        labelled(f"show {display} for",
+                 num_box(session.feedback_window_s, changed(set_feedback_window),
+                         suffix="s", step=1, low=1, high=active_s, width=58),
+                 note=("the whole effort" if session.feedback_window_s >= active_s
+                       else f"then no {display} for {active_s - session.feedback_window_s:g} s"),
+                 width=width),
+        labelled("update every",
+                 num_box(session.update_s, changed(set_update), suffix="s",
+                         step=0.5, low=0, high=active_s, width=58),
+                 note=("0 = live" if session.update_s <= 0 else f"steps of {session.update_s:g} s"),
+                 width=width),
+        labelled("succeeds at", num_box(session.success_at, changed(set_margin), suffix=units.unit,
+                                        step=units.step, low=0, high=units.max_success, width=58),
+                 note="past the baseline", width=width),
+        labelled("full at", num_box(session.full_at, changed(session.set_full_at), suffix=units.unit,
+                                    step=units.step, low=units.min_full_at, high=units.max_full_at,
+                                    width=58),
+                 note="from the baseline", width=width),
+        ft.Row([button("restart run", changed(lambda _e: session.restart_trials()))]
+               + ([ft.Container(expand=True), help] if help is not None else []),
+               vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ft.Row([test_button(words[POSITIVE], lambda _e: audition(POSITIVE)),
+                test_button(words[NEGATIVE], lambda _e: audition(NEGATIVE)),
+                test_button("success", lambda _e: audition(POSITIVE, mark=True))],
+               spacing=6),
+    ]
+    return rows
+
+
 class TrialView:
     """The trial controls a program puts on its screen: the fixation circle, the settings rows, the trial
     history and the heart stats. The program places them and calls the `draw_` methods each frame."""
@@ -584,69 +681,7 @@ class TrialView:
 
     def settings_rows(self, changed: Callable[[Callable], Callable]) -> list[ft.Control]:
         """The active mode's rows for the MODE panel. `changed` wraps a setter so the screen rebuilds."""
-        session = self.session
-        timing, units, words = session.TIMING, session.UNITS, session.DIRECTION_WORD
-        active_s = timing.active_s
-
-        def set_trials(n: float) -> None:
-            session.n_trials = int(n)
-            session.restart_trials()
-
-        def set_transfer(percent: float) -> None:
-            session.transfer_fraction = max(0.0, min(1.0, percent / 100.0))
-            session.restart_trials()
-
-        def set_margin(value: float) -> None:
-            session.success_at = max(0.0, float(value))
-            session.restart_trials()
-
-        def set_feedback_window(s: float) -> None:
-            session.feedback_window_s = max(1.0, min(active_s, float(s)))
-
-        def set_update(s: float) -> None:
-            session.update_s = max(0.0, min(active_s, float(s)))
-
-        def audition(required: str, mark: bool = False) -> None:
-            sound = cues.tone_at(CUE_PITCH[required])
-            session.cue(cues.held(sound) if mark else sound, CUE_VOLUME)
-
-        return [
-            labelled("direction",
-                     ft.Row([pill(d, session.trial_direction == d,
-                                  changed(lambda _e, d_=d: session.set_trial_direction(d_)))
-                             for d in session.DIRECTIONS], spacing=6, wrap=True, expand=True),
-                     width=96),
-            labelled("trials", num_box(session.n_trials, changed(set_trials), step=5, low=1, high=200,
-                                       width=52),
-                     note=f"about {_duration(session.n_trials * timing.trial_s)}", width=96),
-            labelled("without feedback",
-                     num_box(round(session.transfer_fraction * 100), changed(set_transfer),
-                             suffix="%", step=10, low=0, high=100, width=52),
-                     note="of the trials", width=96),
-            labelled("show circle for",
-                     num_box(session.feedback_window_s, changed(set_feedback_window),
-                             suffix="s", step=1, low=1, high=active_s, width=58),
-                     note=("the whole effort" if session.feedback_window_s >= active_s
-                           else f"then no circle for {active_s - session.feedback_window_s:g} s"),
-                     width=96),
-            labelled("update every",
-                     num_box(session.update_s, changed(set_update), suffix="s",
-                             step=0.5, low=0, high=active_s, width=58),
-                     note=("0 = live" if session.update_s <= 0 else f"steps of {session.update_s:g} s"),
-                     width=96),
-            labelled("succeeds at", num_box(session.success_at, changed(set_margin), suffix=units.unit,
-                                            step=units.step, low=0, high=units.max_success, width=58),
-                     note="past the baseline", width=96),
-            labelled("full at", num_box(session.full_at, changed(session.set_full_at), suffix=units.unit,
-                                        step=units.step, low=units.min_full_at, high=units.max_full_at,
-                                        width=58),
-                     note="from the baseline", width=96),
-            ft.Row([button("restart run", changed(lambda _e: session.restart_trials()))]),
-            ft.Row([test_button(words[POSITIVE], lambda _e: audition(POSITIVE)),
-                    test_button(words[NEGATIVE], lambda _e: audition(NEGATIVE)),
-                    test_button("success", lambda _e: audition(POSITIVE, mark=True))],
-                   spacing=6),
-        ]
+        return trial_settings_rows(self.session, changed)
 
     def draw_fixation(self, passive_line: str) -> None:
         """The circle and the lines under it. `passive_line` is what passive mode says under the circle."""
