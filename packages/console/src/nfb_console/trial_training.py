@@ -212,7 +212,8 @@ class TrialTraining:
       count backwards, a task that keeps the mind busy and level);
     - `trial_subject` (what moved, in words: "your pupil") and `trial_waiting` (the line shown before the
       first reading);
-    - `_move_level(signal, t, smoothed)`, `_go_quiet()`, `cue`, `elapsed` and `_heart_rate()`;
+    - `_move_level(signal, t, smoothed)`, `_go_quiet()`, `cue` and `elapsed`;
+    - `heart` and `heart_choice`, optionally, for the heart beside the trials;
     - `_steer(effort)`, optionally, to tell a simulated source what the person is trying to do.
     """
 
@@ -255,6 +256,23 @@ class TrialTraining:
 
     def _steer(self, effort: float) -> None:
         """Tell a simulated source what the person is trying to do. Nothing, by default."""
+
+    heart = None
+    """The app's heart-rate runner, borrowed and never owned, when the program was given one."""
+    heart_choice = None
+
+    @property
+    def heart_on(self) -> bool:
+        """Whether a heart-rate source is chosen, so the heart panel and stats belong on the screen."""
+        return self.heart is not None and self.heart_choice is not None and self.heart_choice.on
+
+    def _heart_rate(self) -> float | None:
+        """The latest instantaneous heart rate, or None when there is no live reading to trust. A stale
+        runner holds its last reading, so a dead strap must not keep feeding one figure into the stats."""
+        if not self.heart_on or self.heart.stale or self.heart.error:
+            return None
+        state = self.heart.state
+        return state.hr_bpm if state is not None else None
 
     # --- what the operator sets -------------------------------------------------------------
 
@@ -660,23 +678,8 @@ class TrialView:
         self.history_text = ft.Text("", size=t.SMALL, color=t.MUTED)
         self.history_panel = panel("TRIALS", self.history_cells, ft.Container(height=8), self.history_text)
         self.heart = heart
-        words = session.DIRECTION_WORD
-        up, down = words[POSITIVE], words[NEGATIVE]
-        self._up_box, self._up_val, _, self._up_sub = stat_tile(up, 158, 20, "bpm from baseline", sub=True)
-        self._down_box, self._down_val, _, self._down_sub = stat_tile(down, 158, 20, "bpm from baseline",
-                                                                      sub=True)
-        self._run_box, self._run_val, self._run_unit, _ = stat_tile("run", 108, 17, "bpm")
-        self._effort_box, self._effort_val, _, _ = stat_tile("effort", 108, 17, "bpm")
-        self._rest_box, self._rest_val, _, _ = stat_tile("rest", 108, 17, "bpm")
-        self._heart_no_data = ft.Text("no heart readings yet", size=t.SMALL, color=t.MUTED)
-        self._heart_body = ft.Column([
-            ft.Row([self._up_box, self._down_box], spacing=10),
-            ft.Container(height=6),
-            ft.Text("the mean change over each direction's trials", size=t.SMALL, color=t.FAINT),
-            ft.Container(height=10), ft.Container(height=1, bgcolor=t.BORDER), ft.Container(height=10),
-            ft.Row([self._run_box, self._effort_box, self._rest_box], spacing=8),
-        ], spacing=0, visible=False)
-        self.heart_stats_panel = panel("HEART STATS", self._heart_no_data, self._heart_body)
+        self.heart_stats = HeartStats(session)
+        self.heart_stats_panel = self.heart_stats.panel
 
     def fixation_panel(self) -> ft.Control:
         side = self.circle_side
@@ -785,6 +788,34 @@ class TrialView:
         self.history_text.value = trial_summary(run, session.DIRECTION_WORD, session.UNITS.unit)
 
     def draw_heart_stats(self) -> None:
+        self.heart_stats.draw()
+
+
+class HeartStats:
+    """The HEART STATS panel: the mean heart-rate change from baseline for each direction, and the heart
+    rate over the run, in the effort windows and in the rests."""
+
+    def __init__(self, session: TrialTraining):
+        self.session = session
+        words = session.DIRECTION_WORD
+        up, down = words[POSITIVE], words[NEGATIVE]
+        self._up_box, self._up_val, _, self._up_sub = stat_tile(up, 158, 20, "bpm from baseline", sub=True)
+        self._down_box, self._down_val, _, self._down_sub = stat_tile(down, 158, 20, "bpm from baseline",
+                                                                      sub=True)
+        self._run_box, self._run_val, self._run_unit, _ = stat_tile("run", 108, 17, "bpm")
+        self._effort_box, self._effort_val, _, _ = stat_tile("effort", 108, 17, "bpm")
+        self._rest_box, self._rest_val, _, _ = stat_tile("rest", 108, 17, "bpm")
+        self._heart_no_data = ft.Text("no heart readings yet", size=t.SMALL, color=t.MUTED)
+        self._heart_body = ft.Column([
+            ft.Row([self._up_box, self._down_box], spacing=10),
+            ft.Container(height=6),
+            ft.Text("the mean change over each direction's trials", size=t.SMALL, color=t.FAINT),
+            ft.Container(height=10), ft.Container(height=1, bgcolor=t.BORDER), ft.Container(height=10),
+            ft.Row([self._run_box, self._effort_box, self._rest_box], spacing=8),
+        ], spacing=0, visible=False)
+        self.panel = panel("HEART STATS", self._heart_no_data, self._heart_body)
+
+    def draw(self) -> None:
         stats = self.session.heart_trials
         self._heart_no_data.visible = not stats.has_data
         self._heart_body.visible = stats.has_data

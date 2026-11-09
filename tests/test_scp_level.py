@@ -559,3 +559,42 @@ def test_music_is_offered_with_every_source_but_the_eeg_rhythm():
         assert session.state_balance is None, "no crossfade position between feedback windows"
     finally:
         session.stop()
+
+
+def test_a_chosen_heart_fills_the_heart_stats_beside_the_trials():
+    """As on Pupil and HEG: a heart chosen on the device screen reaches the screen, and how each direction's
+    effort moves it is gathered trial by trial. Without one, no heart panel appears."""
+    import types
+
+    from nfb_console.inputs import HeartChoice
+
+    class _Heart:
+        stale, error = False, None
+
+        def __init__(self, session):
+            self.session = session
+
+        @property
+        def state(self):
+            lift = 6.0 if self.session.trials.phase == ACTIVE else 0.0
+            return types.SimpleNamespace(hr_bpm=70.0 + lift)
+
+    plain = _session()
+    try:
+        assert not plain.heart_on
+    finally:
+        plain.stop()
+
+    session = scp_view.session_for(BY_CODE["SCP"], source=ReplaySource(str(BENCH_OK), realtime=False, loop=True),
+                                   channels=2, heart_choice=HeartChoice(kind="simulator"), heart_runner=None)
+    try:
+        session.heart = _Heart(session)
+        assert session.heart_on
+        session.toggle_pause()
+        _run(session, n_trials=4)
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        _drive(session, 60.0, uv=_compliant, start=nxt)
+        summary = session.heart_trials.direction_summary()
+        assert summary and all(change == pytest.approx(6.0, abs=0.5) for _, change, _ in summary)
+    finally:
+        session.stop()

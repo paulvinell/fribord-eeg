@@ -443,17 +443,6 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
     def trial_subject(self) -> str:
         return self.metric_spec.label
 
-    @property
-    def heart_on(self) -> bool:
-        """Whether a heart-rate source is chosen, so the heart panel and stats belong on the screen."""
-        return self.heart is not None and self.heart_choice is not None and self.heart_choice.on
-
-    def _heart_rate(self) -> float | None:
-        """The latest heart rate, or None when there is no live reading to trust."""
-        if not self.heart_on or self.heart.stale or self.heart.error:
-            return None
-        state = self.heart.state
-        return state.hr_bpm if state is not None else None
 
     def _observe_active(self, state) -> None:
         """One frame into the trial: the metric in standard deviations of the spread the trial was cued

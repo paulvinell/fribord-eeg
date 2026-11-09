@@ -100,8 +100,8 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
     module = importlib.import_module(f"nfb_console.{SCREENS[code]}")
     from nfb import ReplaySource
     heart_kwargs = {}
-    if code == "PUPIL" and state == "fed":
-        # Give the fed pupil shot a heart source, so the heart panel and its stats appear in the frame.
+    if code in ("PUPIL", "SCP") and state == "fed":
+        # Give the fed pupil and slow-potential shots a heart source, so the heart panel and its stats appear in the frame.
         from nfb_console import heart as heart_mod
         from nfb_console.inputs import HeartChoice
         hc = HeartChoice(kind="simulator")

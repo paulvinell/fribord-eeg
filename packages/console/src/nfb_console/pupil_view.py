@@ -197,18 +197,6 @@ class PupilSession(TrialTraining, LevelOutputs):
     def signal(self) -> float | None:
         return self._signal
 
-    @property
-    def heart_on(self) -> bool:
-        """Whether a heart-rate source is chosen, so the heart panel and stats belong on the screen."""
-        return self.heart is not None and self.heart_choice is not None and self.heart_choice.on
-
-    def _heart_rate(self) -> float | None:
-        """The latest instantaneous heart rate, or None when there is no live reading to trust. A stale
-        runner holds its last reading, so a dead strap must not keep feeding one figure into the stats."""
-        if not self.heart_on or self.heart.stale or self.heart.error:
-            return None
-        state = self.heart.state
-        return state.hr_bpm if state is not None else None
 
     @property
     def active_targets(self) -> list[Target]:

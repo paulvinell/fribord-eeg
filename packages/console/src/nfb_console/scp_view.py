@@ -39,15 +39,15 @@ import numpy as np
 from nfb import Device
 from nfb.dsp import SlowShift, shift_survival
 
-from . import chrome, cues, plan_pane, signal_pane, spectrum_pane, trace_rows, trends_pane
+from . import chrome, cues, heart_panel, plan_pane, signal_pane, spectrum_pane, trace_rows, trends_pane
 from . import theme as t
 from .plots import place_value_labels, signed_shapes, value_axis
 from .protocols import Protocol
 from .targets import Target
 from .traces import RawRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession, true_metric_hz
-from .trial_training import (DIRECTIONS, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows, trial_summary,
-                             verdict_line)
+from .trial_training import (DIRECTIONS, HeartStats, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows,
+                             trial_summary, verdict_line)
 from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, CUED, DEFAULT_TRIALS, ITI, ITI_RANGE_S,
                      NEGATIVE, POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
 from .target_card import NOTE_H
@@ -122,7 +122,10 @@ TRIAL_HELP = (
     "whole trial instead of freezing.\n\n"
     "A trial has *no result* if too much of its signal was artifacted, or if its baseline was too thin "
     "to use. It appears in the history but is excluded from every count. A blink's deflection lies in the "
-    "same band this protocol trains, so scoring a blink scores the blink instead of the trained signal."
+    "same band this protocol trains, so scoring a blink scores the blink instead of the trained signal.\n\n"
+    "When you choose a heart-rate source on the device screen, two heart panels appear beside the trials. "
+    "They show the mean heart-rate change from baseline for each direction, and the heart rate across the "
+    "run. A strategy that works through general arousal moves the heart in both directions."
 )
 
 HISTORY_HELP = (
@@ -235,9 +238,12 @@ class SCPSession(TrialTraining, TrainingSession):
 
     def __init__(self, protocol: Protocol, path: str | None = None,
                  device: Device | None = None, length_seconds: float | None = None,
-                 source=None, channels: int = 0):
+                 source=None, channels: int = 0, heart_choice=None, heart_runner=None):
         super().__init__(protocol, path=path, device=device, length_seconds=length_seconds,
                          source=source, channels=channels)
+        # Borrowed, not owned, as on Pupil and HEG: the heart beside the trials, when one is chosen.
+        self.heart_choice = heart_choice
+        self.heart = heart_runner
         if length_seconds is None:
             self.plan.set_length(SESSION_MINUTES)
 
@@ -311,9 +317,6 @@ class SCPSession(TrialTraining, TrainingSession):
         self._signal = signal
         if not smoothed:
             self._level = signal
-
-    def _heart_rate(self) -> float | None:
-        return None
 
     @property
     def state_balance(self) -> float | None:
@@ -462,8 +465,9 @@ class SCPSession(TrialTraining, TrainingSession):
 def session_for(*args, heart_choice=None, heart_runner=None, mendi_choice=None,
                 mendi_runner=None, pupil_choice=None, pupil_runner=None,
                 **kwargs) -> SCPSession:
-    _ = heart_choice, heart_runner, mendi_choice, mendi_runner, pupil_choice, pupil_runner
-    return SCPSession(*args, **kwargs)
+    """A heart, when one is chosen on the device screen, is shown beside the trials."""
+    _ = mendi_choice, mendi_runner, pupil_choice, pupil_runner
+    return SCPSession(*args, heart_choice=heart_choice, heart_runner=heart_runner, **kwargs)
 
 
 # --- names for what is on screen ----------------------------------------------------------------
@@ -706,10 +710,21 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
         panel("RAW", *traces.rows, ft.Container(height=6), traces.caption),
     ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
 
+    # The heart, when a source is chosen on the device screen: how each direction's effort moves it.
+    heart_stats = HeartStats(session) if session.heart_on else None
+    heart_ui = (heart_panel.HeartPanel(compact=True, width_of=lambda: max(200.0, SIDE_W - 60))
+                if session.heart_on else None)
+    heart_panels: list[ft.Control] = []
+    if heart_stats is not None and heart_ui is not None:
+        heart_panels = [ft.Container(height=12), heart_stats.panel, ft.Container(height=12),
+                        panel("HEART", *heart_ui.spectrum_rows(), ft.Container(height=10), heart_ui.tiles,
+                              ft.Container(height=8), heart_ui.source_note)]
+
     train_right = ft.Column([
         # The corner warning is the card's note — it was also printed under the card, which was one
         # sentence twice in one panel.
         panel("TRAINING", card.control),
+        *heart_panels,
     ], spacing=0, width=SIDE_W, scroll=ft.ScrollMode.AUTO)
 
     train_tab = ft.Container(content=ft.Row([train_left, train_right], spacing=14, expand=True),
@@ -808,6 +823,9 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
         trends.refresh()
         draw_trial()
         draw_history()
+        if heart_stats is not None and heart_ui is not None:
+            heart_ui.refresh(session.heart)
+            heart_stats.draw()
 
         ring, width = session.wave, plot_width()
         full = max(WAVE_FLOOR_UV, session.wave_uv)
