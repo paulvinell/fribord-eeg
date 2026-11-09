@@ -629,7 +629,7 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
     phase_text = ft.Text("", size=t.BODY, color=t.TEXT)
     count_text = ft.Text("", size=t.SMALL, color=t.MUTED)
     transfer_badge = ft.Container(
-        content=ft.Text("transfer", size=t.SMALL, color=t.MUTED),
+        content=ft.Text("no feedback", size=t.SMALL, color=t.MUTED),
         # Faded rather than hidden between transfer trials, so the row it sits in never reflows.
         padding=ft.Padding(7, 3, 7, 3), border_radius=5, bgcolor=t.SURFACE_HI, opacity=0.0)
     transfer_note = ft.Text("", size=t.SMALL, color=t.FAINT)
