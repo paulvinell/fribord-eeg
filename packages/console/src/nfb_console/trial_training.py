@@ -767,7 +767,7 @@ class TrialView:
             # The whole width of the panel, so the switch from dim to bright is the largest change on the
             # screen. The border is there in both states, in the ground's own colour when dim, so the
             # switch never moves anything.
-            self.ground = ft.Container(content=circle, padding=ft.Padding(0, 16, 0, 16), border_radius=8,
+            self.ground = ft.Container(content=circle, padding=ft.Padding(0, 6, 0, 6), border_radius=8,
                                        bgcolor=t.SURFACE_HI, border=ft.Border.all(2, t.SURFACE_HI))
             circle = self.ground
         return panel(title,
