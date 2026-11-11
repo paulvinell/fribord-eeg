@@ -9,4 +9,5 @@ nfb = { workspace = true }
 dev = ["pytest>=8"]
 # Only for `make shots`, which renders the screens so they can be looked at. Kept out of `dev` because
 # it pulls a browser down and the test suite does not need one.
-shots = ["playwright>=1.40"]
+# The web server is locked here, or Flet pip-installs it unpinned; flet-web 0.86 breaks on fastapi 0.145.
+shots = ["playwright>=1.40", "flet[web]", "fastapi>=0.115.12,<0.145"]
