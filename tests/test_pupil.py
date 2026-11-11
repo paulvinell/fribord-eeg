@@ -559,13 +559,42 @@ def test_the_circle_mirrors_the_pupil_not_the_goal():
     s = PupilSession(BY_CODE["PUPIL"], choice=PupilChoice(kind="simulator"))
     try:
         s.set_full_at(0.3)
-        assert s.circle_level(+0.3) > 0.9 and s.circle_level(-0.3) < 0.1, "bigger pupil, bigger circle"
+        assert s.circle_level(+0.3) > 0.75 and s.circle_level(-0.3) < 0.25, "bigger pupil, bigger circle"
         assert s.circle_level(0.0) == pytest.approx(0.5)
         # same pupil shift gives the same circle size regardless of the trial's direction
         s.trials.required = "negative"
         down = s.circle_level(+0.15)
         s.trials.required = "positive"
         assert s.circle_level(+0.15) == down
+    finally:
+        s.stop()
+
+
+def test_the_circle_never_sticks_at_its_limit():
+    """The picture is in proportion up to `full_at`, then compresses toward its limit without reaching it,
+    so a shift three times `full_at` still draws further out than one and a half times it. The level the
+    outputs read keeps its clip."""
+    from nfb_console.trial_training import FULL_AT_PART, picture_position
+    from nfb_console.pupil_view import PupilSession
+    from nfb_console.protocols import BY_CODE
+    from nfb_console.inputs import PupilChoice
+
+    assert picture_position(10.0, 10.0) == pytest.approx(FULL_AT_PART), "full at lands at a stated part"
+    assert picture_position(5.0, 10.0) == pytest.approx(FULL_AT_PART / 2), "in proportion below it"
+    shifts = [0.5 * i for i in range(-200, 201)]
+    positions = [picture_position(x, 10.0) for x in shifts]
+    assert all(b > a for a, b in zip(positions, positions[1:])), "monotonic"
+    assert all(-1.0 < p < 1.0 for p in positions), "never at the limit"
+    assert picture_position(30.0, 10.0) - picture_position(15.0, 10.0) > 0.1, "30 is visibly past 15"
+    knee = [picture_position(10.0 + d, 10.0) - picture_position(10.0, 10.0) for d in (-1e-4, 1e-4)]
+    assert knee[1] == pytest.approx(-knee[0], rel=1e-2), "no kink at the knee"
+
+    s = PupilSession(BY_CODE["PUPIL"], choice=PupilChoice(kind="simulator"))
+    try:
+        s.set_full_at(0.3)
+        s.trials.required = "positive"
+        assert 0.0 < s.circle_level(-0.9) < s.circle_level(-0.45) < 0.5
+        assert s.trial_level(-0.9) == s.trial_level(-0.45) == 0.0, "the outputs still clip"
     finally:
         s.stop()
 

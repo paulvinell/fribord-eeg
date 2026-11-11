@@ -88,6 +88,28 @@ class TrialUnits:
     decimals: int = 2           # how many decimals a shift is written with
 
 
+FULL_AT_PART = 0.6
+"""How far from the baseline toward its limit the feedback picture is at `full_at`. The rest of the way is
+for the shifts past it, which real sessions produce: a slow potential moves 20 µV against a 10 µV default."""
+
+
+def picture_position(shift: float, full_at: float) -> float:
+    """A shift as a signed position for the feedback picture, between -1 and 1 and never at either.
+
+    In proportion up to `full_at`, which lands at `FULL_AT_PART`; past it, `over / (over + k)` toward the
+    limit, with `k` chosen so the slope does not change at the knee. A clipped picture drew 15 and 30 µV
+    the same at a 10 µV `full_at`; here they sit at 77% and 90%. The picture only: `trial_level`, which
+    the sound, the shadow, the click and the music read, keeps its clip.
+    """
+    u = abs(shift) / full_at
+    if u <= 1.0:
+        part = FULL_AT_PART * u
+    else:
+        over, k = u - 1.0, (1.0 - FULL_AT_PART) / FULL_AT_PART
+        part = FULL_AT_PART + (1.0 - FULL_AT_PART) * over / (over + k)
+    return math.copysign(part, shift)
+
+
 def _duration(seconds: float) -> str:
     minutes = round(seconds / 60.0)
     return f"{minutes} min" if minutes >= 1 else f"{seconds:.0f} s"
@@ -359,10 +381,11 @@ class TrialTraining:
     def circle_level(self, shift: float | None) -> float | None:
         """The feedback circle's size, **mirroring the signal, not the goal**: bigger than the baseline
         when the signal is higher, smaller when it is lower, whichever direction the trial asks for. The
-        colour, not the size, says whether that was the way the cue asked."""
+        colour, not the size, says whether that was the way the cue asked. **It never sticks**: past
+        `full_at` it compresses (`picture_position`) where `trial_level` clips."""
         if shift is None:
             return None
-        return min(1.0, max(0.0, 0.5 + shift / (2 * max(self.UNITS.min_full_at, self.full_at))))
+        return 0.5 + 0.5 * picture_position(shift, max(self.UNITS.min_full_at, self.full_at))
 
     def no_level_note(self) -> tuple[str, str] | None:
         """Why there is no level between efforts, in active mode."""
