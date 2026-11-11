@@ -739,6 +739,33 @@ def test_the_baseline_is_dim_and_draws_its_ring_with_no_circle_and_no_arrows():
         session.stop()
 
 
+def test_the_arrows_stay_through_a_feedback_window_with_no_circle():
+    """The arrows are the goal. A trial without feedback still asks for a direction, so its window shows
+    the arrows and no circle."""
+    import flet.canvas as cv
+
+    session = _session()
+    try:
+        ui = _ring_view(session)
+        session.toggle_pause()
+        run = _run(session, n_trials=3, transfer=1.0)
+        seen: list = []
+
+        def watch() -> None:
+            if run.phase == ACTIVE:
+                ui.draw_fixation("")
+                seen.append(list(ui.circle.shapes))
+
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        _drive(session, 25.0, uv=_compliant, start=nxt, watch=watch)
+        assert seen, "a feedback window ran"
+        for shapes in seen:
+            assert not _solid_circles(shapes), "no circle"
+            assert len([s for s in shapes if isinstance(s, cv.Path)]) == 4, "the four arrows"
+    finally:
+        session.stop()
+
+
 def test_the_feedback_shows_the_mean_so_far_as_a_thin_ring():
     """The trial is scored on the mean of the window, so a thin ring shows that mean as the window runs."""
     from nfb_console.trial_training import _radii

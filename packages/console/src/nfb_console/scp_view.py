@@ -129,7 +129,7 @@ TRIAL_HELP = (
     "circle stays at the mean shift, green for a success and red for a failure. The line under the "
     "circle says what the trial asked for, and how far and which way the slow potential went.\n\n"
     "A trial without feedback has the cue and the verdict, but no circle. The circle stays hidden for the "
-    "whole feedback window instead of freezing.\n\n"
+    "whole feedback window instead of freezing. The arrows stay, because the direction still applies.\n\n"
     "A trial has *no result* if too much of its signal was artifacted, or if its baseline was too thin "
     "to use. It appears in the history but is excluded from every count. A blink's deflection lies in the "
     "same band this protocol trains, so scoring a blink scores the blink instead of the trained signal.\n\n"

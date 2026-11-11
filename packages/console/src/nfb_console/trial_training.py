@@ -870,10 +870,15 @@ class TrialView:
                 self.verdict_text.value = verdict_line(last, words, session.trial_subject, session.UNITS)
         arrows = None
         lead_in = run.phase in (CUED, BASELINE)
-        if (run.phase in (CUED, BASELINE, ACTIVE) and not run.transfer and required is not None
-                and session.direction_known()
-                and not (run.phase == ACTIVE and not session.feedback_now)
-                and not (self.distinct_phases and lead_in)):
+        asked = required is not None and session.direction_known()
+        if self.distinct_phases:
+            # The arrows are the goal, and the goal holds for the whole window: with the circle off, and
+            # in a trial without feedback, they still say which way to go.
+            shown = asked and run.phase == ACTIVE
+        else:
+            shown = (asked and run.phase in (CUED, BASELINE, ACTIVE) and not run.transfer
+                     and not (run.phase == ACTIVE and not session.feedback_now))
+        if shown:
             arrows = "shrink" if required == NEGATIVE else "expand"
         if not self.distinct_phases:
             self.circle.shapes = circle_shapes(self.circle_side, level, colour, arrows=arrows)
