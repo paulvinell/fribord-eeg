@@ -212,6 +212,7 @@ def test_each_trial_is_cued_and_only_a_success_is_marked():
     """
     session = _session()
     try:
+        session.set_trial_direction("alternating")      # a direction named at the cue: one tone per trial
         session.toggle_pause()
         run = _run(session, n_trials=6)
         played: list[str] = []
@@ -472,11 +473,17 @@ def test_session_for_ignores_the_other_sources():
 
 def test_a_fresh_run_is_the_published_protocol():
     """The shared trial piece brings settings the published protocol does not use. Each starts where that
-    protocol is: both directions, shuffled and named at the cue, the baseline at the cue, a third of the
-    trials without a display, feedback for the whole window, live, full at 10 µV, any shift succeeds."""
+    protocol is: both directions in a balanced order, the baseline at the cue, a third of the trials without
+    a display, feedback for the whole window, live, full at 10 µV, any shift succeeds. The one departure is
+    that the direction is random, hidden until the feedback, so the baseline cannot be pushed the other way.
+    The choices are the four every trial program offers, and nothing more."""
+    from nfb_console.trial_training import DIRECTIONS
+
     session = _session()
     try:
-        assert session.trial_direction == "shuffled" and not session.hides_direction
+        assert list(session.DIRECTIONS) == ["increase", "decrease", "alternating", "random"]
+        assert session.DIRECTIONS is DIRECTIONS and "shuffled" not in session.DIRECTIONS
+        assert session.trial_direction == "random" and session.hides_direction
         assert session.transfer_fraction == pytest.approx(1 / 3)
         assert session.feedback_window_s == session.TIMING.active_s and session.update_s == 0.0
         assert (session.full_at, session.success_at) == (10.0, 0.0)
@@ -494,6 +501,7 @@ def test_the_cue_tones_are_an_octave_apart_and_a_success_doubles_its_tone():
 
     session = _session()
     try:
+        session.set_trial_direction("alternating")      # a direction named at the cue: no middle tone
         heard: list = []
         session.cue = lambda sound, volume=None: heard.append((sound, volume))
         session.toggle_pause()
@@ -506,6 +514,31 @@ def test_the_cue_tones_are_an_octave_apart_and_a_success_doubles_its_tone():
         assert all(volume == 25 for _, volume in heard)
         assert any(sound in (cues.held(cues.tone_at(620.0)), cues.held(cues.tone_at(310.0)))
                    for sound, _ in heard), "a compliant trial succeeds and doubles its tone"
+    finally:
+        session.stop()
+
+
+def test_the_random_default_sounds_a_neutral_cue_and_names_the_direction_as_the_feedback_starts():
+    """The cue tone is the one between the two, and the screen does not know the direction through the cue
+    and the baseline. The direction tone sounds as the feedback starts, so the baseline cannot be pushed the
+    other way to make the shift look larger."""
+    from nfb_console import cues
+    from nfb_console.trial_training import CUE_PITCH_NEUTRAL
+    from nfb_console.trials import BASELINE, CUED
+
+    session = _session()
+    try:
+        heard: list = []
+        session.cue = lambda sound, volume=None: heard.append(sound)
+        session.toggle_pause()
+        _run(session, n_trials=2)
+        known: dict[str, set] = {}
+        watch = lambda: known.setdefault(session.trials.phase, set()).add(session.direction_known())  # noqa: E731
+        nxt = _drive(session, 3.0, uv=lambda _s: 0.0)
+        _drive(session, 30.0, uv=_compliant, start=nxt, watch=watch)
+        assert heard[0] == cues.tone_at(CUE_PITCH_NEUTRAL), "the cue does not name the direction"
+        assert heard[1] in (cues.tone_at(620.0), cues.tone_at(310.0)), "the direction tone comes next"
+        assert known.get(CUED, set()) | known[BASELINE] == {False} and known[ACTIVE] == {True}
     finally:
         session.stop()
 

@@ -46,7 +46,7 @@ from .protocols import Protocol
 from .targets import Target
 from .traces import RawRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession, true_metric_hz
-from .trial_training import (DIRECTIONS, HeartStats, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows,
+from .trial_training import (HeartStats, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows,
                              trial_summary, verdict_line)
 from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, CUED, DEFAULT_TRIALS, ITI, ITI_RANGE_S,
                      NEGATIVE, POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
@@ -70,11 +70,6 @@ noise."""
 
 UNITS = TrialUnits(unit="µV", full_at=DEFAULT_RANGE_UV, min_full_at=MIN_RANGE_UV, max_full_at=100.0,
                    max_success=50.0, step=1.0, decimals=1)
-
-SCP_DIRECTIONS = {**DIRECTIONS, "shuffled": DIRECTIONS["random"]}
-"""The shared choices, and **shuffled**: both directions in a shuffled order, each named at its cue. That is
-the published protocol and this screen's default. The shared **random** shuffles too, but hides the
-direction until the feedback starts."""
 
 BEST_CORNER_HZ = 0.01
 SURVIVAL_FLOOR = 0.5
@@ -173,12 +168,12 @@ SIGNAL_HELP = (
 RUN_HELP = (
     "Changing **direction**, **trials**, **baseline starts**, **without feedback** or **succeeds at** "
     "starts the run again. Results measured under one setting are not results under another.\n\n"
-    "**direction** sets which shifts the run asks for. *shuffled* mixes up and down trials in a "
-    "shuffled order, and the tone at the cue names the direction. This is the usual protocol. "
-    "*alternating* asks for up and down in turn. *increase* and *decrease* ask for one direction only. "
-    "*random* mixes the two directions, but the tone at the cue does not name the direction. The "
-    "direction tone sounds when the feedback starts. Then you cannot push the signal the other way "
-    "during the baseline to make the shift look larger.\n\n"
+    "**direction** sets which shifts the run asks for. *random* asks for up and down in an order that "
+    "you cannot predict, with the same number of each. The tone at the cue does not name the direction. "
+    "The direction tone sounds when the feedback starts. Then you cannot push the signal the other way "
+    "during the baseline to make the shift look larger. *alternating* asks for up and down in turn. "
+    "*increase* and *decrease* ask for one direction only. With these three, the tone at the cue names "
+    "the direction.\n\n"
     f"**trials** sets the block size. A trial takes about 12 s, so {DEFAULT_TRIALS} trials take about "
     f"{round(DEFAULT_TRIALS * 12 / 60)} minutes.\n\n"
     "**baseline starts** sets the time from the tone to the start of the baseline. At 0 s the baseline "
@@ -207,8 +202,7 @@ class SCPSession(TrialTraining, TrainingSession):
     TIMING = TIMING
     UNITS = UNITS
     DIRECTION_WORD = {POSITIVE: "up", NEGATIVE: "down"}
-    DIRECTIONS = SCP_DIRECTIONS
-    DEFAULT_DIRECTION = "shuffled"
+    DEFAULT_DIRECTION = "random"
     trial_subject = "the slow potential"
 
     offers = ("sound", "shadow", "click", "music")
