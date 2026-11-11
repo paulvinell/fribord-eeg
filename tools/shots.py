@@ -64,6 +64,7 @@ SHOTS = [("launcher", "", 0)] + [
     for code in ("AMP", "CFC", "PAC", "ILF", "A-T", "SCP", "WAVE")
     for state in STATES
     for channels in ((1, 4) if code == "PAC" else (2,))
+] + [("SCP", phase, 2) for phase in ("rest", "baseline", "feedback", "wrong", "off", "success", "failure")
 ] + [("HRV", "cold", 0)] + [("HEG", state, 0) for state in STATES] + [   # their own devices drive them
     ("PUPIL", state, 0) for state in STATES] + [
     ("PAIR", state, 0) for state in STATES] + [
@@ -110,6 +111,8 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         session = _paired_session(module)
     elif code == "HEG" and state == "fed":
         session = _heg_trials(module)
+    elif code == "SCP" and state not in STATES:
+        session = _scp_phase(module, state, channels)
     else:
         session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
                                      channels=channels, **heart_kwargs)
@@ -117,6 +120,8 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
     control = module.view(page, session, bar, lambda: None)
     if state == "fed" and code == "PUPIL":
         feed_pupil(session)
+        session.redraw()
+    elif code == "SCP" and state not in STATES:
         session.redraw()
     elif state == "fed" and code in ("PAIR", "HEG"):
         session.redraw()
@@ -172,6 +177,52 @@ def _heg_trials(module):
     while len(session.trials.results) < 2 or session.trials.phase != "active":
         t = _push(session, 0.5, t, rise=0.6 if len(session.trials.results) else 1.2)
     t = _push(session, 8.0, t, rise=1.0)
+    session.paused = True       # the shot is a still
+    return session
+
+
+def _scp_phase(module, phase: str, channels: int):
+    """SCP stopped in one phase of its third trial, at once: the trial panel in each of its pictures.
+    Two trials of history go first; the third goes the cued way, or 30 µV the wrong way for `wrong` and
+    `failure`. `off` shows the circle for 3 s of the 6. The direction is the default, random, so the
+    baseline is the hidden-direction picture."""
+    import math
+
+    from nfb import ReplaySource
+    from nfb_console.training import true_metric_hz
+    from nfb_console.trials import ACTIVE, BASELINE, ITI, POSITIVE, RESULT, TrialRun
+
+    session = module.session_for(BY_CODE["SCP"], source=ReplaySource(str(BENCH_OK), realtime=False),
+                                 channels=channels)
+    session.cue = lambda *_a, **_k: True
+    if phase == "off":
+        session.feedback_window_s = 3.0
+    session.trials = TrialRun(n_trials=20, transfer_fraction=0.0, seed=5,
+                              metric_hz=true_metric_hz(session.rate))
+    session.paused = False
+    run, spec = session.trials, session.specs[session.channel]
+    wrong = phase in ("wrong", "failure")
+    target, into = {"rest": (ITI, 1.5), "baseline": (BASELINE, 1.0), "feedback": (ACTIVE, 4.5),
+                    "wrong": (ACTIVE, 4.5), "off": (ACTIVE, 4.5), "success": (RESULT, 0.5),
+                    "failure": (RESULT, 0.5)}[phase]
+    lengths = {ITI: 2.0, BASELINE: run.baseline_s, ACTIVE: run.active_s, RESULT: run.result_s}
+
+    def shift() -> float:
+        if run.phase != ACTIVE or run.required is None:
+            return 0.0
+        tau = run.active_s - run.phase_remaining()
+        cued = 1.0 if run.required == POSITIVE else -1.0
+        size = -30.0 if wrong and len(run.results) == 2 else 12.0
+        return cued * (size * (1.0 - math.exp(-tau / 1.2)) + 1.5 * math.sin(2.0 * tau))
+
+    i = 0
+    while True:
+        if (len(run.results) >= (3 if target == RESULT else 2) and run.phase == target
+                and lengths[target] - run.phase_remaining() >= into):
+            break
+        samples = tuple(int(shift() / spec.scale) for _ in range(8))
+        session.consume(Block(spec.index, i, samples, spec))
+        i += 8
     session.paused = True       # the shot is a still
     return session
 
