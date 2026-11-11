@@ -24,8 +24,13 @@ constantly by construction — half a trial's readings are on the wrong side of 
 an alert would fire on the ordinary behaviour of the signal. Music is offered, as on the other trial screens.
 
 **A transfer trial has a cue and a verdict and no display.** That is what weans the skill off the screen,
-and it is why the live bar is *hidden* rather than frozen during one: a bar that stopped moving reads as a
-fault, where an absent one reads as the design — which the badge on the panel says in words.
+and it is why the live circle is *hidden* rather than frozen during one: a circle that stopped moving reads
+as a fault, where an absent one reads as the design — which the line under it says in words.
+
+**The display is the shared fixation circle** (`trial_training.TrialView`), the one Pupil and HEG train
+with, because a slow potential needs a still gaze and the circle gives the eyes a point to hold. It is
+drawn with `distinct_phases`, so the baseline cannot be taken for the feedback: dim with a ring drawing
+itself through the lead-in, bright with the moving circle through the feedback window.
 """
 
 from __future__ import annotations
@@ -46,10 +51,10 @@ from .protocols import Protocol
 from .targets import Target
 from .traces import RawRing, TraceBuffer, WaveRing
 from .training import METRIC_HZ, TrainingSession, true_metric_hz
-from .trial_training import (HeartStats, TrialTiming, TrialTraining, TrialUnits, trial_settings_rows,
-                             trial_summary, verdict_line)
-from .trials import (ACTIVE, ACTIVE_S, BASELINE, BASELINE_S, CUED, DEFAULT_TRIALS, ITI, ITI_RANGE_S,
-                     NEGATIVE, POSITIVE, RESULT, RESULT_S, TRANSFER_FRACTION)
+from .trial_training import (TrialTiming, TrialTraining, TrialUnits, TrialView, trial_settings_rows,
+                             trial_summary)
+from .trials import (ACTIVE, ACTIVE_S, BASELINE_S, DEFAULT_TRIALS, ITI_RANGE_S, NEGATIVE, POSITIVE,
+                     RESULT, RESULT_S, TRANSFER_FRACTION)
 from .target_card import NOTE_H
 from .widgets import button, help_button, labelled, num_box, panel, pill, test_button
 
@@ -94,7 +99,7 @@ AXIS_W = 44
 WAVE_H = 170
 TRACE_H = 74
 BAR_W = 200
-LEVEL_H = 22
+CIRCLE_SIDE = 320
 CELL_W, CELL_H = 11, 16
 RUN_LABEL_W = 104
 
@@ -106,15 +111,25 @@ TRIAL_HELP = (
     "feedback starts.\n\n"
     "The baseline is the average of the first two seconds. Everything after it is measured against this "
     "baseline.\n\n"
-    "Six seconds of feedback follow. The bar shows the shift against the baseline. Right is always the "
-    "cued direction, so on a down trial, a fall fills the bar to the right. The trial is scored on the "
-    "mean of those six seconds, not on any single instant. A brief spike does not earn the trial, and a "
-    "brief lapse does not lose it.\n\n"
+    "Keep your eyes on the point in the middle of the circle for the whole run. Eye movements change the "
+    "slow potential, and a still gaze keeps them out of the signal.\n\n"
+    "During the cue and the baseline, the ground behind the point is grey. A dashed ring draws itself "
+    "around the point. The ring is complete when the feedback starts. Do not do the task while the ring "
+    "draws.\n\n"
+    "When the feedback starts, the ground changes to white, and the circle and the arrows appear. The circle "
+    "shows the slow potential against the baseline. It grows when the potential goes up and it shrinks "
+    "when the potential goes down, on every trial. The arrows show the cued direction: out for up, in for "
+    "down. The circle is blue on the cued side of the dashed ring and grey on the other side.\n\n"
+    "The circle moves in proportion to the shift up to **full at**. Past that value, it moves less and "
+    "less, but it never stops. A shift of three times **full at** shows further out than a shift of two "
+    "times **full at**.\n\n"
+    "The trial is scored on the mean of the six seconds, not on one instant. A thin faint ring shows "
+    "that mean so far. A brief spike does not earn the trial, and a brief lapse does not lose it.\n\n"
     "A success sounds the trial's cue tone twice. A failure and a trial with no result stay silent. The "
-    "line under the bar then says what the trial asked for, and how far and which way the slow potential "
-    "went.\n\n"
-    "A trial without feedback has the cue and the verdict, but no display. The bar stays hidden for the "
-    "whole trial instead of freezing.\n\n"
+    "circle stays at the mean shift, green for a success and red for a failure. The line under the "
+    "circle says what the trial asked for, and how far and which way the slow potential went.\n\n"
+    "A trial without feedback has the cue and the verdict, but no circle. The circle stays hidden for the "
+    "whole feedback window instead of freezing.\n\n"
     "A trial has *no result* if too much of its signal was artifacted, or if its baseline was too thin "
     "to use. It appears in the history but is excluded from every count. A blink's deflection lies in the "
     "same band this protocol trains, so scoring a blink scores the blink instead of the trained signal.\n\n"
@@ -135,7 +150,7 @@ HISTORY_HELP = (
     "The mean shift says more than the count. A direction whose mean leans the cued way shows control "
     "that grows before many trials pass the success margin. A mean the wrong way shows a strategy that "
     "works backwards.\n\n"
-    "When the run has trials without feedback, they get their own lines. A shift held without the bar is "
+    "When the run has trials without feedback, they get their own lines. A shift held without the circle is "
     "the real test of control. Trials with no result are in no line and are counted on their own. A run "
     "with many of them is a wiring problem rather than a poor session."
 )
@@ -156,6 +171,8 @@ SIGNAL_HELP = (
     "It reads 0% for a 10 µV shift the wrong way, and 50% at the baseline. The condition, and so the "
     "click, starts at 50%. Narrow the range and small shifts swing the output further, but the output "
     "then stays at 0% or 100% more often. Widen the range and the output moves less.\n\n"
+    "The circle in the trial panel does not stop at **full at**. It moves in proportion up to that value, "
+    "and less and less past it, so a large shift still shows.\n\n"
     "This number is not the success criterion. The success margin, judged on the mean of the whole "
     "feedback window, decides the trial. This number only sets how much of the output's travel a given "
     "shift uses.\n\n"
@@ -182,10 +199,10 @@ RUN_HELP = (
     f"**without feedback** sets the share of trials that run without a display. It starts at "
     f"{TRANSFER_FRACTION:.0%}, a typical share for an experienced trainee. For a first session, set it "
     "to 0%.\n\n"
-    "**show bar for** sets how long the bar shows in each feedback window. After that time, the bar goes "
-    "off and you hold the shift without it. The trial is still scored on the whole window.\n\n"
-    "**update every** sets how often the bar moves. At 0 s the bar follows the shift live. At 2 s the bar "
-    "shows the mean of the last 2 s and moves in steps.\n\n"
+    "**show circle for** sets how long the circle shows in each feedback window. After that time, the "
+    "circle goes off and you hold the shift without it. The trial is still scored on the whole window.\n\n"
+    "**update every** sets how often the circle moves. At 0 s the circle follows the shift live. At 2 s "
+    "the circle shows the mean of the last 2 s and moves in steps.\n\n"
     "**succeeds at** sets how far past the baseline the mean shift must go to count. A run starts at "
     "0 µV, so any shift in the cued direction counts. Raise it when the direction is reliable."
 )
@@ -203,7 +220,10 @@ class SCPSession(TrialTraining, TrainingSession):
     UNITS = UNITS
     DIRECTION_WORD = {POSITIVE: "up", NEGATIVE: "down"}
     DEFAULT_DIRECTION = "random"
+    PHASE_WORD = TrialTraining.PHASE_WORD | {ACTIVE: "feedback", RESULT: "verdict"}
+    RESTART_PLACE = "the training panel"
     trial_subject = "the slow potential"
+    trial_waiting = "no readings yet"
 
     offers = ("sound", "shadow", "click", "music")
     """No alert: the condition here is a trial's own baseline, which the signal crosses constantly by
@@ -298,6 +318,15 @@ class SCPSession(TrialTraining, TrainingSession):
     def set_mode(self, mode: str) -> None:
         """One mode only: the protocol is the trials."""
 
+    def trial_hold(self) -> str | None:
+        """The run waits for the filter to settle, for the reason `consume` gives. `consume` holds the
+        readings back; this says why under the circle."""
+        if self.metric is None:
+            return "no channel to measure"
+        if not self.settled:
+            return f"the filter is settling · {self.metric.warmup:.0%} through"
+        return None
+
     def _go_quiet(self) -> None:
         """No level, and the outputs handed back: without that the sound and the shadow hold their last
         value through the whole rest interval, which says "you are still doing it" while nobody is."""
@@ -307,7 +336,7 @@ class SCPSession(TrialTraining, TrainingSession):
 
     def _move_level(self, signal: float, t: float, smoothed: bool = True) -> None:
         """The trial's level, oriented toward the cue by the trial piece. Stepwise feedback is already in
-        steps, so it skips the session's smoother: the outputs jump with the bar instead of gliding."""
+        steps, so it skips the session's smoother: the outputs jump with the circle instead of gliding."""
         self._signal = signal
         if not smoothed:
             self._level = signal
@@ -464,13 +493,6 @@ def session_for(*args, heart_choice=None, heart_runner=None, mendi_choice=None,
     return SCPSession(*args, heart_choice=heart_choice, heart_runner=heart_runner, **kwargs)
 
 
-# --- names for what is on screen ----------------------------------------------------------------
-
-PHASE_NAME = {CUED: "cue", BASELINE: "baseline", ACTIVE: "feedback", RESULT: "verdict", ITI: "rest"}
-
-DIRECTION_TEXT = {POSITIVE: "▲ shift up", NEGATIVE: "▼ shift down"}
-
-
 def _duration(seconds: float) -> str:
     return f"{seconds / 60:.1f} min" if seconds >= 90 else f"{seconds:.0f} s"
 
@@ -556,10 +578,10 @@ class SCPCard:
             help_button(self.page, "What is measured", SIGNAL_HELP),
         ]
         # Where a threshold's mode row goes on every other card. What is chosen here is the run's shape:
-        # the shared trial rows, with the bar as what the feedback shows and the wait from the cue to the
-        # baseline, which only this screen sets. The panel's `?` says that changing one starts the run again.
+        # the shared trial rows, with the wait from the cue to the baseline, which only this screen sets.
+        # The panel's `?` says that changing one starts the run again.
         self.run_rows.controls = trial_settings_rows(
-            session, self._changed, display="bar", cue_gap=True,
+            session, self._changed, cue_gap=True,
             help=help_button(self.page, "The run", RUN_HELP), width=RUN_LABEL_W)
         self.page.update()
 
@@ -574,7 +596,7 @@ class SCPCard:
     def refresh(self) -> None:
         session = self.session
         run = session.trials
-        # What the feedback shows, not the live shift: in a trial without a display, after the bar fades
+        # What the feedback shows, not the live shift: in a trial without a display, after the circle fades
         # and between steps, a live number here would be the feedback the trial withholds.
         shift = session.shown_shift if session.feedback_now else None
         full = max(session.full_at, MIN_RANGE_UV)
@@ -622,26 +644,8 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
 
     trends = trends_pane.TrendsPane(page, session, plot_width)
 
-    # ---- the trial panel ----
-    direction_text = ft.Text("", size=26, color=t.FAINT, weight=ft.FontWeight.W_500)
-    phase_text = ft.Text("", size=t.BODY, color=t.TEXT)
-    count_text = ft.Text("", size=t.SMALL, color=t.MUTED)
-    transfer_badge = ft.Container(
-        content=ft.Text("no feedback", size=t.SMALL, color=t.MUTED),
-        # Faded rather than hidden between transfer trials, so the row it sits in never reflows.
-        padding=ft.Padding(7, 3, 7, 3), border_radius=5, bgcolor=t.SURFACE_HI, opacity=0.0)
-    transfer_note = ft.Text("", size=t.SMALL, color=t.FAINT)
-
-    trial_fill = ft.Container(width=0, height=LEVEL_H, border_radius=5, bgcolor=t.ACCENT_DIM,
-                              left=0, bottom=0)
-    trial_mark = ft.Container(width=1.5, height=LEVEL_H, bgcolor=t.MUTED, left=0, bottom=0)
-    trial_track = ft.Stack([ft.Container(width=0, height=LEVEL_H, border_radius=5,
-                                         bgcolor=t.SURFACE_HI, left=0, bottom=0),
-                            trial_fill, trial_mark], height=LEVEL_H)
-    # Always present: hiding it between trials changed the panel's height every twelve seconds.
-    trial_bar = ft.Container(content=trial_track)
-    trial_caption = ft.Text("", size=t.SMALL, color=t.FAINT)
-    verdict_text = ft.Text("", size=t.SMALL, color=t.MUTED)
+    # ---- the trial panel: the shared fixation circle, each phase its own picture ----
+    trial_ui = TrialView(session, CIRCLE_SIDE, heart=session.heart_on, distinct_phases=True)
 
     # ---- the history strip ----
     history_cells = ft.Row(spacing=3, wrap=True)
@@ -676,16 +680,7 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
         page.update()
 
     train_left = ft.Column([
-        panel("TRIAL",
-              ft.Row([direction_text, ft.Container(width=18),
-                      ft.Column([ft.Row([phase_text, ft.Container(width=10), transfer_badge],
-                                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                                 ft.Container(height=3), count_text], spacing=0),
-                      ft.Container(expand=True)],
-                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
-              ft.Container(height=10), trial_bar,
-              ft.Container(height=6), trial_caption, verdict_text, transfer_note,
-              help=help_button(page, "How a trial runs", TRIAL_HELP)),
+        trial_ui.fixation_panel("TRIAL", help=help_button(page, "How a trial runs", TRIAL_HELP)),
         ft.Container(height=12),
         panel("HISTORY", history_cells, ft.Container(height=8), history_text,
               help=help_button(page, "The run so far", HISTORY_HELP)),
@@ -705,12 +700,11 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
     ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
 
     # The heart, when a source is chosen on the device screen: how each direction's effort moves it.
-    heart_stats = HeartStats(session) if session.heart_on else None
     heart_ui = (heart_panel.HeartPanel(compact=True, width_of=lambda: max(200.0, SIDE_W - 60))
                 if session.heart_on else None)
     heart_panels: list[ft.Control] = []
-    if heart_stats is not None and heart_ui is not None:
-        heart_panels = [ft.Container(height=12), heart_stats.panel, ft.Container(height=12),
+    if heart_ui is not None:
+        heart_panels = [ft.Container(height=12), trial_ui.heart_stats_panel, ft.Container(height=12),
                         panel("HEART", *heart_ui.spectrum_rows(), ft.Container(height=10), heart_ui.tiles,
                               ft.Container(height=8), heart_ui.source_note)]
 
@@ -734,56 +728,6 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
         page.update()
 
     tabs = chrome.Tabs(["Train", "Spectrum", "Trends", "Feedback", "Session"], select_tab)
-
-    def draw_trial() -> None:
-        run = session.trials
-        running = run.required is not None and run.phase in (CUED, BASELINE, ACTIVE, RESULT)
-        if run.done:
-            direction_text.value = f"done · {len(run.results)} trials"
-            direction_text.color = t.MUTED
-        elif running and not session.direction_known():
-            direction_text.value = "?"
-            direction_text.color = t.FAINT
-        elif running:
-            direction_text.value = DIRECTION_TEXT[run.required]
-            direction_text.color = t.ACCENT
-        else:
-            direction_text.value = "rest"
-            direction_text.color = t.FAINT
-        phase_text.value = (f"{PHASE_NAME.get(run.phase, run.phase)} · "
-                            f"{run.phase_remaining():.1f} s")
-        if running and not session.direction_known():
-            phase_text.value += " · wait for the tone"
-        count_text.value = f"trial {run.trial_number}/{run.n_trials}"
-        transfer = bool(running and run.transfer)
-        transfer_badge.opacity = 1.0 if transfer else 0.0
-        transfer_note.value = "no display — cue and verdict only" if transfer else ""
-
-        signal_value = session.signal
-        bar_w = max(120.0, plot_width() - 40)
-        trial_track.width = bar_w
-        trial_track.controls[0].width = bar_w
-        trial_mark.left = bar_w * 0.5
-        trial_fill.width = 0 if signal_value is None else bar_w * signal_value
-        if signal_value is not None:
-            trial_fill.bgcolor = t.ACCENT if signal_value >= 0.5 else t.ACCENT_DIM
-            shift = session.shown_shift or 0.0
-            trial_caption.value = (f"{shift:+.1f} µV against this trial's baseline · full at "
-                                   f"±{session.full_at:g} µV · mark = the baseline")
-        elif not session.settled:
-            trial_caption.value = "the filter is still settling — nothing is fed back yet"
-        elif run.done:
-            trial_caption.value = "the run is over · restart it from the card"
-        elif run.phase == ACTIVE and not run.transfer and not session.feedback_now:
-            trial_caption.value = "hold it · the bar is off"
-        else:
-            trial_caption.value = "no feedback in this window"
-        last = run.last
-        if run.phase == RESULT and last is not None:
-            verdict_text.value = verdict_line(last, session.DIRECTION_WORD, session.trial_subject, session.UNITS)
-            verdict_text.color = t.MUTED if not last.valid else t.GOOD if last.success else t.BAD
-        else:
-            verdict_text.value = ""
 
     def draw_history() -> None:
         run = session.trials
@@ -815,11 +759,11 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
         signal.refresh()
         spectrum.refresh()
         trends.refresh()
-        draw_trial()
+        trial_ui.draw_fixation("")
         draw_history()
-        if heart_stats is not None and heart_ui is not None:
+        if heart_ui is not None:
             heart_ui.refresh(session.heart)
-            heart_stats.draw()
+            trial_ui.draw_heart_stats()
 
         ring, width = session.wave, plot_width()
         full = max(WAVE_FLOOR_UV, session.wave_uv)

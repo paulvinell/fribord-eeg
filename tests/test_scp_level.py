@@ -631,3 +631,154 @@ def test_a_chosen_heart_fills_the_heart_stats_beside_the_trials():
         assert summary and all(change == pytest.approx(6.0, abs=0.5) for _, change, _ in summary)
     finally:
         session.stop()
+
+
+# --- the trial panel: the shared fixation circle, each phase its own picture --------------------------
+
+
+def _ring_view(session):
+    from nfb_console.trial_training import TrialView
+
+    ui = TrialView(session, scp_view.CIRCLE_SIDE, heart=False, distinct_phases=True)
+    ui.fixation_panel()
+    return ui
+
+
+def _solid_circles(shapes) -> list:
+    """The circles drawn in a solid line: the feedback circle and the mean ring, not the point or the
+    dashed baseline ring."""
+    import flet.canvas as cv
+
+    return [s for s in shapes if isinstance(s, cv.Circle) and s.radius > 3.0
+            and not s.paint.stroke_dash_pattern]
+
+
+def _wrong_way(uv: float):
+    def produce(session) -> float:
+        run = session.trials
+        if run.phase != ACTIVE or run.required is None:
+            return 0.0
+        return -uv if run.required == POSITIVE else uv
+    return produce
+
+
+def test_the_ring_shows_a_shift_far_the_wrong_way():
+    """The bar this replaced was empty for any shift of full at or more the wrong way, so the screen went
+    blank when the trainee did it wrong. The circle mirrors the signal and never sticks at its limit, so a
+    shift three times full at the wrong way draws a circle, grey, inside its limits and away from the ring."""
+    from nfb_console import theme as t
+    from nfb_console.trial_training import _radii
+
+    session = _session()
+    try:
+        ui = _ring_view(session)
+        session.toggle_pause()
+        run = _run(session, n_trials=4)
+        drawn: list = []
+
+        def watch() -> None:
+            if run.phase == ACTIVE and session.feedback_now and run.phase_remaining() < 1.0:
+                ui.draw_fixation("")
+                drawn.append((run.required, list(ui.circle.shapes), ui.ground.bgcolor))
+
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        _drive(session, 30.0, uv=_wrong_way(3 * session.full_at), start=nxt, watch=watch)
+        assert drawn, "a feedback window ran"
+        r_min, r_max, r_mid = _radii(scp_view.CIRCLE_SIDE)
+        for required, shapes, ground in drawn:
+            circles = _solid_circles(shapes)
+            assert circles, "a circle is drawn for a shift far the wrong way"
+            moving = circles[-1]
+            assert moving.paint.color == t.FAINT, "grey on the side the cue did not ask for"
+            assert r_min < moving.radius < r_max, "never at the limit"
+            assert (moving.radius > r_mid) == (required == NEGATIVE), "it mirrors the signal: up is larger"
+            assert ground == t.SURFACE, "the feedback window is bright"
+    finally:
+        session.stop()
+
+
+def test_the_baseline_is_dim_and_draws_its_ring_with_no_circle_and_no_arrows():
+    """The trainee started the task in the baseline because it looked like the feedback. With the direction
+    hidden, the lead-in is dim, the dashed ring draws itself and is part drawn, and nothing that moves
+    with the signal or names the aim is on the screen."""
+    import math
+
+    import flet.canvas as cv
+    from nfb_console import theme as t
+    from nfb_console.trials import BASELINE
+
+    session = _session()
+    try:
+        assert session.hides_direction, "random is the default"
+        ui = _ring_view(session)
+        session.toggle_pause()
+        run = _run(session, n_trials=3)
+        seen: list = []
+
+        def watch() -> None:
+            if run.phase == BASELINE:
+                ui.draw_fixation("")
+                seen.append((run.trial_number, list(ui.circle.shapes), ui.ground.bgcolor,
+                             ui.direction_text.value))
+
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        _drive(session, 25.0, uv=_compliant, start=nxt, watch=watch)
+        assert seen, "a baseline ran"
+        sweeps: dict[int, list[float]] = {}
+        for trial, shapes, ground, word in seen:
+            assert ground == t.SURFACE_HI, "dim"
+            assert not _solid_circles(shapes), "no circle"
+            assert not [s for s in shapes if isinstance(s, cv.Path)], "no arrows"
+            assert word == "?", "the direction stays hidden"
+            sweeps.setdefault(trial, []).extend(s.sweep_angle for s in shapes if isinstance(s, cv.Arc))
+        whole = sweeps[2]                   # the first trial's baseline began while the filter settled
+        assert all(b >= a for a, b in zip(whole, whole[1:])), "the ring draws itself"
+        assert whole[0] < 0.25 * math.pi and 1.75 * math.pi < whole[-1] < 2 * math.pi + 1e-9, \
+            "part drawn from the start of the baseline, and close to whole at its end"
+    finally:
+        session.stop()
+
+
+def test_the_feedback_shows_the_mean_so_far_as_a_thin_ring():
+    """The trial is scored on the mean of the window, so a thin ring shows that mean as the window runs."""
+    from nfb_console.trial_training import _radii
+
+    session = _session()
+    try:
+        ui = _ring_view(session)
+        session.toggle_pause()
+        run = _run(session, n_trials=3)
+        found: list = []
+
+        def watch() -> None:
+            if run.phase == ACTIVE and session.feedback_now and session.shown_mean is not None:
+                ui.draw_fixation("")
+                level = session.circle_level(session.shown_mean)
+                r_min, r_max, _ = _radii(scp_view.CIRCLE_SIDE)
+                want = r_min + level * (r_max - r_min)
+                found.append([c for c in _solid_circles(ui.circle.shapes)
+                              if c.paint.stroke_width == 1.5 and abs(c.radius - want) < 1e-6])
+
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        _drive(session, 15.0, uv=_compliant, start=nxt, watch=watch)
+        assert found and all(found), "the mean ring is drawn at the mean so far"
+    finally:
+        session.stop()
+
+
+def test_the_lines_under_the_circle_say_why_there_is_no_trial():
+    """The settling filter holds the run, and the end of the run says where its restart button is."""
+    session = _session()
+    try:
+        ui = _ring_view(session)
+        session.toggle_pause()
+        ui.draw_fixation("")
+        assert "the filter is settling" in ui.phase_text.value
+        run = _run(session, n_trials=1)
+        nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
+        _drive(session, 20.0, uv=_compliant, start=nxt)
+        assert run.done
+        ui.draw_fixation("")
+        assert ui.phase_text.value == "the run is over · restart it in the training panel"
+    finally:
+        session.stop()
