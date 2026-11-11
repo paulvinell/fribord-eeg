@@ -38,7 +38,8 @@ from nfb import Device, Mode
 from . import chrome, displays, pupil_guide
 from .widgets import num_box
 from . import theme as t
-from .inputs import SIMULATED_RESPONSE_MM, HeartChoice, InputChoice, MendiChoice, PupilChoice
+from .inputs import (SIMULATED_RESPONSE_MM, HeartChoice, InputChoice, MendiChoice, PupilChoice,
+                     recording_of)
 
 RATES = (250.0, 500.0, 1000.0)
 REFERENCES = ("linked", "bipolar")
@@ -230,6 +231,8 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
         choice.path = str(path_field.value or "").strip()
         if choice.path:
             choice.kind = "file"
+            # A recording's notes file stands for its recording, and the field shows which file plays.
+            choice.path = path_field.value = str(recording_of(choice.path))
         refresh()
 
     path_field.on_submit = commit_path

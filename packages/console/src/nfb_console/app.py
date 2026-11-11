@@ -400,6 +400,12 @@ class Console:
 
     def _pick(self, protocol: Protocol) -> None:
         gen = self._generation          # if Home or the device screen bumps this mid-build, abandon it
+        # A file that cannot play starts nothing: the device screen opens, where the reason is written
+        # beside the file. Only for the screens that read the file, as below.
+        if (self.inputs.problem() is not None
+                and getattr(self.screen_for(protocol), "EEG_SOURCE", True)):
+            self.show_device(return_to=protocol)
+            return
         previous = self.session
         if previous is not None:
             previous.stop()

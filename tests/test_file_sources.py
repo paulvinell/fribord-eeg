@@ -176,3 +176,25 @@ def test_an_empty_path_falls_back_to_the_amplifier():
     assert not InputChoice("file", "").from_file
     with pytest.raises(RuntimeError, match="no device"):
         InputChoice("file", "").open(device=None)
+
+
+def test_a_notes_file_stands_for_the_recording_beside_it(tmp_path):
+    from nfb.notes import notes_path
+    from nfb_console.inputs import recording_of
+
+    recording = tmp_path / "x.jsonl.gz"
+    recording.write_bytes(b"")
+    assert recording_of(notes_path(recording)) == recording
+    assert recording_of(recording) == recording
+    alone = tmp_path / "y.jsonl.gz.notes.jsonl"
+    assert recording_of(alone) == alone, "with no recording beside it, the choice stays what was chosen"
+
+
+def test_input_choice_reports_a_file_that_is_not_a_recording_before_a_session_starts(tmp_path):
+    notes = tmp_path / "y.jsonl.gz.notes.jsonl"
+    notes.write_text('{"format": "nfb-notes/1"}\n')
+    assert "not a recording" in InputChoice("file", str(notes)).problem()
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    assert "not a recording" in InputChoice("file", str(empty)).problem()
+    assert InputChoice("file", str(FRAMES)).problem() is None

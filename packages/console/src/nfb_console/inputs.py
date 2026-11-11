@@ -22,13 +22,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from nfb import Device, ReplaySource, SampleFileSource
+from nfb import Device, ReplaySource, SampleFileSource, SessionReader
+from nfb.notes import SUFFIX as NOTES_SUFFIX
 
 FRAME_SUFFIXES = (".jsonl", ".gz")
 
 
 def is_frame_recording(path: str | Path) -> bool:
     return Path(path).suffix in FRAME_SUFFIXES
+
+
+def recording_of(path: str | Path) -> Path:
+    """The recording a chosen file means. A recording's notes sit beside it under almost the same name,
+    so the file dialog shows the two as a pair and the wrong one is one row away: the notes file stands
+    for its recording."""
+    p = Path(path)
+    if p.name.endswith(NOTES_SUFFIX):
+        recording = p.with_name(p.name[:-len(NOTES_SUFFIX)])
+        if recording.exists():
+            return recording
+    return p
 
 
 @dataclass
@@ -52,6 +65,12 @@ class InputChoice:
             return f"no such file: {p}"
         if p.is_dir():
             return f"{p} is a directory"
+        if is_frame_recording(p):
+            # Only the header is read: one line.
+            try:
+                SessionReader(p)
+            except (OSError, EOFError, ValueError, KeyError, TypeError):
+                return f"{p.name} is not a recording from this program"
         return None
 
     def describe(self) -> str:
