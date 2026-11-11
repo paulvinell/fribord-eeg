@@ -768,3 +768,36 @@ def test_the_heart_panel_appears_only_when_a_source_is_chosen():
                                         heart_choice=hc, heart_runner=heart_mod.HeartRunner(hc))
     labels = _labels_of(with_heart)
     assert "HEART STATS" in labels and "HEART" in labels, "the heart panels show with a chosen source"
+
+
+def test_the_pupil_baseline_keeps_its_picture(monkeypatch):
+    """The distinct phases the slow-potential screen draws are off here: a pupil answers light, so the
+    baseline keeps the same ground, the same canvas and the same shapes, the ring and the arrows."""
+    import flet.canvas as cv
+    from nfb_console.inputs import PupilChoice
+    from nfb_console.protocols import BY_CODE
+    from nfb_console.pupil_view import CIRCLE_SIDE, PupilSession
+    from nfb_console.trial_training import TrialView, circle_shapes
+    from nfb_console.trials import BASELINE, POSITIVE
+
+    s = PupilSession(BY_CODE["PUPIL"], choice=PupilChoice(kind="simulator"))
+    try:
+        s.set_mode("active")
+        s.set_trial_direction("alternating")
+        monkeypatch.setattr(PupilSession, "state", property(lambda _self: object()))
+        run = s.trials
+        run._t, run._phase_until, run.phase, run.required = 0.0, 1.0, BASELINE, POSITIVE
+        ui = TrialView(s, CIRCLE_SIDE, heart=False)
+        ui.fixation_panel()
+        ui.draw_fixation("")
+        assert ui.ground is None and ui.circle.width == CIRCLE_SIDE
+
+        def described(shapes):
+            return [(type(x).__name__, getattr(x, "radius", None), x.paint.color, x.paint.stroke_width,
+                     x.paint.stroke_dash_pattern) for x in shapes]
+
+        assert described(ui.circle.shapes) == described(
+            circle_shapes(CIRCLE_SIDE, None, "unused", arrows="expand")), "point, dashed ring, four arrows"
+        assert len([x for x in ui.circle.shapes if isinstance(x, cv.Path)]) == 4
+    finally:
+        s.stop()

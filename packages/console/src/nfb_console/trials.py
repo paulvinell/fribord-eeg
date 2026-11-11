@@ -209,6 +209,14 @@ class TrialRun:
         """Whether the level should be driven right now: an active window, and not a transfer trial."""
         return self.phase == ACTIVE and not self.transfer
 
+    @property
+    def mean_shift(self) -> float | None:
+        """The mean shift of the active window so far, which is what the trial will be scored on. None
+        outside an active window, and before its first valid reading."""
+        if self.phase != ACTIVE or not self._shift_n:
+            return None
+        return self._shift_sum / self._shift_n
+
     def phase_remaining(self, t: float | None = None) -> float:
         at = self._t if t is None else t
         if at is None or self._phase_until is None:
