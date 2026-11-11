@@ -161,6 +161,7 @@ def help_button(page: ft.Page, title: str, body: str) -> ft.Control:
             title=ft.Text(title, size=t.H2, color=t.TEXT, weight=ft.FontWeight.W_500),
             content=ft.Container(width=460, content=ft.Text(spans=emphasis(body), size=t.BODY,
                                                             color=t.MUTED)),
+            scrollable=True,            # or a text taller than the window is cut off above `close`
             bgcolor=t.SURFACE,
             actions=[ft.Container(content=ft.Text("close", size=t.BODY, color=t.ACCENT),
                                   padding=ft.Padding(12, 7, 12, 7), border_radius=6,
