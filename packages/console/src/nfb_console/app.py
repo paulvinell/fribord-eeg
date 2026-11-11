@@ -52,6 +52,8 @@ class Console:
             path="" if args.live else (args.file or args.path), loop=True)
         # The device settings a live session was built against; `resume` compares them to the current ones.
         self._built_settings: Settings | None = None
+        # The input a session was built on; `resume` compares it to the current choice in the same way.
+        self._built_input: tuple | None = None
         # Bumped by every navigation, so a slow `_pick` can abandon a build another navigation superseded.
         self._generation = 0
         if args.live and not self.device.connect():
@@ -356,6 +358,11 @@ class Console:
             # a real mismatch, so a plain contact check still returns to the session.
             self.pick(protocol)
             return
+        if getattr(screen, "EEG_SOURCE", True) and self._input_now() != self._built_input:
+            # Another input was chosen on the device screen. The session reads the one it was built on
+            # and has no way to change it, so it would wait on an amplifier that is no longer the input.
+            self.pick(protocol)
+            return
         self.protocol = protocol
         # Did the feed stop during the visit? If so, re-arm; if it kept feeding (a replay or its own
         # source) only re-show, since rebuilding resets its history. Uniform across every screen.
@@ -366,6 +373,10 @@ class Console:
         self._maybe_record(session)
         wakelock.hold()                 # back on task: keep the display awake through a still session
         self.show(screen.view(self.page, session, self.toolbar, self.restart))
+
+    def _input_now(self) -> tuple:
+        """The input choice as a value, to tell whether it changed while the device screen was up."""
+        return (self.inputs.kind, self.inputs.path, self.inputs.loop)
 
     def pick(self, protocol: Protocol) -> None:
         # **What the operator configured survives a stop.** Stop ends the session and re-enters the
@@ -414,6 +425,7 @@ class Console:
         # after starting in replay mode must build a live session, not reopen the old recording.
         live = not self.inputs.from_file
         self._built_settings = self.device.status.settings if live else None
+        self._built_input = self._input_now()
         # Name the source in the toolbar: a replayed capture draws a screen identical to a live one, and an
         # empty-amplifier capture would otherwise look like the electrodes are off now.
         self.toolbar.set_source(self.source_label())

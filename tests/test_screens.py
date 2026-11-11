@@ -1464,6 +1464,23 @@ def test_reconfiguring_on_the_device_screen_rebuilds_the_session(monkeypatch):
         console.device.close()
 
 
+def test_choosing_a_file_on_the_device_screen_rebuilds_the_session(monkeypatch):
+    """`resume` came back to the session built on the amplifier, which read nothing of the file chosen on
+    the device screen: the screen waited on a device that was no longer the input."""
+    console, _ = _live_console(monkeypatch)
+    try:
+        first = console.session
+        console.show_device(return_to=BY_CODE["AMP"])
+        console.inputs.kind, console.inputs.path = "file", str(BENCH)
+        console.resume(BY_CODE["AMP"])
+        assert console.session is not first, "another input must rebuild"
+        assert not isinstance(console.session.source, WaitingSource), "the session reads the file"
+    finally:
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
 def test_a_contact_check_with_no_reconfigure_returns_to_the_same_session(monkeypatch):
     """The rebuild is only on a real mismatch: looking at electrodes and coming back must keep the session,
     its clock and its calibration, exactly as leaving it does today."""
