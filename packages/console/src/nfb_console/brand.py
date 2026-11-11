@@ -69,6 +69,12 @@ def wordmark(size: float = 16) -> ft.Control:
         spacing=size * 0.28, vertical_alignment=ft.CrossAxisAlignment.CENTER, tight=True)
 
 
+def _entitlements(app: Path) -> bytes:
+    """What the app's signature lets it do, as a property list. Empty when it grants nothing."""
+    return subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", str(app)],
+                          check=True, capture_output=True).stdout
+
+
 def window_app() -> None:
     """Make the Dock show this app's name and icon, not Flet's.
 
@@ -85,6 +91,9 @@ def window_app() -> None:
 
         stock = flet_desktop.ensure_client_cached()
         home = stock.parent / f"fribord-{stock.name}"
+        # A copy signed without entitlements opens, but its file dialog refuses to: made again.
+        if home.exists() and not _entitlements(home / f"{NAME}.app"):
+            shutil.rmtree(home)
         if not home.exists():
             work = home.parent / f"{home.name}.partial"
             shutil.rmtree(work, ignore_errors=True)
@@ -106,6 +115,13 @@ def window_app() -> None:
             # The edits break the copied signature, and macOS will not open an unsigned app.
             subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)],
                            check=True, capture_output=True)
+            # A new signature carries no entitlements unless it is given them, and the file dialog
+            # asks for the one that lets it read what the user chose. Flet's own, on the app alone.
+            granted = work / "entitlements.plist"
+            granted.write_bytes(_entitlements(stock / "Flet.app"))
+            subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", str(granted), str(app)],
+                           check=True, capture_output=True)
+            granted.unlink()
             work.rename(home)
         os.environ["FLET_VIEW_PATH"] = str(home)
     except Exception:  # noqa: BLE001 - the stock window is a working fallback
