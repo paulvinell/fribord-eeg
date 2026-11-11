@@ -613,10 +613,14 @@ def trial_settings_rows(session: TrialTraining, changed: Callable[[Callable], Ca
         session.cue(cues.held(sound) if mark else sound, CUE_VOLUME)
 
     rows = [
+        # One line for the choices with one direction, one for those with both, so a narrow column never
+        # leaves one pill on a line of its own.
         labelled("direction",
-                 ft.Row([pill(d, session.trial_direction == d,
-                              changed(lambda _e, d_=d: session.set_trial_direction(d_)))
-                         for d in session.DIRECTIONS], spacing=6, wrap=True, expand=True),
+                 ft.Column([ft.Row([pill(d, session.trial_direction == d,
+                                         changed(lambda _e, d_=d: session.set_trial_direction(d_)))
+                                    for d in session.DIRECTIONS if (len(session.DIRECTIONS[d]) == 1) == single],
+                                   spacing=6, wrap=True)
+                            for single in (True, False)], spacing=6, expand=True),
                  width=width),
         labelled("trials", num_box(session.n_trials, changed(set_trials), step=5, low=1, high=200,
                                    width=52),
