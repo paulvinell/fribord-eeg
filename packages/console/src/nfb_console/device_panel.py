@@ -218,9 +218,12 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
                     False: _Choice("play once", lambda: set_loop(False))}
     input_note = ft.Text("", size=t.SMALL, color=t.MUTED)
     input_row = ft.Row([path_field], spacing=8, visible=False)
+    # Why the file dialog did not open, kept until the next choice: `refresh_input` writes the note.
+    dialog_error = [""]
 
     def set_kind(kind: str) -> None:
         choice.kind = kind
+        dialog_error[0] = ""
         refresh()
 
     def set_loop(on: bool) -> None:
@@ -233,6 +236,7 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
             choice.kind = "file"
             # A recording's notes file stands for its recording, and the field shows which file plays.
             choice.path = path_field.value = str(recording_of(choice.path))
+        dialog_error[0] = ""
         refresh()
 
     path_field.on_submit = commit_path
@@ -247,7 +251,7 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
                 files = await picker.pick_files(dialog_title="Play from file",
                                                 allow_multiple=False)
             except Exception as exc:            # no native picker available: type the path
-                input_note.value, input_note.color = f"{type(exc).__name__}: {exc}", t.WARN
+                dialog_error[0] = f"{type(exc).__name__}: {exc}"
                 refresh()
                 return
             if files:
@@ -307,7 +311,10 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
         for on, ch in loop_choices.items():
             ch.set(choice.loop == on, True)
         problem = choice.problem()
-        if choice.kind != "file":
+        if dialog_error[0]:
+            input_note.value = f"the file dialog did not open · type the path · {dialog_error[0]}"
+            input_note.color = t.WARN
+        elif choice.kind != "file":
             input_note.value = "samples come from the amplifier below"
             input_note.color = t.MUTED
         elif problem:

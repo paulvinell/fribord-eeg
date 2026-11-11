@@ -871,3 +871,58 @@ def test_frames_carry_the_arrival_time_not_the_dequeue_time(monkeypatch):
     arrivals = [arrival for _code, _payload, arrival in sub.frames(timeout=0.1)]
     assert arrivals == [10.0, 10.5], "the read time reaches the consumer, not the dequeue time"
     d.close()
+
+
+def test_a_file_dialog_that_does_not_open_says_so_beside_the_path():
+    """The error was written into the note and the refresh on the next line wrote over it, so a dialog
+    that failed did nothing that the operator could see."""
+    import asyncio
+
+    import flet as ft
+    from nfb import Device, Settings
+    from nfb_console import device_panel
+    from nfb_console.inputs import InputChoice
+
+    class Page:
+        def __init__(self):
+            self.services = []
+
+        def update(self, *a):
+            pass
+
+        def run_task(self, fn, *a):
+            if fn.__name__ == "run":            # the browse task; the panel's poll loop is not driven
+                asyncio.run(fn(*a))
+
+    def find(ctrl, want):
+        if want(ctrl):
+            return [ctrl]
+        out = []
+        for child in getattr(ctrl, "controls", None) or []:
+            out += find(child, want)
+        content = getattr(ctrl, "content", None)
+        if content is not None:
+            out += find(content, want)
+        return out
+
+    def notes(control) -> list[str]:
+        return [x.value or "" for x in find(control, lambda c: isinstance(c, ft.Text))]
+
+    page = Page()
+    choice = InputChoice(kind="file", path="")
+    control = device_panel.view(page, Device(Settings()), choice)
+    picker = next(s for s in page.services if isinstance(s, ft.FilePicker))
+
+    async def refuse(**_k):
+        raise RuntimeError("ENTITLEMENT_NOT_FOUND")
+
+    picker.pick_files = refuse
+    browse = find(control, lambda c: isinstance(c, ft.Container) and isinstance(c.content, ft.Text)
+                  and c.content.value == "browse…")[0]
+    browse.on_click(None)
+    assert any("the file dialog did not open" in n and "ENTITLEMENT_NOT_FOUND" in n for n in notes(control))
+
+    amplifier = find(control, lambda c: isinstance(c, ft.Container) and isinstance(c.content, ft.Text)
+                     and c.content.value == "amplifier")[0]
+    amplifier.on_click(None)
+    assert not any("the file dialog did not open" in n for n in notes(control)), "the next choice clears it"
