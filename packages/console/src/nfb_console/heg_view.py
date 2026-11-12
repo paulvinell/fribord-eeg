@@ -106,7 +106,7 @@ SPREAD_S = 60.0
 MIN_SPREAD_S = 20.0
 """Least signal the spread needs before a trial can be judged in it."""
 
-CIRCLE_SIDE = 240
+CIRCLE_SIDE = 200
 
 
 class HEGSession(Scaled, TrialTraining, LevelOutputs):
@@ -662,6 +662,11 @@ MODE_HELP = (
     f"{TIMING.active_s:g} s, move the signal the way the tone asked. The circle grows past the dashed ring "
     "when the signal is above your baseline, and shrinks inside the ring when it is below. Last, the circle "
     "turns green for a success or red for no success, and you hear the tone two times for a success.\n\n"
+    "During the baseline, the ground behind the circle is grey, and the dashed ring draws itself around "
+    "the point. When the effort starts, the ground changes to white, and the circle and the arrows appear. "
+    "The arrows show the direction: out for higher, in for lower. The circle is blue on the side that the "
+    "tone asked for and grey on the other side. A thin faint ring shows the mean of the effort so far. "
+    "The trial is scored on that mean.\n\n"
     "**The unit.** The headband's numbers have no fixed scale. So a trial measures the change from the "
     "baseline in standard deviations, shown as sd. One sd is the usual spread of the signal over the minute "
     "before the trial. The first trials of a session need a minute of signal first. Without it, a trial has "

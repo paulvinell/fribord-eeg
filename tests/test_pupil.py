@@ -770,15 +770,17 @@ def test_the_heart_panel_appears_only_when_a_source_is_chosen():
     assert "HEART STATS" in labels and "HEART" in labels, "the heart panels show with a chosen source"
 
 
-def test_the_pupil_baseline_keeps_its_picture(monkeypatch):
-    """The distinct phases the slow-potential screen draws are off here: a pupil answers light, so the
-    baseline keeps the same ground, the same canvas and the same shapes, the ring and the arrows."""
+def test_the_pupil_circle_draws_each_phase_and_keeps_its_light_steady(monkeypatch):
+    """The trial pictures are the shared ones: the baseline draws the ring with no circle and no arrows.
+    A pupil answers light, so two things stay out: the ground keeps one brightness, and the circle keeps
+    one colour on both sides of the baseline."""
     import flet.canvas as cv
+    from nfb_console import theme as t
     from nfb_console.inputs import PupilChoice
     from nfb_console.protocols import BY_CODE
     from nfb_console.pupil_view import CIRCLE_SIDE, PupilSession
-    from nfb_console.trial_training import TrialView, circle_shapes
-    from nfb_console.trials import BASELINE, POSITIVE
+    from nfb_console.trial_training import TrialView
+    from nfb_console.trials import ACTIVE, BASELINE, POSITIVE
 
     s = PupilSession(BY_CODE["PUPIL"], choice=PupilChoice(kind="simulator"))
     try:
@@ -787,17 +789,19 @@ def test_the_pupil_baseline_keeps_its_picture(monkeypatch):
         monkeypatch.setattr(PupilSession, "state", property(lambda _self: object()))
         run = s.trials
         run._t, run._phase_until, run.phase, run.required = 0.0, 1.0, BASELINE, POSITIVE
-        ui = TrialView(s, CIRCLE_SIDE, heart=False)
+        ui = TrialView(s, CIRCLE_SIDE, heart=False, steady_light=True)
         ui.fixation_panel()
         ui.draw_fixation("")
-        assert ui.ground is None and ui.circle.width == CIRCLE_SIDE
+        assert ui.ground is None, "no ground to change brightness"
+        assert [x for x in ui.circle.shapes if isinstance(x, cv.Arc)], "the ring draws itself"
+        assert not [x for x in ui.circle.shapes if isinstance(x, cv.Path)], "no arrows in the baseline"
 
-        def described(shapes):
-            return [(type(x).__name__, getattr(x, "radius", None), x.paint.color, x.paint.stroke_width,
-                     x.paint.stroke_dash_pattern) for x in shapes]
-
-        assert described(ui.circle.shapes) == described(
-            circle_shapes(CIRCLE_SIDE, None, "unused", arrows="expand")), "point, dashed ring, four arrows"
-        assert len([x for x in ui.circle.shapes if isinstance(x, cv.Path)]) == 4
+        run.phase = ACTIVE
+        s.feedback_now, s.shown_shift, s.shown_mean = True, -0.2, -0.1      # the wrong way for larger
+        ui.draw_fixation("")
+        assert len([x for x in ui.circle.shapes if isinstance(x, cv.Path)]) == 4, "the arrows, in the effort"
+        moving = [x for x in ui.circle.shapes if isinstance(x, cv.Circle) and x.radius > 3.0
+                  and not x.paint.stroke_dash_pattern][-1]
+        assert moving.paint.color == t.ACCENT, "one colour on both sides of the baseline"
     finally:
         s.stop()

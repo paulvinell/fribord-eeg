@@ -8,6 +8,8 @@ tone itself and that answer must not sit inside the baseline.
 
 **Nothing on this screen may change its light in step with the feedback**, or it trains the light reflex.
 So there is no shadow, and the circle keeps a constant number of lit pixels: its line thins as it grows.
+The trial pictures are the shared ones with `steady_light`: the ground keeps one brightness and the circle
+one colour, where the other programs change both at the start of the effort.
 A blink holds the last kept diameter instead of stopping the sound, as the HEG screen holds through motion.
 """
 
@@ -38,7 +40,7 @@ HANDLES = ("PUPIL",)
 EEG_SOURCE = False      # takes its own input; the replay EEG file is not opened for it
 
 SIDE_W = 360
-CIRCLE_SIDE = 280
+CIRCLE_SIDE = 200
 TRACE_H = 150
 TRACE_SECONDS = 60.0
 AXIS_W = 46
@@ -378,6 +380,11 @@ MODE_HELP = (
     f"Then, for {ACTIVE_S:g} s, move your pupil. To make it smaller, pull the circle inside the ring; to "
     "make it larger, push it outside. Last, the circle turns green for a success or red for no success, "
     "and you hear the tone two times for a success.\n\n"
+    "During the baseline, the dashed ring draws itself around the fixation point, and there is no solid "
+    "circle. The ring is complete when the effort starts. The arrows appear with the effort and show the "
+    "direction: out for larger, in for smaller. A thin faint ring shows the mean of the effort so far. "
+    "The trial is scored on that mean. The ground and the colour of the circle do not change during a "
+    "trial, because a change in light changes the pupil.\n\n"
     "**The direction.** **increase** asks for a larger pupil in every trial. **decrease** asks for a "
     "smaller pupil in every trial. **alternating** asks for larger and smaller in turn. **random** asks "
     "for larger and smaller in a random order. **random** does not show the direction until the effort "
@@ -438,7 +445,7 @@ def view(page: ft.Page, session: PupilSession, toolbar: chrome.Toolbar,
         return max(260.0, width - SIDE_W - 76 - AXIS_W)
 
     # --- the fixation panel, the trial settings, the trial history and the heart stats -----------
-    trial_ui = TrialView(session, CIRCLE_SIDE, heart=session.heart_on)
+    trial_ui = TrialView(session, CIRCLE_SIDE, heart=session.heart_on, steady_light=True)
 
     # --- the diameter trace --------------------------------------------------------------------
     history = session.history

@@ -639,7 +639,7 @@ def test_a_chosen_heart_fills_the_heart_stats_beside_the_trials():
 def _ring_view(session):
     from nfb_console.trial_training import TrialView
 
-    ui = TrialView(session, scp_view.CIRCLE_SIDE, heart=False, distinct_phases=True)
+    ui = TrialView(session, scp_view.CIRCLE_SIDE, heart=False)
     ui.fixation_panel()
     return ui
 
@@ -784,7 +784,8 @@ def test_the_feedback_shows_the_mean_so_far_as_a_thin_ring():
                 r_min, r_max, _ = _radii(scp_view.CIRCLE_SIDE)
                 want = r_min + level * (r_max - r_min)
                 found.append([c for c in _solid_circles(ui.circle.shapes)
-                              if c.paint.stroke_width == 1.5 and abs(c.radius - want) < 1e-6])
+                              if abs(c.radius - want) < 1e-6
+                              and abs(c.paint.stroke_width * c.radius - 1.5 * _radii(scp_view.CIRCLE_SIDE)[2]) < 1e-6])
 
         nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
         _drive(session, 15.0, uv=_compliant, start=nxt, watch=watch)

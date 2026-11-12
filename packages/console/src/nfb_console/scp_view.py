@@ -29,7 +29,7 @@ as a fault, where an absent one reads as the design — which the line under it 
 
 **The display is the shared fixation circle** (`trial_training.TrialView`), the one Pupil and HEG train
 with, because a slow potential needs a still gaze and the circle gives the eyes a point to hold. It is
-drawn with `distinct_phases`, so the baseline cannot be taken for the feedback: dim with a ring drawing
+drawn one picture to a phase, so the baseline cannot be taken for the feedback: dim with a ring drawing
 itself through the lead-in, bright with the moving circle through the feedback window.
 """
 
@@ -645,7 +645,7 @@ def view(page: ft.Page, session: SCPSession, toolbar: chrome.Toolbar,
     trends = trends_pane.TrendsPane(page, session, plot_width)
 
     # ---- the trial panel: the shared fixation circle, each phase its own picture ----
-    trial_ui = TrialView(session, CIRCLE_SIDE, heart=session.heart_on, distinct_phases=True)
+    trial_ui = TrialView(session, CIRCLE_SIDE, heart=session.heart_on)
 
     # ---- the history strip ----
     history_cells = ft.Row(spacing=3, wrap=True)

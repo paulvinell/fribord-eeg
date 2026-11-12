@@ -57,7 +57,7 @@ average, so the trial has no heart result rather than a number made from one or 
 CELL_W, CELL_H = 9, 14
 
 ARROW_MARGIN = 36.0
-"""The band outside the largest circle that holds the arrows, with `distinct_phases`: room for an arrow
+"""The band outside the largest circle that holds the arrows: room for an arrow
 pointing in or out, clear of the circle at any size."""
 
 MAX_CUE_GAP_S = 5.0
@@ -559,7 +559,7 @@ def circle_shapes(side: float, level: float | None, colour: str, baseline: bool 
     The line's width is inversely proportional to the radius, so the ink is the same at every size. A
     circle that grew in a constant line would light more of the screen as it grew, and a pupil would
     answer the light. `arrows` draws the faint direction hint: "shrink" or "expand". `mean` draws a thin
-    faint ring at that level, for the mean of the window so far; it adds ink, so Pupil never passes it.
+    faint ring at that level, for the mean of the window so far, in a line that keeps its ink in the same way.
     `margin` keeps a band of the canvas outside the largest circle, and the arrows go in it, so the circle
     never runs over them.
     """
@@ -575,8 +575,11 @@ def circle_shapes(side: float, level: float | None, colour: str, baseline: bool 
     if arrows in ("shrink", "expand"):
         out += _direction_arrows(c, r_max + margin / 2 if margin else 0.42 * side, inward=arrows == "shrink")
     if mean is not None:
-        out.append(cv.Circle(c, c, r_min + min(1.0, max(0.0, mean)) * (r_max - r_min), paint=ft.Paint(
-            color=ft.Colors.with_opacity(0.35, t.TEXT), stroke_width=1.5, style=ft.PaintingStyle.STROKE)))
+        mean_r = r_min + min(1.0, max(0.0, mean)) * (r_max - r_min)
+        mean_ink = 2 * math.pi * r_mid * 1.5        # a 1.5 px line at the middle size
+        out.append(cv.Circle(c, c, mean_r, paint=ft.Paint(
+            color=ft.Colors.with_opacity(0.35, t.TEXT), stroke_width=mean_ink / (2 * math.pi * mean_r),
+            style=ft.PaintingStyle.STROKE)))
     if level is not None:
         out.append(cv.Circle(c, c, r, paint=ft.Paint(
             color=colour, stroke_width=ink / (2 * math.pi * r), style=ft.PaintingStyle.STROKE)))
@@ -732,19 +735,22 @@ class TrialView:
     """The trial controls a program puts on its screen: the fixation circle, the settings rows, the trial
     history and the heart stats. The program places them and calls the `draw_` methods each frame.
 
-    `distinct_phases` makes each part of a trial its own picture, for a program whose person must not start
-    the task before the feedback: the ground behind the circle is dim through the rest, the cue and the
-    baseline, and bright through the feedback and the verdict; the lead-in draws `lead_in_shapes`; the
-    circle is grey on the side the cue did not ask for; and a thin ring shows the mean of the window so far,
-    which is what the trial is scored on. Off for Pupil, whose circle must keep its ink and its ground, and
-    for HEG.
+    Each part of a trial is its own picture, so the person does not start the task before the feedback: the
+    ground behind the circle is dim through the rest, the cue and the baseline, and bright through the
+    feedback and the verdict; the lead-in draws `lead_in_shapes`; the circle is grey on the side the cue
+    did not ask for; and a thin ring shows the mean of the window so far, which is what the trial is scored
+    on.
+
+    `steady_light` is for a signal that answers light, which is the pupil: the ground keeps one brightness
+    and the circle one colour through the feedback, because a change in either at the start of the window,
+    or when the circle crosses the baseline, is a stimulus that the pupil follows.
     """
 
-    def __init__(self, session: TrialTraining, circle_side: int, heart: bool, distinct_phases: bool = False):
+    def __init__(self, session: TrialTraining, circle_side: int, heart: bool, steady_light: bool = False):
         self.session = session
         self.circle_side = circle_side
-        self.distinct_phases = distinct_phases
-        self.margin = ARROW_MARGIN if distinct_phases else 0.0
+        self.steady_light = steady_light
+        self.margin = ARROW_MARGIN
         self.canvas_side = circle_side + 2 * self.margin
         self.circle = cv.Canvas(shapes=[], width=self.canvas_side, height=self.canvas_side)
         self.ground: ft.Container | None = None
@@ -763,7 +769,7 @@ class TrialView:
         side = self.canvas_side
         circle = ft.Row([ft.Container(content=self.circle, width=side, height=side)],
                         alignment=ft.MainAxisAlignment.CENTER)
-        if self.distinct_phases:
+        if not self.steady_light:
             # The whole width of the panel, so the switch from dim to bright is the largest change on the
             # screen. The border is there in both states, in the ground's own colour when dim, so the
             # switch never moves anything.
@@ -784,19 +790,18 @@ class TrialView:
         """The active mode's rows for the MODE panel. `changed` wraps a setter so the screen rebuilds."""
         return trial_settings_rows(self.session, changed)
 
-    def _set_ground(self, bright: bool) -> None:
+    def _set_ground(self, bright: bool, edge: bool = True) -> None:
         if self.ground is None:
             return
         self.ground.bgcolor = t.SURFACE if bright else t.SURFACE_HI
-        self.ground.border = ft.Border.all(2, t.ACCENT if bright else t.SURFACE_HI)
+        self.ground.border = ft.Border.all(2, t.ACCENT if bright and edge else t.SURFACE_HI)
 
     def _waiting(self, line: str) -> None:
         self.direction_text.value, self.direction_text.color = "waiting", t.FAINT
         self.count_text.value = ""
         self.phase_text.value = line
         self._set_ground(False)
-        self.circle.shapes = (lead_in_shapes(self.canvas_side, None, self.margin) if self.distinct_phases
-                              else circle_shapes(self.circle_side, None, t.ACCENT))
+        self.circle.shapes = lead_in_shapes(self.canvas_side, None, self.margin)
 
     def _lead_in_part(self) -> float:
         """How much of the cue and the baseline has passed, from 0 at the cue to 1 at the feedback."""
@@ -816,7 +821,9 @@ class TrialView:
             self.direction_text.value, self.direction_text.color = "passive", t.MUTED
             self.count_text.value = ""
             self.phase_text.value = passive_line
-            self.circle.shapes = circle_shapes(self.circle_side, session.signal, t.ACCENT)
+            # No trial, so no phase to tell apart: the bright ground without the feedback window's edge.
+            self._set_ground(True, edge=False)
+            self.circle.shapes = circle_shapes(self.canvas_side, session.signal, t.ACCENT, margin=self.margin)
             return
         required = session.required
         if session.state is None:
@@ -846,10 +853,10 @@ class TrialView:
             level = session.circle_level(session.shown_shift)
             goal = "inside the ring" if required == NEGATIVE else "outside the ring"
             phase += f" · pull the circle {goal}"
-            if self.distinct_phases:
-                mean = session.circle_level(session.shown_mean)
-                if level is not None and (level - 0.5) * (1 if required == POSITIVE else -1) < 0:
-                    colour = t.FAINT
+            mean = session.circle_level(session.shown_mean)
+            if (not self.steady_light and level is not None
+                    and (level - 0.5) * (1 if required == POSITIVE else -1) < 0):
+                colour = t.FAINT
         elif run.phase == ACTIVE and run.transfer:
             phase += " · no feedback in this trial"
         elif run.phase == ACTIVE:
@@ -870,19 +877,10 @@ class TrialView:
                 self.verdict_text.value = verdict_line(last, words, session.trial_subject, session.UNITS)
         arrows = None
         lead_in = run.phase in (CUED, BASELINE)
-        asked = required is not None and session.direction_known()
-        if self.distinct_phases:
-            # The arrows are the goal, and the goal holds for the whole window: with the circle off, and
-            # in a trial without feedback, they still say which way to go.
-            shown = asked and run.phase == ACTIVE
-        else:
-            shown = (asked and run.phase in (CUED, BASELINE, ACTIVE) and not run.transfer
-                     and not (run.phase == ACTIVE and not session.feedback_now))
-        if shown:
+        # The arrows are the goal, and the goal holds for the whole window: with the circle off, and in a
+        # trial without feedback, they still say which way to go.
+        if required is not None and session.direction_known() and run.phase == ACTIVE:
             arrows = "shrink" if required == NEGATIVE else "expand"
-        if not self.distinct_phases:
-            self.circle.shapes = circle_shapes(self.circle_side, level, colour, arrows=arrows)
-            return
         bright = run.phase in (ACTIVE, RESULT)
         self._set_ground(bright)
         if bright:
