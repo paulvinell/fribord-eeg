@@ -21,9 +21,9 @@ import optima
 
 from nfb import Device, Recorder, Settings
 
-from . import (amplitude_view, at_view, brand, chrome, device_panel, heart, heg_view, hrv_view, cfc_view,
-               ilf_view, mendi, pac_view, pair_view, prefs, pupil, pupil_calibrate, pupil_camera, pupil_view, record_dialog, scp_view, session_view, sleep_view,
-               splash, wakelock, wave_view)
+from . import (amplitude_view, at_view, brand, chrome, developer, device_panel, heart, heg_view, hrv_view, cfc_view,
+               ilf_view, mendi, pac_view, pair_view, prefs, pupil, pupil_calibrate, pupil_camera, pupil_view, record_dialog, scp_view, session_view, settings_dialog,
+               sleep_view, splash, wakelock, wave_view)
 from . import theme as t
 from .inputs import HeartChoice, InputChoice, MendiChoice, PupilChoice
 from .protocols import BY_CODE, Protocol
@@ -35,6 +35,9 @@ class Console:
     def __init__(self, page: ft.Page, args: argparse.Namespace):
         self.page = page
         self.args = args
+        # First, so the debug log covers everything after it. Only the console reads the stored developer
+        # settings: a test or a script that builds sessions without one keeps to the environment variables.
+        developer.load()
         self.session: session_view.Session | None = None
         # Flet dispatches `on_click` on a thread pool, so two clicks on a slow button really do overlap.
         # See `pick`, where the overlap cost an afternoon's configuration.
@@ -95,6 +98,7 @@ class Console:
         page.services.append(self._record_picker)
         self.toolbar.bind_record(lambda _e: self.toggle_record(),
                                  lambda _e: self.show_record_options())
+        self.toolbar.bind_settings(self.show_settings)
 
         page.title = brand.NAME
         page.fonts = brand.FONTS
@@ -219,6 +223,14 @@ class Console:
         def remember() -> None:
             prefs.set_record_where(vars(self.record_settings))
         record_dialog.show(self.page, self.record_settings, remember, self._record_picker)
+
+    def show_settings(self) -> None:
+        """The settings menu. A change is stored at once, and the launcher under the dialog is rebuilt so
+        what it lists follows the developer switch without a restart."""
+        def changed() -> None:
+            developer.save()
+            self.show_launcher()
+        settings_dialog.show(self.page, changed)
 
     def _start_recording(self, session) -> None:
         # Bind the companion to this session, captured now: reading live `self.session` at write time

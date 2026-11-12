@@ -18,9 +18,10 @@ at `atexit` as well, so a process that dies holding one cannot leave the machine
 from __future__ import annotations
 
 import atexit
-import os
 import sys
 from ctypes import CDLL, POINTER, byref, c_char_p, c_int32, c_uint32, c_void_p
+
+from . import developer
 
 ASSERTION_NAME = "Fribord neurofeedback session"
 """The name the assertion carries, as `pmset -g assertions` lists it, so the reason the display is awake
@@ -58,9 +59,9 @@ _registered = False
 
 
 def muted() -> bool:
-    """Whether the idle-sleep hold is switched off process-wide by `NFB_NO_OUTPUTS`. See `shadow.muted`
-    for why it exists: a session takes over the machine the moment it runs, and a test must not."""
-    return bool(os.environ.get("NFB_NO_OUTPUTS"))
+    """Whether the idle-sleep hold is switched off process-wide. See `developer.outputs_off` for why it
+    exists: a session takes over the machine the moment it runs, and a test must not."""
+    return developer.outputs_off()
 
 
 def available() -> bool:
@@ -70,7 +71,7 @@ def available() -> bool:
 def problem() -> str | None:
     """Why the display would still dim, if it would."""
     if muted():
-        return "the display-sleep hold is switched off by NFB_NO_OUTPUTS"
+        return f"the display-sleep hold is switched off by {developer.outputs_off_by()}"
     return _error
 
 

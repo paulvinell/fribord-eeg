@@ -38,12 +38,12 @@ def wanted(args) -> list:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--screen", help="only these protocol codes, comma separated")
-    ap.add_argument("--state", choices=("cold", "fed"))
+    ap.add_argument("--state", choices=("cold", "fed", "spindle", "search", "search-early"))
     ap.add_argument("--width", type=int, default=1240)
     ap.add_argument("--height", type=int, default=1400)
     ap.add_argument("--tab", type=int, help="a tab index instead of Train: 1 Spectrum, 2 Trends, 3 Feedback")
     ap.add_argument("--help-title", dest="help_title",
-                    help="open the help dialog with this title before the shot")
+                    help="open the help dialog with this title before the shot, or its gear with gear:title")
     ap.add_argument("--out", default=str(ROOT / "shots"))
     args = ap.parse_args()
 

@@ -43,6 +43,9 @@ import flet as ft
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
+import numpy as np                                                    # noqa: E402
+
+from nfb.dsp import Planted, plant                                    # noqa: E402
 from nfb.stream import Block                                          # noqa: E402
 from nfb_console import brand, chrome, splash                         # noqa: E402
 from nfb_console.protocols import BY_CODE                             # noqa: E402
@@ -50,6 +53,7 @@ from nfb_console.protocols import BY_CODE                             # noqa: E4
 from conftest import BENCH_OK, counts, plausible_eeg                  # noqa: E402
 
 FED_SECONDS = 150.0
+EARLY_SECONDS = 3.0            # how far into its search the early spindle shot is caught
 
 SCREENS = {"AMP": "amplitude_view", "A-T": "at_view", "CFC": "cfc_view", "ILF": "ilf_view",
            "PAC": "pac_view", "SCP": "scp_view", "SLEEP": "sleep_view", "WAVE": "wave_view",
@@ -58,6 +62,7 @@ SCREENS = {"AMP": "amplitude_view", "A-T": "at_view", "CFC": "cfc_view", "ILF": 
 # Cold is not an edge case here, it is the first twenty seconds of every session — and it is where most
 # of the faults have been, because it is the state nobody opens the app to look at.
 STATES = ("cold", "fed")
+SPINDLE_STATES = ("spindle", "search", "search-early")
 
 SHOTS = [("launcher", "", 0)] + [
     (code, state, channels)
@@ -65,16 +70,23 @@ SHOTS = [("launcher", "", 0)] + [
     for state in STATES
     for channels in ((1, 4) if code == "PAC" else (2,))
 ] + [("SCP", phase, 2) for phase in ("rest", "baseline", "feedback", "wrong", "off", "success", "failure")
-] + [("HRV", "cold", 0)] + [("HEG", state, 0) for state in STATES] + [   # their own devices drive them
+] + [
+    # The spindle card, fed with spindles planted on ch0; a search over the whole run; a search 3 s old.
+    ("AMP", state, 2) for state in SPINDLE_STATES] + [("HRV", "cold", 0)] + [("HEG", state, 0) for state in STATES] + [   # their own devices drive them
     ("PUPIL", state, 0) for state in STATES] + [
     ("PAIR", state, 0) for state in STATES] + [
-    ("device", kind, 3) for kind in ("simulator", "tracker")]     # the Pupil tab, with each source
+    ("device", kind, 3) for kind in ("simulator", "tracker")] + [   # the Pupil tab, with each source
+    # The settings menu over the launcher: the developer section closed, open with the outputs row
+    # locked by NFB_NO_OUTPUTS as this server runs, and open as the console shows it without the variable.
+    ("settings", state, 0) for state in ("closed", "open", "free")]
 
 
 def route_of(shot) -> str:
     code, state, channels = shot
     if code == "device":
         return f"/device/{channels}/{state}"
+    if code == "settings":
+        return f"/settings/{state}"
     return "/launcher" if code == "launcher" else f"/{code}/{state}/{channels}"
 
 
@@ -116,6 +128,10 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
     else:
         session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
                                      channels=channels, **heart_kwargs)
+    if code == "AMP" and state in SPINDLE_STATES:
+        session.add_spindles(0)
+        if state == "search":
+            session.spindles.start_search()
     bar = chrome.Toolbar(_Device(), lambda: None, lambda: None, lambda _n: None)
     control = module.view(page, session, bar, lambda: None)
     if state == "fed" and code == "PUPIL":
@@ -125,16 +141,31 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         session.redraw()
     elif state == "fed" and code in ("PAIR", "HEG"):
         session.redraw()
-    elif state == "fed":
+    elif state in ("fed", *SPINDLE_STATES):
         # Fed here rather than by the session's own thread: the whole run in a moment, so a settled
         # screen costs no wall clock and the shot of one is reproducible.
         session.paused = False
         session.state = dict.fromkeys(session.specs, True)
         rate = session.rate
         waves = {ch: plausible_eeg(FED_SECONDS, rate, ch) for ch in session.specs}
+        if state in SPINDLE_STATES:
+            plant(waves[0], rate, np.random.default_rng(5),
+                  Planted(23.0, (0.25, 0.4), 30.0, per_minute=12, jitter_hz=2.0))
         for i in range(0, int(FED_SECONDS * rate) - 249, 250):
             for ch, spec in session.specs.items():
                 session.feed_block(Block(ch, i, counts(waves[ch][i:i + 250], spec.scale), spec))
+        if state == "search-early":
+            # Started after the fed run, so the few spindles on its line are its own.
+            session.spindles.start_search()
+            start = int(FED_SECONDS * rate) - 250
+            more = {ch: plausible_eeg(EARLY_SECONDS, rate, ch, seed=1) for ch in session.specs}
+            plant(more[0], rate, np.random.default_rng(6),
+                  Planted(23.0, (0.25, 0.4), 30.0, per_minute=40, jitter_hz=2.0))
+            for i in range(0, int(EARLY_SECONDS * rate) - 249, 250):
+                for ch, spec in session.specs.items():
+                    session.feed_block(Block(ch, start + i, counts(more[ch][i:i + 250], spec.scale), spec))
+        if state.startswith("search"):
+            session.spindles.estimate()
         session._stop = True
         session.redraw()
     control._shot_redraw = session.redraw
@@ -300,13 +331,39 @@ def build_device(page: ft.Page, tab: int, pupil_kind: str):
     return control
 
 
+def build_settings(page: ft.Page, state: str):
+    """The launcher with its toolbar, and the settings menu open over it."""
+    from nfb_console import developer, settings_dialog
+
+    bar = chrome.Toolbar(_Device(), lambda: None, lambda: None, lambda _n: None)
+    bar.bind_settings(lambda: None)
+    bar.set_crumb(None)
+    bar.set_transport_visible(False)      # as `Console.show_launcher` leaves it
+    developer.settings.on = state != "closed"
+    control = ft.Column([bar.control, splash.view(page, _Device(), lambda _p: None, lambda: None)],
+                        spacing=0, expand=True)
+    # **Without the variable only while the dialog is built**, which reads it once and draws static pills.
+    # Nothing else runs on this server in that moment, and it is back before anything can.
+    held = os.environ.pop("NFB_NO_OUTPUTS", None) if state == "free" else None
+    try:
+        settings_dialog.show(page, lambda: None)
+    finally:
+        if held is not None:
+            os.environ["NFB_NO_OUTPUTS"] = held
+    return control
+
+
 def open_help(control, title: str) -> None:
-    """Press the `?` whose dialog is called `title`. A help button carries its title as its tooltip."""
+    """Press the `?` whose dialog is called `title`, or the gear for `gear:title`. Both carry their title
+    as their tooltip."""
+    glyph = "?"
+    if title.startswith("gear:"):
+        glyph, title = "⚙", title[5:]
     stack = [control]
     while stack:
         ctrl = stack.pop()
         if (getattr(ctrl, "tooltip", None) == title and getattr(ctrl, "on_click", None)
-                and getattr(getattr(ctrl, "content", None), "value", None) == "?"):
+                and getattr(getattr(ctrl, "content", None), "value", None) == glyph):
             ctrl.on_click(None)
             return
         stack += list(getattr(ctrl, "controls", None) or [])
@@ -324,10 +381,14 @@ def main() -> None:
 
         def show(_e=None) -> None:
             route = page.route or "/launcher"
+            while page.pop_dialog() is not None:    # one route's dialog must not sit over the next shot
+                pass
             parts = [p for p in route.split("/") if p]
             page.controls.clear()
             if parts[:1] == ["launcher"]:
                 page.controls.append(splash.view(page, _Device(), lambda _p: None, lambda: None))
+            elif parts[:1] == ["settings"]:
+                page.controls.append(build_settings(page, parts[1]))
             elif parts[:1] == ["device"]:
                 page.controls.append(build_device(page, int(parts[1]), parts[2] if len(parts) > 2 else "off"))
             else:

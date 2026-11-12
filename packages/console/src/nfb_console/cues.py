@@ -20,7 +20,6 @@ so a pane can say so rather than presenting a silent control as working.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -29,6 +28,8 @@ import threading
 import time
 import wave
 from pathlib import Path
+
+from . import developer
 
 CLICK_STALL_SECONDS = 2.0
 """A click stream whose callback has not run for this long is dead — a device change leaves the object
@@ -91,8 +92,8 @@ _last_error: str | None = None
 
 
 def muted() -> bool:
-    """`NFB_NO_OUTPUTS` silences audio for the process. See `shadow.muted` for why it exists."""
-    return bool(os.environ.get("NFB_NO_OUTPUTS"))
+    """Outputs off silences audio for the process. See `developer.outputs_off` for why it exists."""
+    return developer.outputs_off()
 
 
 def available() -> bool:

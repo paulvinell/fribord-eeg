@@ -24,12 +24,13 @@ because its signal arrived at ~2 Hz.
 from __future__ import annotations
 
 import atexit
-import os
 import ctypes
 import math
 import sys
 import time
 from ctypes import POINTER, byref, c_float, c_int, c_uint32
+
+from . import developer
 
 
 # Never below this, whatever the settings say.
@@ -105,20 +106,14 @@ def available() -> bool:
 
 
 def muted() -> bool:
-    """Whether outputs are switched off process-wide by `NFB_NO_OUTPUTS`.
-
-    A session takes over the machine's display or volume the moment it runs, which is correct for a
-    session and wrong for anything else. A test suite, a benchmark or a scratch script that imports a
-    session should not be able to dim the operator's screen — and one did, which is how this exists.
-    Checked on every call rather than cached, so setting it mid-process works.
-    """
-    return bool(os.environ.get("NFB_NO_OUTPUTS"))
+    """Whether outputs are switched off process-wide. See `developer.outputs_off` for why it exists."""
+    return developer.outputs_off()
 
 
 def problem() -> str | None:
     """Why the screen would not move, if it would not."""
     if muted():
-        return "the shadow is switched off by NFB_NO_OUTPUTS"
+        return f"the shadow is switched off by {developer.outputs_off_by()}"
     if _error:
         return _error
     if not displays():
@@ -197,7 +192,7 @@ is healthy; two threads, or one thread alternating between two values, names the
 
 
 def _log(display: int, level: float) -> None:
-    if not os.environ.get("NFB_DEBUG"):
+    if not developer.debug():
         return
     import threading
     import traceback

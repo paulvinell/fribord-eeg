@@ -163,6 +163,22 @@ def set_record_where(values: dict) -> None:
     _save(data)
 
 
+DEVELOPER = "developer"
+"""The developer settings from the settings menu — one set for the app, like `RECORD_WHERE`. They change how
+the console runs while somebody works on it, and nothing about what a protocol trains."""
+
+
+def developer() -> dict:
+    stored = _load().get(DEVELOPER)
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def set_developer(values: dict) -> None:
+    data = _load()
+    data[DEVELOPER] = dict(values)
+    _save(data)
+
+
 def record_default(code: str, fallback: bool = False) -> bool:
     table = _load().get(RECORD, {})
     value = table.get(code) if isinstance(table, dict) else None

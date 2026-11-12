@@ -35,6 +35,9 @@ is C4 − C3, which would otherwise mean rewiring. It is the last item in the so
 dialog rather than adding items to the menu, because the menu's entries are single choices and this one has
 operands — see `open_combination`, and `Target.signs` for why a signed target does not follow the live
 channels the way the sum does.
+
+**The spindle card sits under the targets and is not one.** It counts events on one channel and marks each
+with its own sound; nothing the targets drive reads it. See `spindle_card`.
 """
 
 from __future__ import annotations
@@ -56,6 +59,8 @@ from . import chrome, plan_pane, plots, signal_pane, spectrum_pane, trace_rows, 
 from . import theme as t
 from . import target_card
 from .protocols import Protocol
+from .spindle_card import SpindleCard, Spindles
+from .spindle_card import sound as spindle_sound
 from .target_card import BAR_W, TargetCard
 from .targets import PAIR, ROLES, Target
 from .plots import (StickyCeiling, bars, bin_centre_x, filled, fmt_amplitude, grid,
@@ -233,6 +238,8 @@ class AmplitudeSession(TrainingSession):
         self.sum_ring = (RawRing(2.0, self.rate, SPECTRUM_LO, SPECTRUM_HI, SPECTRUM_BIN_HZ)
                          if self.display_aligner is not None else None)
 
+        self.spindles: Spindles | None = None
+
         first = next(iter(self.specs), 0)
         for low, high, direction, role, source in DEFAULTS.get(protocol.code, DEFAULT_TARGETS):
             self.add_target(first if source == FIRST_CHANNEL else source,
@@ -272,6 +279,24 @@ class AmplitudeSession(TrainingSession):
         self._ensure_metrics(tgt)
         self.targets.append(tgt)
         return tgt
+
+    def add_spindles(self, channel: int | None = None, **settings) -> Spindles:
+        """The spindle card's state. One per session, on one of the session's channels."""
+        if self.spindles is None:
+            channel = self.focus if channel is None else channel
+            self.spindles = Spindles(self.rate, channel if channel in self.specs else self.focus,
+                                     **settings)
+        return self.spindles
+
+    def remove_spindles(self) -> None:
+        self.spindles = None
+
+    def adopt_targets(self, previous) -> None:
+        """The spindle card comes across a stop as the targets do: its settings, not its counts."""
+        super().adopt_targets(previous)
+        old = getattr(previous, "spindles", None)
+        if old is not None:
+            self.add_spindles(**old.settings())
 
     def summed_sites(self) -> tuple[int, ...]:
         """Which channels actually feed the sum: the ones delivering signal.
@@ -453,6 +478,13 @@ class AmplitudeSession(TrainingSession):
             self.sum_ring.push(np.asarray(summed.values))
         if self.feedback.music.source == "eeg" and ch == self.focus:
             self.music.feed(values)
+        watch = self.spindles
+        if watch is not None and ch == watch.channel:
+            # Raw, so the detector's sense of the usual size sees everything; only what the targets
+            # would accept counts. The sound is its own cue, outside every feedback mechanism.
+            counting = not self.paused and judged.accepted and self.state.get(ch) is not False
+            if watch.feed(values, counting) and watch.sound:
+                self.cue(spindle_sound(), self.feedback.click.volume)
 
     def _combined(self, paired, combo):
         """One combined `Block` from an aligner's runs: the plain sum, or named channels with signs.
@@ -939,6 +971,13 @@ def view(page: ft.Page, session: AmplitudeSession, toolbar: chrome.Toolbar,
                               settings=(lambda g=tgt: lambda redraw: filter_rows(g, redraw))())
             cards[id(tgt)] = card
             rows.append(card.control)
+        spindle[0] = None
+        if session.spindles is not None:
+            spindle[0] = SpindleCard(page, session.spindles, session.specs, rebuild_targets,
+                                     remove_spindles, lambda: fb.click.volume)
+            spindle[0].refresh(session.state.get(session.spindles.channel))
+            rows.append(spindle[0].control)
+        spindle_button.visible = session.spindles is None
         target_column.controls = rows
         signal.rebuild_contributions(session.targets)
         page.update()
@@ -954,21 +993,35 @@ def view(page: ft.Page, session: AmplitudeSession, toolbar: chrome.Toolbar,
         # reward, when what is almost always being added there is an inhibit.
         session.add_target(session.focus, Band(low, high, ""))
         rebuild_targets()
-
-        async def reveal() -> None:
-            # scroll_to is a coroutine and belongs on Flet's loop, like every other UI call here.
-            # A short wait first, so the rebuilt list has been laid out and the end exists to scroll to.
-            await asyncio.sleep(chrome.DRAW_SECONDS)
-            try:
-                await target_column.scroll_to(offset=-1, duration=250)
-            except Exception:
-                pass            # a scroll we cannot perform must not lose the card
-
         page.run_task(reveal)
+
+    def add_spindles(_e=None) -> None:
+        session.add_spindles()
+        rebuild_targets()
+        page.run_task(reveal)
+
+    def remove_spindles() -> None:
+        session.remove_spindles()
+        rebuild_targets()
+
+    async def reveal() -> None:
+        # scroll_to is a coroutine and belongs on Flet's loop, like every other UI call here.
+        # A short wait first, so the rebuilt list has been laid out and the end exists to scroll to.
+        await asyncio.sleep(chrome.DRAW_SECONDS)
+        try:
+            await target_column.scroll_to(offset=-1, duration=250)
+        except Exception:
+            pass            # a scroll we cannot perform must not lose the card
 
     add_button = ft.Container(content=ft.Text("+ add", size=t.SMALL, color=t.ACCENT),
                               padding=ft.Padding(10, 5, 10, 5), border_radius=6,
                               bgcolor=t.SURFACE_HI, border=ft.Border.all(1, t.HAIRLINE), on_click=add_target)
+    # One spindle card at most, so the button goes while the card is on the list.
+    spindle_button = ft.Container(content=ft.Text("+ spindle", size=t.SMALL, color=t.ACCENT),
+                                  padding=ft.Padding(10, 5, 10, 5), border_radius=6,
+                                  bgcolor=t.SURFACE_HI, border=ft.Border.all(1, t.HAIRLINE),
+                                  on_click=add_spindles)
+    spindle: list[SpindleCard | None] = [None]
 
 
     # ---- tabs ----
@@ -1001,7 +1054,9 @@ def view(page: ft.Page, session: AmplitudeSession, toolbar: chrome.Toolbar,
                            ft.Row([train_left,
                                    ft.Column([panel("TRAINING",
                                                     ft.Container(content=target_column, expand=True),
-                                                    expand=True, trailing=add_button)],
+                                                    expand=True,
+                                                    trailing=ft.Row([spindle_button, add_button],
+                                                                    spacing=6, tight=True))],
                                              spacing=0, width=TARGETS_W)],
                                   spacing=14, expand=True)],
                           spacing=0, expand=True),
@@ -1028,6 +1083,8 @@ def view(page: ft.Page, session: AmplitudeSession, toolbar: chrome.Toolbar,
         # Sampling is on the feed, not here — see `TrainingSession.feed_block` — so the history covers
         # the session whether or not this tab is ever opened, and a replay collects what a live run does.
         trends.refresh()
+        if session.spindles is not None:
+            session.spindles.estimate_due(time.monotonic())
         if not train_tab.visible:
             page.update()
             return              # a hidden pane must cost nothing; see SpectrumPane.refresh
@@ -1110,6 +1167,8 @@ def view(page: ft.Page, session: AmplitudeSession, toolbar: chrome.Toolbar,
             card = cards.get(id(tgt))
             if card is not None:
                 card.refresh(session.value_for(tgt), unit, session.response_time(tgt))
+        if spindle[0] is not None:
+            spindle[0].refresh(session.state.get(spindle[0].watch.channel))
 
         page.update()
 

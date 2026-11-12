@@ -51,7 +51,6 @@ The default band is 2–38 Hz: below 2 is drift and above 38 is mains and muscle
 
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import tempfile
@@ -67,6 +66,7 @@ from scipy.signal import lfilter
 
 from nfb.dsp import Band, CFIREnvelope, bandpass
 
+from . import developer
 from .cues import shut_aside
 
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".wav", ".aiff", ".aif", ".flac", ".ogg")
@@ -404,7 +404,7 @@ def preview_path(colour: str, pitch_hz: float = 0.0) -> Path | None:
 
 
 def muted() -> bool:
-    """`NFB_NO_OUTPUTS` silences audio for the process. See `shadow.muted` for why it exists.
+    """Outputs off silences audio for the process. See `developer.outputs_off` for why it exists.
 
     This module was missing from that guard, which was a real hole rather than an omission of principle:
     every protocol that enables music by default opened a live audio stream from the test suite, and the
@@ -414,7 +414,7 @@ def muted() -> bool:
     `start`. The player's own unit tests fake the subprocess and set `muted` False, so they still run it;
     production and the stubbed-player session tests both leave it silent.
     """
-    return bool(os.environ.get("NFB_NO_OUTPUTS"))
+    return developer.outputs_off()
 
 
 def available() -> bool:
@@ -461,7 +461,7 @@ class TrackPlayer:
 
     def start(self, files: list[Path], volume: float) -> None:
         if muted():
-            return          # NFB_NO_OUTPUTS silences the process, and afplay is a real output like the rest
+            return          # outputs off silences the process, and afplay is a real output like the rest
         if self.playing and files == self.files:
             self.volume = volume
             return

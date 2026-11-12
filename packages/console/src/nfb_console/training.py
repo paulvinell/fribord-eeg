@@ -25,7 +25,6 @@ Subclasses implement `consume(block)` — feed your metrics, return the keys tha
 from __future__ import annotations
 
 import math
-import os
 import time
 from collections import deque
 from typing import Callable
@@ -40,7 +39,7 @@ from nfb.dsp import (ArtifactGates, Band, BandPower, CFIRBandPower, DRIFT_CORNER
 from nfb.dsp import artifact as dsp_artifact
 from nfb.stream import Block, Gap
 
-from . import cues, music, prefs, quality, sentry, shadow, sysvolume
+from . import cues, developer, music, prefs, quality, sentry, shadow, sysvolume
 from .feedback import CONDITION, HOLD_FRACTION, LEVEL, STATE, FeedbackSettings
 from .outputs import OutputPump
 from .plan import SessionPlan
@@ -74,7 +73,7 @@ SESSION_LOG = "/tmp/nfb-session.log"
 
 
 def slog(msg: str) -> None:
-    if not os.environ.get("NFB_DEBUG"):
+    if not developer.debug():
         return
     try:
         with open(SESSION_LOG, "a") as fh:

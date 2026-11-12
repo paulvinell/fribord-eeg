@@ -66,6 +66,9 @@ class Protocol:
     blurb: str
     available: bool = True
     note: str = ""          # shown when unavailable: why, not just that
+    developer: bool = False
+    """A program for working on the console rather than for training: listed only while the developer
+    settings are on. See `listed`."""
 
 
 CATALOGUE = (
@@ -120,3 +123,9 @@ CATALOGUE = (
 )
 
 BY_CODE = {p.code: p for p in CATALOGUE}
+
+
+def listed(developer: bool) -> tuple[Protocol, ...]:
+    """What the launcher shows. Read at call time, so the launcher follows the developer switch as soon as
+    it is rebuilt. `BY_CODE` keeps every entry, so `--protocol` still opens a developer program directly."""
+    return tuple(p for p in CATALOGUE if developer or not p.developer)

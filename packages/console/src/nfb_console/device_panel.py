@@ -25,7 +25,6 @@ properties on controls that already exist.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 import traceback
@@ -35,7 +34,7 @@ import flet as ft
 
 from nfb import Device, Mode
 
-from . import chrome, displays, pupil_guide
+from . import chrome, developer, displays, pupil_guide
 from .widgets import num_box
 from . import theme as t
 from .inputs import (SIMULATED_RESPONSE_MM, HeartChoice, InputChoice, MendiChoice, PupilChoice,
@@ -72,12 +71,11 @@ ALIVE_SECONDS = 2.0
 
 # Set NFB_DEBUG=1 to trace what the panel sees. On-screen symptoms have twice turned out to be
 # invisible to Python-side tests, so this writes the panel's own view of state to a file.
-DEBUG = os.environ.get("NFB_DEBUG")
 LOG = "/tmp/nfb-panel.log"
 
 
 def log(msg: str) -> None:
-    if not DEBUG:
+    if not developer.debug():
         return
     with open(LOG, "a") as fh:
         fh.write(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {msg}\n")

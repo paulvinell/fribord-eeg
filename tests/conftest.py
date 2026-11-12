@@ -50,6 +50,12 @@ def _prefs_off_the_real_file(tmp_path, monkeypatch):
     monkeypatch.setenv("NFB_PREFS", str(tmp_path / "prefs.json"))
     monkeypatch.setattr(prefs, "PATH", tmp_path / "prefs.json")
 
+    # The developer settings are the process's one copy, so a test that opens the settings menu and
+    # switches them on would otherwise hand them to every test after it.
+    from nfb_console import developer
+
+    monkeypatch.setattr(developer, "settings", developer.DeveloperSettings())
+
 
 # --- the bench recording the screen tests replay ---------------------------------------------
 

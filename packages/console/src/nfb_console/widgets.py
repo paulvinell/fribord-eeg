@@ -191,7 +191,7 @@ def settings_button(page: ft.Page, title: str, rows: Callable[[Callable[[], None
         show = getattr(page, "show_dialog", None)
         if show is None:
             return
-        body = ft.Column(spacing=14, width=460)
+        body = ft.Column(spacing=14, width=460, tight=True)    # loose, it fills the window's height
 
         def rebuild() -> None:
             body.controls = rows(rebuild)

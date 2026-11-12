@@ -13,8 +13,9 @@ import flet as ft
 
 from nfb import Device
 
+from . import developer, protocols
 from . import theme as t
-from .protocols import CATALOGUE, Protocol
+from .protocols import Protocol
 
 CARD_W = 236
 CARD_H = 108
@@ -105,7 +106,7 @@ def view(page: ft.Page, device: Device, on_pick: Callable[[Protocol], None],
     # on both sides — a grid that stops being a grid on its final line. The spacers are the missing
     # cards' width, so every row is the same width and every column keeps its edge.
     rows = []
-    cards = [protocol_card(p, on_pick) for p in CATALOGUE]
+    cards = [protocol_card(p, on_pick) for p in protocols.listed(developer.settings.on)]
     for i in range(0, len(cards), 3):
         row = cards[i:i + 3]
         row += [ft.Container(width=CARD_W) for _ in range(3 - len(row))]

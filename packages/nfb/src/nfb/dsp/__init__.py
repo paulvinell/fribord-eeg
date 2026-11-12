@@ -36,6 +36,10 @@ from .envelope import (
     CFIRBandPower, CFIREnvelope, DRIFT_CORNER_MAX_HZ, band_centre_gain, design_cfir,
     true_envelope,
 )
+from .wavelet import BurstDetector, MuscleEnvelope, Wavelet, WaveletEnvelope, bursts, design_wavelet, outline
+from .fit import Fit, TooFew, fit_design
+from .spindle import Found, SpindleDetector, SpindleSearch
+from .planted import BACKGROUND_SLOPE, Planted, Score, pink, plant, score_found
 from .metrics import (
     BandPower, Metric, PairMetric, Reading, WindowMetric,
     band_amplitude, band_power, band_ratio, coherence, lempel_ziv,
@@ -44,6 +48,9 @@ from .metrics import (
 from .pipeline import Pipeline
 
 __all__ = [
+    "Fit", "TooFew", "fit_design", "Found", "SpindleDetector", "SpindleSearch", "BurstDetector", "MuscleEnvelope",
+    "Wavelet", "WaveletEnvelope", "bursts", "design_wavelet", "outline",
+    "BACKGROUND_SLOPE", "Planted", "Score", "pink", "plant", "score_found",
     "ArtifactGate", "ArtifactGates", "ArtifactPolicy", "Judgement", "REJECT_MODES",
     "DEFAULT_WIDTH_HZ", "MEASURES", "ChannelAligner", "Lockin", "LockinBandPower", "PairAligner",
     "Reward", "SynchronyMetric", "bandwidth_tau",

@@ -99,6 +99,13 @@ class Toolbar:
                 on_click=(lambda n_=n: lambda _e: self._pick_channels(n_))())
                 for n in self.CHANNEL_CHOICES])
         self.channels_text = ft.Text("", size=t.SMALL, color=t.MUTED)
+        # **The settings menu is reached from the launcher only**, because what it holds applies to every
+        # program and is not something to change from inside one. Shown wherever there is no crumb, which is
+        # the launcher and nowhere else — see `set_crumb`.
+        self.settings_chip = ft.Container(
+            content=ft.Text("settings", size=t.BODY, color=t.MUTED),
+            padding=ft.Padding(11, 7, 11, 7), border_radius=8,
+            border=ft.Border.all(1, t.BORDER), visible=False)
 
         # the mark and the name together are the way home, so the target is the whole lockup
         self.logo = mark = ft.Container(
@@ -153,7 +160,7 @@ class Toolbar:
                      self.rec_note, ft.Container(width=10),
                      self.clock_text, ft.Container(width=6), self.length_text,
                      ft.Container(width=14), self.transport, ft.Container(width=6), self.stop,
-                     ft.Container(width=6), self.record_split],
+                     ft.Container(width=6), self.record_split, self.settings_chip],
                     spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 padding=ft.Padding(18, 12, 18, 12),
                 border=ft.Border(bottom=ft.BorderSide(1, t.BORDER))),
@@ -226,6 +233,10 @@ class Toolbar:
         self.parent_crumb.value = parent[0] if parent else ""
         self.parent_group.visible = bool(parent and name)
         self.parent_box.on_click = (lambda _e: parent[1]()) if parent else None
+        self.settings_chip.visible = not name and self.settings_chip.on_click is not None
+
+    def bind_settings(self, on_settings: Callable[[], None]) -> None:
+        self.settings_chip.on_click = lambda _e: on_settings()
 
     def bind_transport(self, on_toggle, on_stop) -> None:
         self.transport.on_click = on_toggle
