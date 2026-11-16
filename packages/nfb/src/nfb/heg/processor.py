@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfilt_zi
+from scipy.signal import butter, sosfilt_zi
 
 from .source import Channel, Frame, HEG_RATE_HZ
 
@@ -99,12 +99,22 @@ class ChannelLowpass:
         self._zi = None
 
     def push(self, x: float) -> float:
+        x = float(x)
         if self._sos is None:
-            return float(x)
+            return x
         if self._zi is None:
-            self._zi = sosfilt_zi(self._sos) * float(x)
-        y, self._zi = sosfilt(self._sos, [float(x)], zi=self._zi)
-        return float(y[0])
+            self._zi = (sosfilt_zi(self._sos) * x).tolist()
+            self._sections = [(float(b0), float(b1), float(b2), float(a1), float(a2))
+                              for b0, b1, b2, _a0, a1, a2 in self._sos]
+        # The sections worked by hand, one sample through each (transposed direct form II, which is what
+        # `sosfilt` runs). A call to `sosfilt` for one sample is 25 µs of checks around 1 µs of
+        # arithmetic, and a frame takes six of them.
+        for (b0, b1, b2, a1, a2), z in zip(self._sections, self._zi):
+            y = b0 * x + z[0]
+            z[0] = b1 * x - a1 * y + z[1]
+            z[1] = b2 * x - a2 * y
+            x = y
+        return x
 
 
 class _MotionGate:
