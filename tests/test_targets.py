@@ -16,8 +16,6 @@ from nfb_console.feedback import FeedbackSettings
 from nfb_console.targets import (CALIBRATION_SECONDS, DEFAULT_MODES, HIT_RATES, MODES,
                                  RECENT_WINDOW, Target)
 
-import re
-import time
 
 RATE = 20.0        # the metric output rate
 

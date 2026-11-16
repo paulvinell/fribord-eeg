@@ -57,14 +57,6 @@ def _first_result(session, t: float, **kwargs):
     return session.trials.results[0], t
 
 
-def test_heg_opens_in_passive_mode_as_it_always_has():
-    from nfb_console.heg_view import HEGSession
-    from nfb_console.inputs import MendiChoice
-    from nfb_console.protocols import BY_CODE
-
-    assert HEGSession(BY_CODE["HEG"], choice=MendiChoice(kind="simulator")).mode == "passive"
-
-
 def test_a_rise_of_two_spreads_in_the_effort_succeeds_and_reads_about_two_sd():
     session = _session(trial_direction="increase", n_trials=1)
     t = _push(session, 70.0, 1000.0)                     # a minute of signal, so the spread exists

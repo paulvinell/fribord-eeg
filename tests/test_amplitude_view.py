@@ -91,21 +91,6 @@ def test_only_the_newest_view_keeps_drawing_and_a_bad_frame_is_reported_once():
         session.stop()
 
 
-def test_the_amplitude_screen_draws_before_any_data_arrives():
-    """"waiting for data" rather than a blank axis — and the empty state has to survive a real frame."""
-    from nfb_console import amplitude_view as av
-
-    page = StubPage()
-    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
-    try:
-        control = av.view(page, session, toolbar(), lambda: None)
-        assert control is not None
-        session.redraw()                    # no blocks fed at all
-        assert session.error is None
-    finally:
-        session.stop()
-
-
 def test_the_summed_source_adds_the_signals_rather_than_their_amplitudes():
     """The point of the source, and the thing this screen could not do before.
 
@@ -334,21 +319,6 @@ def test_the_amplitude_screen_offers_a_spectrum_of_the_sum():
     session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=1)
     try:
         assert [s.label for s in session.spectrum_sources()] == ["ch0"]
-    finally:
-        session.stop()
-
-
-def test_the_amplitude_screen_draws_with_real_data_through_it():
-    from nfb_console import amplitude_view as av
-
-    page = StubPage()
-    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
-    try:
-        av.view(page, session, toolbar(), lambda: None)
-        pump(session)
-        for _ in range(3):
-            session.redraw()
-        assert session.error is None, session.error
     finally:
         session.stop()
 

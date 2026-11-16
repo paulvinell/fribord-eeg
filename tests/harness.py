@@ -611,6 +611,9 @@ _built: dict[tuple, tuple] = {}
 def built_screen(module: str, code: str, channels: int, fed: bool):
     """A screen as the operator meets it: built, fed if asked, drawn. Returns `(page, control)`.
 
+    **This is also the test that each screen draws**, with no data and with thirty seconds of it: the
+    build fails if the frame does. A screen needs no test of its own for that.
+
     **Built once and shared by every test that asks for it, so a test must only read it.** A screen costs
     a quarter of a second to build and feed, and the layout rules and the text rules read the same nine
     screens in the same two states. A test that presses something that changes the screen builds its own.
@@ -637,6 +640,8 @@ def built_screen(module: str, code: str, channels: int, fed: bool):
                 for ch, spec in session.specs.items():
                     session.feed_block(Block(ch, i, to_counts(waves[ch][i:i + 250], spec.scale), spec))
         session.redraw()
+        # A frame that raises is kept on the session and not raised, so the draw loop survives it.
+        assert getattr(session, "error", None) is None, f"{code} did not draw: {session.error}"
         _built[key] = (page, control, session)
     return _built[key][:2]
 

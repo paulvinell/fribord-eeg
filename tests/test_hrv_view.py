@@ -20,7 +20,7 @@ from nfb_console import normalise
 
 from nfb_console.protocols import BY_CODE
 
-from harness import _texts, shown, StubPage, toolbar
+from harness import StubPage, _texts, toolbar
 
 
 def coherent_state(seconds: float = 200.0, depth: float = 0.09, jitter: float = 0.0):

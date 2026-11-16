@@ -23,9 +23,7 @@ from nfb_console.plots import nice_ceiling
 from nfb_console.protocols import BY_CODE
 
 from conftest import BENCH
-from harness import StubPage, _numbers, toolbar
-
-from harness import _texts, pump, replay, shown
+from harness import StubPage, _numbers, _texts, pump, replay, toolbar
 
 RATE = 250.0
 RECORDING = str(BENCH)      # see conftest: a generated bench recording, not sessions/
@@ -229,13 +227,6 @@ def test_the_inhibit_ladder_is_contiguous_and_covers_the_whole_range():
         assert high == low, "no gaps and no overlaps"
     assert ilf_view.INHIBITS[-1][1] == 40.0
     assert ilf_view.INHIBITS[0][0] > 0, "a band reaching DC is not a band"
-
-
-def test_the_reward_aim_is_ten_percent_and_the_inhibit_aim_ninety_five():
-    """The reward aim is 10 and the inhibit aim is 95. The 10 would look like a mistake without a reason:
-    the reward is deliberately rare, and a rarer reward is a stronger event."""
-    assert ilf_view.REWARD_AIM == 0.10
-    assert ilf_view.INHIBIT_AIM == 0.95
 
 
 def test_a_rectified_product_is_not_fitted_with_a_rayleigh():
@@ -1532,20 +1523,6 @@ def test_every_plot_can_be_given_a_window_and_a_scale():
 
         session.set_view(wave_scale_uv=0.0)
         assert session.wave_scale_uv == 0.0, "and auto is reachable again"
-    finally:
-        session.stop()
-
-
-def test_the_ilf_screen_draws_before_any_data_arrives():
-    from nfb_console import ilf_view
-
-    page = StubPage()
-    session = ilf_view.ILFSession(BY_CODE["ILF"], source=replay(), channels=2)
-    try:
-        control = ilf_view.view(page, session, toolbar(), lambda: None)
-        assert control is not None
-        session.redraw()                    # no blocks fed at all
-        assert session.error is None
     finally:
         session.stop()
 

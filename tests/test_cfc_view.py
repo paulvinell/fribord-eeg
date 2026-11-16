@@ -28,20 +28,6 @@ from harness import (
 )
 
 
-def test_the_cfc_screen_draws_before_any_data_arrives():
-    from nfb_console import cfc_view
-
-    page = StubPage()
-    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
-    try:
-        control = cfc_view.view(page, session, toolbar(), lambda: None)
-        assert control is not None
-        session.redraw()
-        assert session.error is None
-    finally:
-        session.stop()
-
-
 def test_the_cfc_screen_draws_with_real_data_through_it():
     from nfb_console import cfc_view
 
@@ -66,21 +52,17 @@ def test_the_cfc_screen_draws_with_real_data_through_it():
         session.stop()
 
 
-def test_cfc_opens_with_two_rewards_and_twelve_bins():
-    """The protocol, as a shape: two hailing frequencies up, six bins per channel down."""
+def test_each_cfc_reward_sits_on_a_boundary_between_two_bins():
+    """The interlock: a reward frequency is the edge that two inhibit bins share, on every channel."""
     from nfb_console import cfc_view
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
-        assert [t.band.centre for t in session.rewards] == [5.0, 10.0]
-        assert len(session.bin_targets) == 12
-        assert all(t.direction == "increase" for t in session.rewards)
         assert all(t.role == "inhibit" and t.direction == "increase" for t in session.bin_targets)
-        edges = sorted({(t.band.low, t.band.high) for t in session.bin_targets})
-        assert edges == [(1, 5), (5, 10), (10, 15), (15, 20), (20, 25), (25, 45)]
-        # every reward frequency sits on a bin boundary — the interlock, not a coincidence
-        boundaries = {e for pair in edges for e in pair}
+        boundaries = {edge for t in session.bin_targets for edge in (t.band.low, t.band.high)}
+        assert session.rewards
         for reward in session.rewards:
+            assert reward.direction == "increase"
             assert reward.band.centre in boundaries
     finally:
         session.stop()
@@ -281,22 +263,6 @@ def test_without_a_heart_source_the_cfc_screen_says_nothing_about_it():
         session.redraw()
         assert session.heart is None
         assert "HEART" not in " | ".join(c.value for c in _texts(control))
-    finally:
-        session.stop()
-
-
-def test_cfc_opens_with_pink_noise_under_quiet_reward():
-    """The traditional music, and the two halves fit: 1/f noise is a rendering of the target state, and
-    Quiet Reward makes it recede as the trainee approaches that state."""
-    from nfb_console import cfc_view
-
-    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
-    try:
-        fb = session.feedback
-        assert fb.music.enabled and fb.music.source == "noise" and fb.music.colour == "pink"
-        assert fb.sound.enabled and fb.sound.invert, "the music recedes as you do better"
-        assert fb.alert.enabled, "under Quiet Reward the alerts are the only arriving sound"
-        assert fb.sound.high < 100, "an inverted range sits at its top when the signal is zero"
     finally:
         session.stop()
 

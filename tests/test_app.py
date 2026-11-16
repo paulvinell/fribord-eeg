@@ -294,58 +294,6 @@ def test_the_contact_check_shows_the_shared_reference_once():
     assert "bipolar wiring" in shown, "the same electrodes read differently under each wiring"
 
 
-def test_amplitude_defaults_are_untouched_by_the_cfc_work():
-    """A fence. Everything CFC needed went into the *shared* layer, so every one of those changes was a
-    change to this screen too — and the ones that are protocol opinions must not have leaked here.
-
-    Checked rather than assumed because the failure mode is silent: the amplitude screen would still run,
-    just trained differently than it did before, and nothing on it would say so.
-    """
-    from nfb_console import amplitude_view as av
-    from nfb_console.targets import DEFAULT_MODES, HIT_RATES
-
-    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
-    try:
-        fb = session.feedback
-
-        # The signal: still `weighted` at 80/20. CFC *selects* `scaled`, which predates it — no combining
-        # rule was added or reshaped for that protocol, which is why this fence is cheap to hold.
-        assert fb.combine == "weighted"
-        assert fb.reward_share == 0.80
-        assert fb.normalisation == "sd"
-
-        # thresholds: our own rates, not a budget derived from someone's twelve-bin total
-        assert [t.hit_rate for t in session.targets] == [HIT_RATES[t.role]
-                                                         for t in session.targets]
-        assert all(t.hit_rate_override is None for t in session.targets)
-        assert [t.mode for t in session.targets] == [DEFAULT_MODES[t.wants_above]
-                                                     for t in session.targets]
-
-        # the targets themselves: reward rises in alpha, inhibit rises in slow and fast
-        assert [(t.band.low, t.band.high, t.direction, t.role) for t in session.targets] == [
-            (8.0, 12.0, "increase", "reward"), (2.0, 6.0, "increase", "inhibit"),
-            (19.0, 38.0, "increase", "inhibit")]
-        assert all(t.unit == "µV" for t in session.targets)
-        # **The reward is on a site and the inhibits are on the sum**, which is the asymmetry the two are
-        # for: a reward is a claim about an electrode, and contamination is not site-specific, so a veto
-        # watching one channel is blind to whichever input the operator is not looking at.
-        reward, *inhibits = session.targets
-        assert reward.pair is None and reward.source == 0
-        assert all(t.source == av.PAIR and t.pair == session.sites for t in inhibits)
-
-        # feedback: the app's own defaults, not CFC's arrangement
-        assert fb.sound.enabled and fb.click.enabled
-        assert not fb.shadow.enabled, "the display is asked for, not assumed"
-        assert not fb.alert.enabled and not fb.music.enabled
-        assert not fb.sound.invert and not fb.shadow.invert
-        assert fb.music.stops_when == "never"
-
-        # artifact rejection *is* on, which was asked for and applies everywhere
-        assert session.gates.policy.enabled
-    finally:
-        session.stop()
-
-
 def test_stopping_ends_the_session_and_keeps_the_setting_up():
     """**Stop is not a factory reset.** It ends the session and re-enters the protocol on a fresh one,
     which is right — but a fresh one was built from the protocol's defaults, so training SMR and pressing

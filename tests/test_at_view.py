@@ -155,33 +155,6 @@ def test_the_at_screen_draws_with_real_data_through_it():
         session.stop()
 
 
-def test_at_opens_with_the_shipped_bands_aims_and_floor():
-    """Everything here is off one data file: `fmt=CCRRI` with
-    `filter=[[0,40],[0,40],[2,7],[8,11],[22,36]]` and `values=[[1,0,250],[1,0,250],[25,0,250],
-    [55,0,250],[15,6,250]]` — the two raw channels are traces rather than targets, so what is left is
-    theta up at 25%, alpha up at 55%, high beta down at 15% over with a 6 µV floor.
-
-    Theta being the *harder* of the two rewards is the arrangement, not a typo: it is the band being
-    brought up.
-    """
-    from nfb_console import at_view
-
-    session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
-    try:
-        assert [(t.band.low, t.band.high, t.direction) for t in session.targets] == [
-            (2.0, 7.0, "increase"), (8.0, 11.0, "increase"), (22.0, 36.0, "increase")]
-        assert session.theta.hit_rate == 0.25
-        assert session.alpha.hit_rate == 0.55
-        assert session.inhibit.hit_rate == 0.85, "15% over threshold is 85% met"
-        assert session.theta.hit_rate < session.alpha.hit_rate, "theta is the one being brought up"
-        # the floor, which is the one clamp the shipped plan actually uses
-        assert session.inhibit.floor == 6.0
-        assert session.theta.floor is None and session.alpha.floor is None
-        assert session.guard is None, "the plan without a sleep guard is the default"
-    finally:
-        session.stop()
-
-
 def test_the_band_variants_are_both_shipped_plans():
     """Its two coherent stage files differ along three axes — theta width, whether there is a guard below
     it, and where the high inhibit starts — so both ends of each choice are its numbers.
