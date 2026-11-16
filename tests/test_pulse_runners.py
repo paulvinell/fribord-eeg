@@ -91,8 +91,12 @@ def test_a_fresh_source_starts_without_the_previous_beats():
 
 
 def test_a_waveform_can_be_read_while_the_runner_keeps_appending():
-    """The comparison reads on its own thread while each runner's thread appends. Walking the live deque
-    item by item failed 199 times in 200 under this load; the waveform is copied in one step instead."""
+    """The comparison reads on its own thread while each runner's thread appends. A walk of the live deque
+    item by item raises when an append lands in it, so the waveform is copied in one step instead.
+
+    The threads change places every half millisecond here, not every five. Measured, each read of a walked
+    deque then fails, so ten reads are a certain test and not a long one."""
+    import sys
     import threading
 
     heart, mendi = _heart(), _mendi()
@@ -106,14 +110,17 @@ def test_a_waveform_can_be_read_while_the_runner_keeps_appending():
                 target.append((1e6 + i / FS, 1.0))
             i += 1
 
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.0005)
     writer = threading.Thread(target=append)
     writer.start()
     try:
-        for _ in range(200):
+        for _ in range(10):
             assert heart.waveform and mendi.waveform
     finally:
         stop.set()
         writer.join()
+        sys.setswitchinterval(interval)
 
 
 def test_a_slow_drift_at_the_ear_does_not_count_as_pulse_height():

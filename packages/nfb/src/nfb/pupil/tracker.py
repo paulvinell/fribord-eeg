@@ -516,11 +516,12 @@ class TrackerSession:
         return self._seq
 
     def ask(self, op: int, payload: bytes, optional: bool = False,
-            timeout_s: float = REPLY_TIMEOUT_S) -> bytes | None:
+            timeout_s: float | None = None) -> bytes | None:
         """Send a request, wait for its matching response, and return its payload. Gaze frames that
         arrive meanwhile are queued for `drain_gaze`. `optional` returns None on no answer rather than
         raising — for a request the tracker can decline, such as a calibration point it will not take.
-        `timeout_s` is longer for a reply that is big or slow, such as the calibration model read-back."""
+        `timeout_s` is longer for a reply that is big or slow, such as the calibration model read-back, and
+        `REPLY_TIMEOUT_S` when it is not given."""
         seq = self._next_seq()
         frame = request(seq, op, payload)
         if len(frame) <= CHUNK + ENVELOPE:
@@ -532,7 +533,7 @@ class TrackerSession:
             for i in range(0, len(ttp), CHUNK):
                 piece = ttp[i:i + CHUNK]
                 self.link.write(bytes([DIR_OUT, 0, 0, 0]) + struct.pack("<I", len(piece)) + piece)
-        deadline = time.monotonic() + timeout_s
+        deadline = time.monotonic() + (REPLY_TIMEOUT_S if timeout_s is None else timeout_s)
         while time.monotonic() < deadline:
             data = self.link.read(100)
             if data is None:
