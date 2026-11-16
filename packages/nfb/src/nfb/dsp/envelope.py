@@ -24,6 +24,8 @@ At 100 ms delay the paper reports r = 0.85 ± 0.1 against the true (non-causal) 
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 from scipy import signal
 
@@ -58,7 +60,28 @@ def design_cfir(band: Band, rate_hz: float, delay_seconds: float, n_taps: int = 
     the raw figure.
 
     Returns complex taps to be applied with `lfilter`. The envelope is the modulus of the result.
+
+    **A design without weights is made once and kept.** One design is 7 ms of arithmetic and a screen asks
+    for the same few many times: a card rebuilt, a channel count changed, twelve bins on two channels. The
+    kept taps are read-only, since every estimator of that band holds the same array.
     """
+    if weights is None:
+        return _kept_design(band.low, band.high, float(rate_hz), float(delay_seconds), n_taps, n_fft,
+                            normalise)
+    return _design(band, rate_hz, delay_seconds, n_taps, n_fft, weights, normalise)
+
+
+@lru_cache(maxsize=512)
+def _kept_design(low: float, high: float, rate_hz: float, delay_seconds: float, n_taps: int,
+                 n_fft: int, normalise: bool) -> np.ndarray:
+    # Keyed on the band's edges and not on the band: its name changes nothing in the design.
+    taps = _design(Band(low, high), rate_hz, delay_seconds, n_taps, n_fft, None, normalise)
+    taps.setflags(write=False)
+    return taps
+
+
+def _design(band: Band, rate_hz: float, delay_seconds: float, n_taps: int, n_fft: int,
+            weights: np.ndarray | None, normalise: bool) -> np.ndarray:
     if n_taps < 8:
         raise ValueError("n_taps too small to fit a band")
     delay_samples = delay_seconds * rate_hz
