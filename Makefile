@@ -69,8 +69,13 @@ impedance:  ## electrode contact in kOhm
 capture:  ## raw frame capture, for protocol work
 	uv run optima capture --seconds 10
 
-test:  ## run the test suite
-	uv run pytest -q
+# The whole suite runs on the performance cores: measured, a worker on an efficiency core slows the run
+# (35 s on all twelve cores against 19 s on eight). One file runs on one core, since starting the workers
+# costs more than it saves.
+JOBS ?= $(shell sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || echo auto)
+
+test:  ## run the test suite, or one part of it (T=tests/test_dsp.py, T="tests/test_dsp.py -k envelope")
+	uv run pytest -q --durations=10 --durations-min=0.25 $(if $(T),$(T),-n $(JOBS))
 
 latency:  ## measure the output half of the latency budget (silent, invisible — writes current values only)
 	uv run python -m nfb_console.latency_bench --all

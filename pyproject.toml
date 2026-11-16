@@ -6,7 +6,8 @@ optima = { workspace = true }
 nfb = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8"]
+# xdist runs the suite on every core; `make test` uses it for the whole suite and not for one file.
+dev = ["pytest>=8", "pytest-xdist>=3"]
 # Only for `make shots`, which renders the screens so they can be looked at. Kept out of `dev` because
 # it pulls a browser down and the test suite does not need one.
 # The web server is locked here, or Flet pip-installs it unpinned; flet-web 0.86 breaks on fastapi 0.145.
