@@ -36,7 +36,7 @@ from nfb.stream import Block
 
 from conftest import counts, plausible_eeg
 from test_layout import SCREENS, walk
-from test_screens import StubDevice, StubPage, replay, toolbar
+from harness import StubDevice, StubPage, replay, toolbar
 
 MAX_WORDS = 25
 BANNED = {"may", "might", "shall", "should", "would", "could", "simply", "whatever", "just"}

@@ -18,6 +18,10 @@ import pytest
 from nfb.hrv import Beat, DEFAULT_METRIC, HRV_METRICS, HRVProcessor, metric_value
 from nfb_console import normalise
 
+from nfb_console.protocols import BY_CODE
+
+from harness import _texts, shown, StubPage, toolbar
+
 
 def coherent_state(seconds: float = 200.0, depth: float = 0.09, jitter: float = 0.0):
     """A `BeatState` from a tachogram modulated at 0.1 Hz — what this protocol is training toward."""
@@ -253,7 +257,7 @@ def test_the_pitch_source_gets_its_own_rows_and_not_the_file_browser():
     import flet as ft
     import sys
     sys.path.insert(0, "tests")
-    from test_screens import StubPage
+    from harness import StubPage
 
     from nfb_console import signal_pane
 
@@ -474,7 +478,7 @@ def test_the_screen_puts_the_direction_in_its_own_row_and_says_what_is_usual():
     import flet as ft
     import sys
     sys.path.insert(0, "tests")
-    from test_screens import StubPage
+    from harness import StubPage
 
     from nfb_console import hrv_view
 
@@ -525,7 +529,7 @@ def test_an_inverted_metric_inverts_the_level_and_not_the_scaling():
 def test_the_screen_has_one_feedback_tab_carrying_the_shared_mechanisms():
     import sys
     sys.path.insert(0, "tests")
-    from test_screens import StubPage, toolbar
+    from harness import StubPage, toolbar
 
     import flet as ft
 
@@ -1176,5 +1180,84 @@ def test_the_opening_seconds_say_what_they_are_counting():
             session.heart.state = proc.push(Beat(t, 60.0 + 4.0 * (i % 2), [1.0]))
         session.observe()
         assert session.signal is not None, "the level runs from the first beats that can carry it"
+    finally:
+        session.stop()
+
+
+def test_the_hrv_screen_draws_before_and_after_beats():
+    from nfb_console import hrv_view
+    from nfb.hrv import SimulatedBeats
+
+    page = StubPage()
+    session = hrv_view.HRVSession(BY_CODE["HRV"])
+    try:
+        control = hrv_view.view(page, session, toolbar(), lambda: None)
+        session.redraw()                        # no beats at all
+        assert session.error is None
+
+        # **The beats are pushed, not awaited.** This used to assign `session.source`, which `HRVSession`
+        # does not have and nothing reads, then start `run()` on a thread — so it opened the invented
+        # *realtime* simulator and slept through it, and its duration tracked whatever the spectrum
+        # happened to need that week. The processor is the thing under the screen; hand it beats.
+        source = SimulatedBeats(rsa_hz=0.1, seed=11, realtime=False)
+        beats = source.beats()
+        while not (session.state is not None and session.state.spectrum.ready):
+            session.heart.state = session.heart.processor.push(next(beats))
+        source.close()
+        session.heart.seen_at = time.monotonic()
+
+        session.redraw()
+        assert session.error is None, session.error
+        captions = " | ".join(c.value for c in _texts(control))
+        assert "0.1 Hz" in captions
+        assert "bpm" in captions
+    finally:
+        session.stop()
+
+
+def test_the_hrv_screen_has_exactly_one_place_to_configure_the_feedback():
+    """**The structural test the four-tab version would have failed.**
+
+    It briefly had Train, Passive, Feedback and Session — two tabs configuring the feedback, two writers to
+    the display brightness, two noise generators able to sound at once, and a metric selector on one tab that
+    the other tab ignored. Per-layer tests cannot see that by construction, so this looks at the whole.
+    """
+    from nfb_console import hrv_view
+    from nfb_console.inputs import HeartChoice
+
+    page = StubPage()
+    session = hrv_view.HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        control = hrv_view.view(page, session, toolbar(), lambda: None)
+        session.redraw()
+        texts = [x.value for x in _texts(control)]
+        shown = " ".join(texts)
+        assert texts.count("OUTPUT") == 1, "one panel, on one tab — the shared one"
+        assert "Passive" not in shown, "and not a second tab beside it"
+        # one owner for every effector it drives, and it is the same object every other screen uses
+        assert not hasattr(session, "passive_outputs")
+        assert session.display is not None and session.output_volume is not None
+        assert session.music is not None
+        # what this screen replaces is where the level comes from, and those two rows sit above that panel
+        assert "feed back" in shown and "scaled by" in shown
+        # not a parallel set of renderers
+        for gone in ("look at", "listen to", "the room", "ambient tint"):
+            assert gone not in shown, f"{gone!r} was a mechanism reimplemented"
+    finally:
+        session.stop()
+
+
+def test_the_hrv_pacer_says_which_kind_it_is():
+    """A metronome and a cardiac-phase-locked cue are different instruments, and the screen must not let
+    one pass for the other."""
+    from nfb_console import hrv_view
+
+    session = hrv_view.HRVSession(BY_CODE["HRV"])
+    try:
+        assert "waiting for beats" in session.pacer_note()
+        session.pacer_locked = False
+        assert "metronome" in session.pacer_note()
+        # with no beats, the metronome still paces — that is the point of the fallback
+        assert isinstance(session.breathe_in(), bool)
     finally:
         session.stop()

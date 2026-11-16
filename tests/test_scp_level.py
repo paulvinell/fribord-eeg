@@ -357,19 +357,19 @@ def test_the_corner_check_says_how_much_of_a_shift_survives():
 # --- the screen -------------------------------------------------------------------------------
 
 def _page():
-    from test_screens import StubPage
+    from harness import StubPage
 
     return StubPage()
 
 
 def _toolbar():
-    from test_screens import toolbar
+    from harness import toolbar
 
     return toolbar()
 
 
 def _texts(control, depth: int = 0):
-    from test_screens import _texts as walk
+    from harness import _texts as walk
 
     return walk(control, depth)
 

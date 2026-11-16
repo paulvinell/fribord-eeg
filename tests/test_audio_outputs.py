@@ -1348,3 +1348,83 @@ def test_stopping_the_file_player_does_not_wait_for_its_player_to_exit(monkeypat
         assert time.monotonic() - began < 0.05
     finally:
         wedged.set()
+
+
+def test_a_held_mark_is_two_of_the_same_sound_rather_than_a_new_one():
+    """Rhythm and not pitch, because the pitch is already carrying which band earned it. So the doubled form
+    is the base sound twice with a gap, which is why it needs no second pitch and no calibration."""
+    import wave as wavelib
+
+    from nfb_console import cues
+
+    base = cues.tone_at(137)
+    doubled = cues.held(base)
+    assert doubled != base
+    assert cues.held(doubled) == doubled, "idempotent"
+    assert cues.held("nonesuch") == "nonesuch", "unknown names pass through untouched"
+    assert doubled not in cues.click_choices(), "the menu of characters is not where these go"
+
+    one = cues.duration_ms(base)
+    both = cues.duration_ms(doubled)
+    assert both == pytest.approx(one * 2 + cues.HOLD_GAP_MS)
+    with wavelib.open(str(cues.click_path(doubled))) as fh:
+        assert fh.getnframes() == pytest.approx(cues.RATE * both / 1000, rel=0.02)
+
+    # It works for a click as well as a tone, since a protocol without an earning target still has one.
+    assert cues.duration_ms(cues.held("tick")) > cues.duration_ms("tick")
+
+
+def test_every_noise_colour_can_be_heard_before_the_session_starts():
+    """"1/f²" does not tell anybody how deep brown is, so the preview is the only way the control says what
+    it does. Rendered to a file and handed to the system player rather than opened on the audio device: a
+    live session may already hold that device, and a preview that silenced the music it previews would be
+    worse than none."""
+    import wave
+
+    import numpy as np
+
+    from nfb_console import music
+
+    energy = {}
+    for colour in music.NOISE_COLOURS:
+        path = music.preview_path(colour)
+        assert path is not None and path.exists(), colour
+        with wave.open(str(path)) as fh:
+            frames = fh.getnframes()
+            assert fh.getframerate() == music.SAMPLE_RATE
+            data = np.frombuffer(fh.readframes(frames), dtype=np.int16).astype(float)
+        assert frames == pytest.approx(music.SAMPLE_RATE * music.PREVIEW_SECONDS, rel=0.01)
+        assert abs(data).max() < 32767, "clipped noise is harsh in the way this music is chosen not to be"
+        assert abs(data[:8]).max() < abs(data).max() * 0.2, "no click at the start"
+        # the spectral tilt is the whole content of the control, so it is what the test checks
+        spectrum = np.abs(np.fft.rfft(data * np.hanning(len(data))))
+        freqs = np.fft.rfftfreq(len(data), 1 / music.SAMPLE_RATE)
+        low = spectrum[(freqs > 100) & (freqs < 300)].mean()
+        high = spectrum[(freqs > 3000) & (freqs < 6000)].mean()
+        energy[colour] = low / high
+    assert energy["brown"] > energy["pink"] > energy["white"], f"the tilts are wrong: {energy}"
+    assert music.preview_path(colour) is music.preview_path(colour), "rendered once per process"
+    assert music.preview_path("chartreuse") is None
+
+
+def test_the_crossfade_does_not_change_loudness_as_it_fades():
+    """Music whose volume dipped mid-fade would read as a broken control rather than as a change of
+    character. Both tilts filter the *same* white noise, so the fade interpolates one into the other
+    instead of adding two independent sources in power. Measured over four seconds per position: the RMS
+    holds within 5% across the sweep, under half a decibel."""
+    import numpy as np
+
+    from nfb_console.music import NoisePlayer
+
+    levels = []
+    for balance in (0.0, 0.25, 0.5, 0.75, 1.0):
+        player = NoisePlayer()
+        player.configure("pink", 100.0, second_colour="brown", balance=balance)
+        rms = []
+        for i in range(400):
+            buf = player._block(512)
+            if i > 20:                          # let the filter states settle
+                rms.append(float(np.sqrt(np.mean(buf.astype(float) ** 2))))
+        levels.append(float(np.mean(rms)))
+    assert min(levels) > 0.9 * max(levels), f"the fade changes loudness: {levels}"
+    assert max(abs(v) for v in buf.ravel()) < 1.0, "and it never reaches the clip point"

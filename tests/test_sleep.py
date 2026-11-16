@@ -7,7 +7,7 @@ lost rather than only saying a channel is bad right now.
 
 from __future__ import annotations
 
-from test_screens import StubPage, at_corner, pump, replay, toolbar
+from harness import StubPage, at_corner, pump, replay, toolbar
 
 from nfb_console import sleep_view
 from nfb_console.protocols import BY_CODE

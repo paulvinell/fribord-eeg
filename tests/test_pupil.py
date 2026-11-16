@@ -17,7 +17,7 @@ from nfb_console.trials import ACTIVE, BASELINE, ITI, LEADIN_S, NEGATIVE, POSITI
 from nfb_console.pupil_view import ITI_S, OBSERVE_HZ, RESULT_S
 from nfb_console.trial_training import CUE_PITCH_NEUTRAL
 
-from test_screens import StubPage, toolbar
+from harness import StubPage, toolbar
 from test_ste import _help_faults, _texts
 
 

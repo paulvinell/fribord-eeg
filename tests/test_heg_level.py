@@ -454,7 +454,7 @@ def test_the_heg_screen_draws_before_and_after_frames():
     import sys
 
     sys.path.insert(0, "tests")
-    from test_screens import StubPage, _texts, toolbar
+    from harness import StubPage, _texts, toolbar
 
     from nfb_console import heg_view
 
@@ -482,7 +482,7 @@ def test_the_screen_has_one_place_to_configure_the_feedback():
     import sys
 
     sys.path.insert(0, "tests")
-    from test_screens import StubPage, _texts, toolbar
+    from harness import StubPage, _texts, toolbar
 
     from nfb_console import heg_view
 
@@ -530,7 +530,7 @@ def test_the_headband_is_chosen_on_the_device_screen_like_every_other_source():
     sys.path.insert(0, "tests")
     from conftest import waitfor
     from test_ppg import _press
-    from test_screens import StubPage, _texts
+    from harness import StubPage, _texts
 
     from nfb import Device, Settings
     from nfb_console import device_panel
@@ -562,7 +562,7 @@ def test_the_motion_hold_is_a_row_on_the_screen_and_the_chip_carries_the_charge(
     import sys
 
     sys.path.insert(0, "tests")
-    from test_screens import StubPage, _texts, toolbar
+    from harness import StubPage, _texts, toolbar
 
     from nfb_console import heg_view
 

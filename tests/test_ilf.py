@@ -23,7 +23,9 @@ from nfb_console.plots import nice_ceiling
 from nfb_console.protocols import BY_CODE
 
 from conftest import BENCH
-from test_screens import StubPage, _numbers, toolbar
+from harness import StubPage, _numbers, toolbar
+
+from harness import _texts, pump, replay, shown
 
 RATE = 250.0
 RECORDING = str(BENCH)      # see conftest: a generated bench recording, not sessions/
@@ -1122,12 +1124,12 @@ def test_the_slow_signal_panel_is_only_there_when_a_slow_signal_is_being_trained
     is exactly when there is a slow waveform to read."""
     import sys
     sys.path.insert(0, "tests")
-    from test_screens import StubPage, _numbers, toolbar
+    from harness import StubPage, _numbers, toolbar
 
     import flet as ft
 
     def visible_text(control, depth: int = 0) -> str:
-        """Text the operator can actually see. `test_screens._texts` walks hidden branches too — which is
+        """Text the operator can actually see. `harness._texts` walks hidden branches too — which is
         right there, since it reads the inactive tabs on purpose — and so cannot answer this question."""
         if control is None or depth > 16 or getattr(control, "visible", True) is False:
             return ""
@@ -1530,5 +1532,113 @@ def test_every_plot_can_be_given_a_window_and_a_scale():
 
         session.set_view(wave_scale_uv=0.0)
         assert session.wave_scale_uv == 0.0, "and auto is reachable again"
+    finally:
+        session.stop()
+
+
+def test_the_ilf_screen_draws_before_any_data_arrives():
+    from nfb_console import ilf_view
+
+    page = StubPage()
+    session = ilf_view.ILFSession(BY_CODE["ILF"], source=replay(), channels=2)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        assert control is not None
+        session.redraw()                    # no blocks fed at all
+        assert session.error is None
+    finally:
+        session.stop()
+
+
+def test_the_ilf_screen_draws_with_real_data_through_it():
+    """Four instruments on one screen whose windows run from 300 ms to four minutes, so every caption has a
+    different unit in it — which is exactly the kind of thing that throws on a live frame and passes every
+    object-inspecting test."""
+    from nfb_console import ilf_view
+
+    page = StubPage()
+    session = ilf_view.ILFSession(BY_CODE["ILF"], source=replay(), channels=2)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        session.toggle_pause()
+        pump(session)
+        for _ in range(3):
+            session.redraw()
+        assert session.error is None, session.error
+        captions = " ".join(x.value for x in _texts(control))
+        assert "cycles" in captions, "the slow signal and the Lissajous state their window in cycles"
+        assert "µV²" in captions, "and the reward axis says it is a product"
+        assert "across" in captions and "full scale" in captions
+    finally:
+        session.stop()
+
+
+def test_the_ilf_screen_says_which_band_the_reward_is_measuring():
+    """And crucially says when the filter has become a bare lowpass, because that is the difference between
+    training a narrow band at 0.05 Hz and training the slow waveform — the same control, two instruments."""
+    from nfb_console import ilf_view
+
+    page = StubPage()
+    session = ilf_view.ILFSession(BY_CODE["ILF"], source=replay(), channels=2)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        shown = " ".join(x.value for x in _texts(control))
+        assert "8.5–11.5 Hz" in shown, "their 3 Hz bandwidth at their default centre"
+        # The default slow band has a lower edge — their `direct` path assumes a hardware edge this amplifier
+        # cannot supply — and it sits at `centre/4` rather than the ILF element's `centre/2`, which is a group
+        # delay decision and ours. See `nfb.dsp.product.SLOW_BANDS`.
+        session.set_frequency(0.05)
+        session.redraw()
+        shown = " ".join(x.value for x in _texts(control))
+        assert "0.0125–0.1 Hz" in shown, "centre/4 to twice the centre"
+
+        # And their path is still there, saying exactly what it always said.
+        session.set_frequency(0.05, slow_band="0–2×")
+        session.redraw()
+        shown = " ".join(x.value for x in _texts(control))
+        assert "no high-pass" in shown and "below 0.1 Hz" in shown, \
+            "the lowpass corner is twice the centre, not centre + bandwidth/2"
+    finally:
+        session.stop()
+
+
+def test_the_ilf_screen_presents_one_instrument_with_three_places_to_point_it():
+    """Their `Synchrony Module` appears once and takes one `RewardFrequency`, so the three named frequencies
+    are presets on one card rather than three cards. An earlier version built three concurrent rewards."""
+    from nfb_console import ilf_view
+
+    page = StubPage()
+    session = ilf_view.ILFSession(BY_CODE["ILF"], source=replay(), channels=2)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        session.redraw()            # the axis units are written on the first frame
+        shown = " ".join(x.value for x in _texts(control))
+        for name, _hz in ilf_view.PRESETS:
+            assert name in shown
+        assert shown.count("threshold") >= 1
+        assert "µV²" in shown, "and it says the reward is a product"
+    finally:
+        session.stop()
+
+
+def test_the_feedback_tab_offers_no_file_browser_for_the_shepard_tone():
+    """It fell through to the file branch and offered to play an mp3 as a Shepard tone. What makes it a
+    Shepard tone is stated — the wheel — and how far it travels is set, because that is this mechanism's
+    output range and every other continuous mechanism has one."""
+    from nfb_console import ilf_view, signal_pane
+
+    page = StubPage()
+    session = ilf_view.ILFSession(BY_CODE["ILF"], source=replay(), channels=2)
+    try:
+        pane = signal_pane.SignalPane(page, session)
+        shown = " ".join(x.value for x in _texts(pane.control))
+        # the music is off on this screen, so switch to it to render its row
+        session.feedback.music.enabled = True
+        session.feedback.music.source = "shepard"
+        pane = signal_pane.SignalPane(page, session)
+        shown = " ".join(x.value for x in _texts(pane.control))
+        assert "partials an octave apart" in shown
+        assert "how far it climbs" in shown and "from the bottom of the signal to the top" in shown
+        assert "file or folder" not in shown
     finally:
         session.stop()

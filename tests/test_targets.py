@@ -16,6 +16,9 @@ from nfb_console.feedback import FeedbackSettings
 from nfb_console.targets import (CALIBRATION_SECONDS, DEFAULT_MODES, HIT_RATES, MODES,
                                  RECENT_WINDOW, Target)
 
+import re
+import time
+
 RATE = 20.0        # the metric output rate
 
 
@@ -743,3 +746,58 @@ def test_cfc_total_above_does_not_hide_an_always_hot_bin():
     total = CFCSession.total_above.fget(stub)
     # met 0% → 100 above (the hot bin, now counted); no window → 0; met 100% → 0
     assert total == pytest.approx(100.0)
+
+
+def test_an_automatic_threshold_can_be_told_to_hold_still_between_re_derivations():
+    """The re-derivation period, and the reason is not performance. A tracker recomputing continuously holds
+    percent-over-threshold at the aim *by construction*, so the trained quantity cannot show a change; one
+    that holds still for a period makes the percentage real within the period while still absorbing drift
+    between them. Optional, and generic across protocols — 0 keeps exactly the old behaviour."""
+    import numpy as np
+
+    from nfb.dsp import Band
+    from nfb_console.targets import Target
+
+    def thresholds(period: float) -> list[float]:
+        rng = np.random.default_rng(3)
+        tgt = Target(0, Band(8.0, 12.0, ""), "increase", mode="automatic")
+        tgt.recompute_seconds = period
+        seen = []
+        for i in range(20 * 240):                       # four minutes at 20 Hz, rising steadily
+            tgt.observe(float(10 + i / (20 * 240) * 10 + rng.normal(0, 2)), 20.0)
+            if i % (20 * 30) == 0:
+                seen.append(round(tgt.threshold, 2))    # at 0, 30, 60 … 210 s
+        return seen
+
+    continuous = thresholds(0.0)
+    held = thresholds(120.0)
+    assert len(set(continuous)) == len(continuous), "a continuous tracker moves every time you look"
+    # **The period starts once the window has filled.** Before that the line is re-derived every second
+    # like a fixed calibration, or a 90 s period would mean 90 s on the constructed placeholder.
+    assert held[1] != held[0], "provisional and moving inside the first window"
+    assert held[2] == held[3] == held[4] == held[5], "held still inside the period, from 60 s"
+    assert held[7] != held[2], "and re-derived across it"
+
+
+def test_a_threshold_floor_survives_calibration_and_a_nudge():
+    """Without it one quiet stretch drives an inhibit's threshold toward zero and it then fires for the
+    rest of the session. It has to hold wherever the threshold is set, including by hand — a nudge past
+    the floor would otherwise survive until the next recalibration and be silently undone by it."""
+    import numpy as np
+
+    from nfb_console.targets import Target
+    from nfb.dsp import Band
+
+    tgt = Target(0, Band(22.0, 36.0, ""), "decrease", mode="fixed", floor=6.0, ceiling=250.0)
+    rng = np.random.default_rng(7)
+    for _ in range(700):                        # a very quiet channel
+        tgt.observe(abs(rng.normal(0, 0.3)), 20.0)
+    assert tgt.threshold == 6.0, "the derived number was below the floor"
+
+    tgt.nudge(0.5)
+    assert tgt.threshold == 6.0, "and a hand-set number cannot go under it either"
+
+    unbounded = Target(0, Band(22.0, 36.0, ""), "decrease", mode="fixed")
+    for _ in range(700):
+        unbounded.observe(abs(rng.normal(0, 0.3)), 20.0)
+    assert unbounded.threshold < 1.0, "the default is still no clamp at all"

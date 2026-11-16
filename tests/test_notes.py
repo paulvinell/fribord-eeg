@@ -95,7 +95,7 @@ def test_an_edf_recording_gets_its_states_beside_it(monkeypatch, tmp_path):
 def test_a_session_hands_over_what_its_recording_cannot_hold():
     """`TrainingSession.companion` is the snapshot the recorder writes; it has to describe the
     channels well enough that an EDF file beside it can be interpreted."""
-    from test_screens import replay
+    from harness import replay
 
     from nfb_console import amplitude_view as av
     from nfb_console.protocols import BY_CODE

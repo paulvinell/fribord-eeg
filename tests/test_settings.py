@@ -13,7 +13,7 @@ from nfb_console import cues, developer, device_panel, music, prefs, settings_di
     training, wakelock
 
 from test_layout import walk
-from test_screens import RECORDING, StubPage
+from harness import RECORDING, StubPage
 from test_ste import faults
 
 

@@ -303,7 +303,7 @@ def test_a_failed_connection_becomes_the_source_error_and_closes_the_link(monkey
 def test_the_device_screen_says_why_the_tracker_did_not_connect(monkeypatch):
     from conftest import waitfor
     from test_layout import walk
-    from test_screens import StubPage
+    from harness import StubPage
 
     import flet as ft
 
@@ -376,7 +376,7 @@ def test_reading_the_screens_from_macos_does_not_raise():
 
 
 def test_the_device_screen_offers_each_reported_screen(monkeypatch):
-    from test_screens import StubPage, _texts
+    from harness import StubPage, _texts
 
     from nfb import Device, Settings
     from nfb_console import device_panel, displays

@@ -134,7 +134,7 @@ def test_a_fresh_session_keeps_the_plan_and_nothing_else():
 
 def _drawn(session):
     from nfb_console import pair_view
-    from test_screens import StubPage, toolbar
+    from harness import StubPage, toolbar
     from test_ste import _texts
 
     page = StubPage()

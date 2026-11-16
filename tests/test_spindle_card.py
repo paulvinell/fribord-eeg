@@ -14,7 +14,7 @@ from nfb_console.protocols import BY_CODE
 
 from conftest import counts, plausible_eeg, waitfor
 from test_layout import RULES, walk
-from test_screens import StubPage, replay, toolbar
+from harness import StubPage, replay, toolbar
 from test_ste import _help_faults, faults
 
 

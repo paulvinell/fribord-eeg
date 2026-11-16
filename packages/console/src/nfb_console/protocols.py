@@ -45,7 +45,7 @@ them: two sites in step, against fast bursts nested in a slow rhythm.
 
 **A blurb is one line that does not wrap**, so it has a width budget — see
 `splash.protocol_card`, which keeps every text slot a fixed height on purpose. Four of these were over it
-and clipped mid-word on screen; `tests/test_screens` now measures them.
+and clipped mid-word on screen; `tests/test_splash` now measures them.
 
 HEG and HRV are here as protocols, not only as tabs on the device screen, because from the operator's
 side they are things you sit down to *do* — the fact that they need a different amplifier is a detail of

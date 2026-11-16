@@ -187,13 +187,13 @@ def test_a_gap_resets_the_filters_rather_than_smearing_it_forward():
 # --- the screen ------------------------------------------------------------------------------
 
 def _page():
-    from test_screens import StubPage
+    from harness import StubPage
 
     return StubPage()
 
 
 def _toolbar():
-    from test_screens import toolbar
+    from harness import toolbar
 
     return toolbar()
 
@@ -220,15 +220,15 @@ def _pump(session, until=None, blocks: int = 200_000) -> None:
 
 
 def _texts(control, depth: int = 0):
-    from test_screens import _texts as walk
+    from harness import _texts as walk
 
     return walk(control, depth)
 
 
 def _numbers(control):
     """Every typeable value on a control tree. A number you can set is a `TextField`, not a `Text`, which is
-    the whole point of it being settable — see `test_screens._numbers`."""
-    from test_screens import _numbers as walk
+    the whole point of it being settable — see `harness._numbers`."""
+    from harness import _numbers as walk
 
     return walk(control)
 

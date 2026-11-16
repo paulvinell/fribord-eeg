@@ -146,7 +146,7 @@ def test_collection_resumes_after_a_device_epoch_restarts_signal_time():
 def test_the_pane_collects_whether_or_not_its_tab_was_ever_opened():
     """The session average must not depend on when the operator first clicked Trends, so the sampling is
     driven from the screen's draw loop, not from the pane being visible."""
-    from test_screens import StubPage, replay
+    from harness import StubPage, replay
 
     from nfb_console import amplitude_view as av
     from nfb_console import trends_pane
@@ -185,7 +185,7 @@ def test_the_history_survives_the_view_being_rebuilt_around_it():
     same session — deliberately, and `Console.resume` says so. The band history was on the pane, so the
     trip emptied it: an hour of session, then a look at an electrode, then a graph starting from zero.
     """
-    from test_screens import StubPage, replay, toolbar
+    from harness import StubPage, replay, toolbar
 
     from nfb_console import amplitude_view as av
     from nfb_console.protocols import BY_CODE

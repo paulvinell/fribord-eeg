@@ -1,6 +1,6 @@
 """Layout faults that every other test in this repo is blind to.
 
-`test_screens` proves a frame can be produced. It cannot tell whether the frame is any good, because it
+The screen files prove a frame can be produced. It cannot tell whether the frame is any good, because it
 inspects Python objects and the objects are correct in all of the ways that matter to it. Every UI bug
 this screen family has shipped was still *in* those objects — labels sharing a position, a spacer that
 cannot expand, text wider than the box holding it, a threshold drawn along the frame of its own plot —
@@ -29,7 +29,7 @@ from nfb_console.protocols import BY_CODE
 from nfb.stream import Block
 
 from conftest import counts, plausible_eeg, text_width
-from test_screens import StubDevice, StubPage, replay, toolbar
+from harness import StubDevice, StubPage, replay, toolbar
 
 FED_SECONDS = 30.0
 

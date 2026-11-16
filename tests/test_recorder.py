@@ -270,7 +270,7 @@ def test_the_record_options_resolve_to_the_file_you_will_actually_get(tmp_path):
 def test_the_toolbar_paints_the_recorder_it_is_shown(tmp_path):
     from types import SimpleNamespace
 
-    from test_screens import StubDevice
+    from harness import StubDevice
 
     from nfb_console import chrome
     from nfb_console import theme as t

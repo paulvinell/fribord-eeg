@@ -146,7 +146,7 @@ def test_the_screen_draws_the_trials_in_active_mode():
     import sys
 
     sys.path.insert(0, "tests")
-    from test_screens import StubPage, _texts, toolbar
+    from harness import StubPage, _texts, toolbar
 
     from nfb_console import heg_view
 
