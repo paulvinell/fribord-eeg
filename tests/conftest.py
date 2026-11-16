@@ -12,11 +12,19 @@ output does so through its own fake, as `test_shadow.py` does.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 from scipy import signal as _sp
+
+# For the whole process and before the console is imported, as well as for each test below. A screen that
+# several tests share (`harness.built_screen`) is stopped after the last test, outside every test's own
+# patches, and a session writes its calibration when it stops.
+os.environ["NFB_NO_OUTPUTS"] = "1"
+os.environ["NFB_PREFS"] = str(Path(tempfile.mkdtemp(prefix="nfb-tests-")) / "prefs.json")
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +63,14 @@ def _prefs_off_the_real_file(tmp_path, monkeypatch):
     from nfb_console import developer
 
     monkeypatch.setattr(developer, "settings", developer.DeveloperSettings())
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _stop_the_shared_screens():
+    yield
+    import harness
+
+    harness.stop_built_screens()
 
 
 # --- the bench recording the screen tests replay ---------------------------------------------

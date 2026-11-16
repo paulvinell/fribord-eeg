@@ -14,7 +14,7 @@ from nfb import ReplaySource, Settings, WaitingSource
 from nfb_console import chrome
 from nfb_console.protocols import BY_CODE
 
-from conftest import BENCH, counts as to_counts
+from conftest import BENCH, counts as to_counts, plausible_eeg
 
 RECORDING = str(BENCH)      # see conftest: a generated bench recording, not sessions/
 
@@ -565,3 +565,77 @@ def _menu_clicks(control, label, depth: int = 0, found=None):
 def _find_menu_items(control, labels):
     return {label: clicks[0] for label in labels
             for clicks in [_menu_clicks(control, label)] if clicks}
+
+
+# --- every screen, built once for the tests that only read it -------------------------------
+
+FED_SECONDS = 30.0
+
+# Screen module, protocol code, channels. Cold *and* fed, because most layout faults only show in one of
+# the two: a threshold pinned to the top of its plot needs no data at all, and an axis whose labels
+# collide needs some.
+SCREENS = [
+    ("amplitude_view", "AMP", 2),
+    ("at_view", "A-T", 2),
+    ("cfc_view", "CFC", 2),
+    ("ilf_view", "ILF", 2),
+    ("pac_view", "PAC", 4),
+    ("pac_view", "PAC", 1),
+    ("scp_view", "SCP", 1),
+    ("sleep_view", "SLEEP", 2),
+    ("wave_view", "WAVE", 1),
+]
+# The screens that read another device. They are built cold only: the feed below is EEG blocks.
+OTHER_SCREENS = [("hrv_view", "HRV", 0), ("heg_view", "HEG", 0), ("pupil_view", "PUPIL", 0),
+                 ("pair_view", "PAIR", 0)]
+
+
+def screen_params(screens):
+    """The screens as test parameters. The tests of one screen run in one worker process (`xdist_group`),
+    so they share its build."""
+    import pytest
+
+    return [pytest.param(module, code, channels, id=f"{code}-{channels}ch",
+                         marks=pytest.mark.xdist_group(f"{code}-{channels}ch"))
+            for module, code, channels in screens]
+
+
+_built: dict[tuple, tuple] = {}
+
+
+def built_screen(module: str, code: str, channels: int, fed: bool):
+    """A screen as the operator meets it: built, fed if asked, drawn. Returns `(page, control)`.
+
+    **Built once and shared by every test that asks for it, so a test must only read it.** A screen costs
+    a quarter of a second to build and feed, and the layout rules and the text rules read the same nine
+    screens in the same two states. A test that presses something that changes the screen builds its own.
+
+    **Fed with plausible signal, not the bench recording.** The recording is open inputs railed to full
+    scale, so every band reads zero and a fed screen is a cold one with a different name. The same
+    generator feeds `tools/shots.py`, so a failure here and a picture of it are of the same screen.
+    """
+    import importlib
+
+    from nfb.stream import Block
+
+    key = (module, code, channels, fed)
+    if key not in _built:
+        screen = importlib.import_module(f"nfb_console.{module}")
+        session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)
+        page = StubPage()
+        control = screen.view(page, session, toolbar(), lambda: None)
+        if fed:
+            session.paused = False
+            session.state = dict.fromkeys(session.specs, True)
+            waves = {ch: plausible_eeg(FED_SECONDS, session.rate, ch) for ch in session.specs}
+            for i in range(0, int(FED_SECONDS * session.rate) - 249, 250):
+                for ch, spec in session.specs.items():
+                    session.feed_block(Block(ch, i, to_counts(waves[ch][i:i + 250], spec.scale), spec))
+        session.redraw()
+        _built[key] = (page, control, session)
+    return _built[key][:2]
+
+
+def stop_built_screens() -> None:
+    while _built:
+        _built.popitem()[1][2].stop()

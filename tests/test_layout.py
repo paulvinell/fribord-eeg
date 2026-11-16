@@ -1,7 +1,7 @@
 """Layout faults that every other test in this repo is blind to.
 
-The screen files prove a frame can be produced. It cannot tell whether the frame is any good, because it
-inspects Python objects and the objects are correct in all of the ways that matter to it. Every UI bug
+The screen files prove a frame can be produced. They cannot tell whether the frame is any good, because
+they inspect Python objects and the objects are correct in all of the ways that matter to them. Every UI bug
 this screen family has shipped was still *in* those objects — labels sharing a position, a spacer that
 cannot expand, text wider than the box holding it, a threshold drawn along the frame of its own plot —
 and nobody had written the checks.
@@ -29,24 +29,7 @@ from nfb_console.protocols import BY_CODE
 from nfb.stream import Block
 
 from conftest import counts, plausible_eeg, text_width
-from harness import StubDevice, StubPage, replay, toolbar
-
-FED_SECONDS = 30.0
-
-# Screen, protocol code, channels, and whether to push a recording through it first. Cold *and* fed,
-# because most of these faults only show in one of the two: a threshold pinned to the top of its plot
-# needs no data at all, and an axis whose labels collide needs some.
-SCREENS = [
-    ("amplitude_view", "AMP", 2),
-    ("at_view", "A-T", 2),
-    ("cfc_view", "CFC", 2),
-    ("ilf_view", "ILF", 2),
-    ("pac_view", "PAC", 4),
-    ("pac_view", "PAC", 1),
-    ("scp_view", "SCP", 1),
-    ("sleep_view", "SLEEP", 2),
-    ("wave_view", "WAVE", 1),
-]
+from harness import SCREENS, StubDevice, StubPage, built_screen, replay, screen_params, toolbar
 
 BOLD = {ft.FontWeight.W_500, ft.FontWeight.W_600, ft.FontWeight.W_700, ft.FontWeight.BOLD}
 
@@ -269,32 +252,12 @@ def test_launcher_layout():
     assert not faults, "\n".join(faults)
 
 
-@pytest.mark.parametrize("module,code,channels", SCREENS,
-                         ids=[f"{c}-{n}ch" for _, c, n in SCREENS])
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS))
 @pytest.mark.parametrize("fed", [False, True], ids=["cold", "fed"])
 def test_screen_layout(module: str, code: str, channels: int, fed: bool):
-    screen = importlib.import_module(f"nfb_console.{module}")
-    session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)
-    try:
-        page = StubPage()
-        control = screen.view(page, session, toolbar(), lambda: None)
-        if fed:
-            # **Plausible signal, not the bench recording.** The fixture is open inputs railed to full
-            # scale, so every band reads zero and a "fed" screen is a cold one wearing a different name
-            # — which meant the rules below were checking one state twice. The same generator feeds
-            # `tools/shots.py`, so an audit failure and a screenshot of it are of the same picture.
-            session.paused = False
-            session.state = dict.fromkeys(session.specs, True)
-            waves = {ch: plausible_eeg(FED_SECONDS, session.rate, ch) for ch in session.specs}
-            for i in range(0, int(FED_SECONDS * session.rate) - 249, 250):
-                for ch, spec in session.specs.items():
-                    session.feed_block(Block(ch, i, counts(waves[ch][i:i + 250], spec.scale), spec))
-        session.redraw()
-
-        faults = [f"{rule.__name__}: {fault}" for rule in RULES for fault in rule(control)]
-        assert not faults, "\n".join(faults)
-    finally:
-        session.stop()
+    _page, control = built_screen(module, code, channels, fed)
+    faults = [f"{rule.__name__}: {fault}" for rule in RULES for fault in rule(control)]
+    assert not faults, "\n".join(faults)
 
 
 # --- nothing flickers -------------------------------------------------------------------------
@@ -311,8 +274,7 @@ after each, and counts how often each control's visibility changes.
 """
 
 
-@pytest.mark.parametrize("module,code,channels", SCREENS,
-                         ids=[f"{c}-{n}ch" for _, c, n in SCREENS])
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS))
 def test_nothing_flickers(module: str, code: str, channels: int):
     screen = importlib.import_module(f"nfb_console.{module}")
     session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)

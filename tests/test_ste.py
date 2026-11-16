@@ -25,18 +25,14 @@ from __future__ import annotations
 
 import importlib
 import re
-from contextlib import contextmanager
 
 import flet as ft
 import pytest
 
-from nfb_console.protocols import BY_CODE
 
-from nfb.stream import Block
 
-from conftest import counts, plausible_eeg
-from test_layout import SCREENS, walk
-from harness import StubDevice, StubPage, replay, toolbar
+from harness import OTHER_SCREENS, SCREENS, StubDevice, StubPage, built_screen, screen_params
+from test_layout import walk
 
 MAX_WORDS = 25
 BANNED = {"may", "might", "shall", "should", "would", "could", "simply", "whatever", "just"}
@@ -81,27 +77,6 @@ def faults(text: str) -> list[str]:
     return out
 
 
-@contextmanager
-def _screen(module: str, code: str, channels: int, fed: bool):
-    """A screen as the operator meets it: built, fed if asked, drawn. Yields `(page, control)`."""
-    screen = importlib.import_module(f"nfb_console.{module}")
-    session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)
-    try:
-        page = StubPage()
-        control = screen.view(page, session, toolbar(), lambda: None)
-        if fed:
-            session.paused = False
-            session.state = dict.fromkeys(session.specs, True)
-            waves = {ch: plausible_eeg(30.0, session.rate, ch) for ch in session.specs}
-            for i in range(0, int(30.0 * session.rate) - 249, 250):
-                for ch, spec in session.specs.items():
-                    session.feed_block(Block(ch, i, counts(waves[ch][i:i + 250], spec.scale), spec))
-        session.redraw()
-        yield page, control
-    finally:
-        session.stop()
-
-
 def _texts(control) -> list[str]:
     out = []
     for ctrl in walk(control):
@@ -113,11 +88,6 @@ def _texts(control) -> list[str]:
         if isinstance(tip, str) and tip:
             out.append(tip)
     return out
-
-
-def _screen_texts(module: str, code: str, channels: int, fed: bool) -> list[str]:
-    with _screen(module, code, channels, fed) as (_page, control):
-        return _texts(control)
 
 
 def open_every_help(page, control) -> tuple[list[ft.AlertDialog], list[str]]:
@@ -195,12 +165,12 @@ def help_constants() -> list[tuple[str, str]]:
     return out
 
 
-@pytest.mark.parametrize("module,code,channels", SCREENS,
-                         ids=[f"{c}-{n}ch" for _, c, n in SCREENS])
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS))
 @pytest.mark.parametrize("fed", [False, True], ids=["cold", "fed"])
 def test_screen_text_is_simplified_technical_english(module, code, channels, fed):
+    _page, control = built_screen(module, code, channels, fed)
     found = []
-    for text in dict.fromkeys(_screen_texts(module, code, channels, fed)):
+    for text in dict.fromkeys(_texts(control)):
         found += faults(text)
     assert not found, "\n".join(found)
 
@@ -224,24 +194,20 @@ def test_help_text_is_simplified_technical_english():
     assert not found, "\n".join(found)
 
 
-HELP_SCREENS = SCREENS + [("hrv_view", "HRV", 0), ("heg_view", "HEG", 0), ("pupil_view", "PUPIL", 0),
-                          ("pair_view", "PAIR", 0)]
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS))
+def test_no_screen_shows_an_emphasis_marker(module, code, channels):
+    _page, control = built_screen(module, code, channels, True)
+    shown = [text for text in _texts(control) if "*" in text]
+    assert not shown, "\n".join(shown)
 
 
-@pytest.mark.parametrize("module,code,channels", HELP_SCREENS,
-                         ids=[f"{c}-{n}ch" for _, c, n in HELP_SCREENS])
+# Last in the file: it presses every `?` and every gear on the shared screens, and the tests above read
+# those screens as they were built.
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS + OTHER_SCREENS))
 @pytest.mark.parametrize("fed", [False, True], ids=["cold", "fed"])
 def test_every_help_dialog_is_simplified_technical_english(module, code, channels, fed):
     if fed and not channels:
         pytest.skip("fed with EEG blocks; this screen reads another device")
-    with _screen(module, code, channels, fed) as (page, control):
-        found = _help_faults(page, control)
+    page, control = built_screen(module, code, channels, fed)
+    found = _help_faults(page, control)
     assert not found, "\n".join(dict.fromkeys(found))
-
-
-@pytest.mark.parametrize("module,code,channels", SCREENS,
-                         ids=[f"{c}-{n}ch" for _, c, n in SCREENS])
-def test_no_screen_shows_an_emphasis_marker(module, code, channels):
-    with _screen(module, code, channels, True) as (_page, control):
-        shown = [text for text in _texts(control) if "*" in text]
-    assert not shown, "\n".join(shown)
