@@ -1575,7 +1575,7 @@ class TrainingSession:
         if isinstance(item, Gap):
             self.gaps += 1
             return
-        self._seen[item.channel] = self._seen.get(item.channel, 0) + len(item.values)
+        self._seen[item.channel] = self._seen.get(item.channel, 0) + len(item.samples)
         key = (item.channel, item.state)
         self._states[key] = self._states.get(key, 0) + 1
         if item.channel not in self.specs:

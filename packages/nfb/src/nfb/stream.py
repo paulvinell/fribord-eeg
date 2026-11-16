@@ -79,7 +79,11 @@ class Block:
 
     @property
     def values(self) -> list[float]:
-        return [s * self.spec.scale for s in self.samples]
+        # An array of counts (a file source, a test) becomes plain integers first: numpy scalars, taken one
+        # at a time, are several times slower to multiply than the integers the decoder delivers.
+        tolist = getattr(self.samples, "tolist", None)
+        scale = self.spec.scale
+        return [s * scale for s in (tolist() if tolist else self.samples)]
 
     @property
     def end_index(self) -> int:

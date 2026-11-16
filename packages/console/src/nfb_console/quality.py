@@ -158,35 +158,32 @@ class QualityLog:
         trouble, and a five-second dropout inside a two-minute pixel has to survive being averaged with
         its neighbours or the picture cannot be trusted at any zoom.
         """
-        out = np.zeros((width, 3), dtype=float)
-        out[:] = _rgb(t.BG)
         if not cells:
-            return np.repeat(out[None, :, :], 1, axis=0).astype(np.uint8)
+            out = np.zeros((width, 3), dtype=float)
+            out[:] = _rgb(t.BG)
+            return out.astype(np.uint8)
+        # Every pixel at once. A loop over the pixels in Python cost 12 ms a row, on every redraw.
         arr = np.asarray(cells, dtype=float)
         n = len(arr)
         edges = (np.arange(width + 1) * n / width).astype(int)
-        for x in range(width):
-            lo, hi = edges[x], max(edges[x + 1], edges[x] + 1)
-            if lo >= n:
-                break
-            chunk = arr[lo:min(hi, n)]
-            missing = np.isnan(chunk[:, 0])
-            if missing.all():
-                out[x] = _rgb(t.BORDER)
-                continue
-            rejected = float(np.nanmax(chunk[:, 0]))
-            unusable = float(np.nanmax(chunk[:, 1]))
-            if missing.any():
-                unusable = max(unusable, float(missing.mean()))
-            if unusable > 0.5:
-                out[x] = _rgb(t.BAD)
-            elif unusable > 0:
-                out[x] = _rgb(CLEAN) + (_rgb(t.BAD) - _rgb(CLEAN)) * unusable
-            elif rejected > 0:
-                # Floored well above nothing: a single rejected block in a second is 12% of it, and the
-                # whole point is to see where the gate fired at all.
-                weight = min(1.0, 0.35 + 0.65 * rejected)
-                out[x] = _rgb(CLEAN) + (_rgb(t.WARN) - _rgb(CLEAN)) * weight
-            else:
-                out[x] = _rgb(CLEAN)
+        # `reduceat` takes the cells from one edge to the next, and one cell where two edges are equal:
+        # a timeline with fewer cells than pixels repeats each cell.
+        lo = edges[:-1]
+        size = np.minimum(np.maximum(edges[1:], lo + 1), n) - lo
+        missing = np.isnan(arr[:, 0])
+        gone = np.add.reduceat(missing.astype(float), lo) / size
+        rejected = np.fmax.reduceat(arr[:, 0], lo)
+        unusable = np.fmax.reduceat(arr[:, 1], lo)
+        unusable = np.where(gone > unusable, gone, unusable)
+        clean, bad, warn = _rgb(CLEAN), _rgb(t.BAD), _rgb(t.WARN)
+        # Floored well above nothing: a single rejected block in a second is 12% of it, and the whole
+        # point is to see where the gate fired at all.
+        weight = np.minimum(1.0, 0.35 + 0.65 * rejected)
+        with np.errstate(invalid="ignore"):
+            out = np.select(
+                [(gone >= 1.0)[:, None], (unusable > 0.5)[:, None], (unusable > 0)[:, None],
+                 (rejected > 0)[:, None]],
+                [_rgb(t.BORDER)[None, :], bad[None, :], clean + (bad - clean) * unusable[:, None],
+                 clean + (warn - clean) * weight[:, None]],
+                default=clean[None, :])
         return np.repeat(out[None, :, :], 1, axis=0).astype(np.uint8)
