@@ -24,6 +24,7 @@ def _heartmath_raw(onsets, seconds, rate=500.0):
     pulse a fast fall for about 0.45 s and then a slow climb back."""
     import math
     import random
+    from bisect import bisect_left, bisect_right
 
     rng = random.Random(4)
 
@@ -32,8 +33,16 @@ def _heartmath_raw(onsets, seconds, rate=500.0):
             return 0.5 * (1.0 - math.cos(math.pi * d / 0.45))
         return math.exp(-(d - 0.45) / 0.35) if d >= 0.45 else 0.0
 
-    return [[i / rate, int(3000 - 600 * sum(upright(i / rate - b) for b in onsets if -0.05 < i / rate - b < 2.5)
-                            + rng.gauss(0.0, 6.0))] for i in range(int(seconds * rate))]
+    # Only the heartbeats near each sample: asking every heartbeat about every sample was most of the
+    # time these tests took.
+    onsets = sorted(onsets)
+    out = []
+    for i in range(int(seconds * rate)):
+        t = i / rate
+        near = onsets[bisect_left(onsets, t - 2.5):bisect_right(onsets, t + 0.05)]
+        out.append([t, int(3000 - 600 * sum(upright(t - b) for b in near if -0.05 < t - b < 2.5)
+                           + rng.gauss(0.0, 6.0))])
+    return out
 
 
 def _recording(heart: str = "usb") -> dict:

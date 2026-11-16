@@ -207,6 +207,38 @@ def _no_long_sleeps(monkeypatch):
     monkeypatch.setattr(_time, "sleep", guarded)
 
 
+# --- no test is slow ---------------------------------------------------------------------------
+
+TEST_CEILING_S = 1.5
+"""The most processor time one test may use. Above this the test fails, unless it carries
+`@pytest.mark.slow("the reason")`. A test is to take less than a second; the half second more is for a
+busy machine, where the same work was measured to use up to a third more processor time.
+
+**A slow test is usually slow program code.** When this limit arrived the suite took 108 seconds, and most
+of that was the program: a filter designed again for every card, a timeline drawn one pixel at a time, a
+library filter called for one sample. Each of those also cost the operator time on a screen. So profile
+before you mark: `uv run python -m cProfile -o /tmp/p -m pytest tests/test_x.py -k name`.
+
+Processor time and not the clock, so a busy machine or eight workers side by side fail nothing. A test
+cannot hide a wait from it either: `_no_long_sleeps` already forbids the wait.
+"""
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    import time as _time
+
+    start = _time.process_time()
+    result = yield
+    used = _time.process_time() - start
+    if used > TEST_CEILING_S and item.get_closest_marker("slow") is None:
+        pytest.fail(
+            f"this test used {used:.1f} s of processor time and the limit is {TEST_CEILING_S:g} s. Profile "
+            f"it, and make the test or the code under it faster. See TEST_CEILING_S in conftest.py.",
+            pytrace=False)
+    return result
+
+
 def counts(values, per_count: float, truncate: bool = False):
     """µV to the integer counts the device delivers, for a whole array at once.
 

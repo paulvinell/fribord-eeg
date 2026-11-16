@@ -274,7 +274,8 @@ after each, and counts how often each control's visibility changes.
 """
 
 
-@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS))
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS, slow={
+    "PAC-4ch": "sixty draws of the screen with the most on it: four channels, each with couplings"}))
 def test_nothing_flickers(module: str, code: str, channels: int):
     screen = importlib.import_module(f"nfb_console.{module}")
     session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)

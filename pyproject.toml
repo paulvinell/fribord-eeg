@@ -12,3 +12,8 @@ dev = ["pytest>=8", "pytest-xdist>=3"]
 # it pulls a browser down and the test suite does not need one.
 # The web server is locked here, or Flet pip-installs it unpinned; flet-web 0.86 breaks on fastapi 0.145.
 shots = ["playwright>=1.40", "flet[web]", "fastapi>=0.115.12,<0.145"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow(reason): the test may use more than 1.5 seconds of processor time. Give the reason.",
+]

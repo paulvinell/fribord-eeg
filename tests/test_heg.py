@@ -153,7 +153,7 @@ def test_the_multiple_is_of_the_wearers_own_stillness_and_the_hold_can_be_switch
 
     def run(sensitivity: float, hold: bool = True, shove: float = 300.0) -> float:
         proc = FrameProcessor(motion_sensitivity=sensitivity, motion_gate=hold)
-        for i, f in enumerate(frames(120.0)):
+        for i, f in enumerate(frames(60.0)):
             # Still throughout, apart from half a second of movement every twenty.
             sd = shove if i >= 600 and i % 600 < 15 else 3.0
             noise = rng.normal(0.0, sd, size=3)

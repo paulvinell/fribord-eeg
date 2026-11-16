@@ -8,6 +8,7 @@ quiet subject, which is worse, because nothing on screen contradicts it.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from conftest import counts
 
@@ -291,6 +292,7 @@ def test_a_held_block_keeps_the_stream_contiguous_for_the_measurement():
     assert rms_error(skip_readings) > 2.0, "skipping provably re-runs the settling per blink"
 
 
+@pytest.mark.slow("eight minutes of signal, three times: the fault is a transient that outlasts two minutes")
 def test_a_railed_stretch_does_not_leave_its_step_in_a_slow_filter():
     """`pass_through` hands the metrics a stand-in too. The raw rail used to go through — readings were
     invalid and every screen ignored them, but the filters had still eaten an 800 µV step, and the

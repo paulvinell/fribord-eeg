@@ -721,10 +721,10 @@ def test_a_long_automatic_window_retains_its_whole_span():
     """The recent-values buffer was sized from calibration only, so an automatic window longer than it (and
     longer than the default ~200 s deque) was silently truncated while window_remaining still counted the
     full span down to complete. The buffer now grows to the window."""
-    tgt = Target(0, ALPHA, "increase", mode="automatic", window_seconds=600.0)
-    feed(tgt, 600.0)
+    tgt = Target(0, ALPHA, "increase", mode="automatic", window_seconds=300.0)
+    feed(tgt, 300.0)
     held = len(tgt._window(tgt.window))
-    assert held >= 600 * RATE * 0.95, f"only {held} samples of a 600 s window were retained"
+    assert held >= 300 * RATE * 0.95, f"only {held} samples of a 300 s window were retained"
     assert tgt.window_remaining == pytest.approx(0.0, abs=1.0), "and it reports itself complete"
 
 

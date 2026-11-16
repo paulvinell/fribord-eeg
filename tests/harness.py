@@ -522,7 +522,7 @@ def _locked_pair(seconds, strength, rate, seed=0):
     return 20 * a + 3 * rng.standard_normal(n), 20 * b + 3 * rng.standard_normal(n)
 
 
-def _run_locking(strength: float, seconds: float = 90.0):
+def _run_locking(strength: float, seconds: float = 60.0):
     from nfb.stream import Block
     from nfb_console import pac_view
 
@@ -590,14 +590,19 @@ OTHER_SCREENS = [("hrv_view", "HRV", 0), ("heg_view", "HEG", 0), ("pupil_view", 
                  ("pair_view", "PAIR", 0)]
 
 
-def screen_params(screens):
+def screen_params(screens, slow=()):
     """The screens as test parameters. The tests of one screen run in one worker process (`xdist_group`),
-    so they share its build."""
+    so they share its build. `slow` maps a screen's id to the reason a test of it may exceed the time limit."""
     import pytest
 
-    return [pytest.param(module, code, channels, id=f"{code}-{channels}ch",
-                         marks=pytest.mark.xdist_group(f"{code}-{channels}ch"))
-            for module, code, channels in screens]
+    out = []
+    for module, code, channels in screens:
+        name = f"{code}-{channels}ch"
+        marks = [pytest.mark.xdist_group(name)]
+        if name in slow:
+            marks.append(pytest.mark.slow(slow[name]))
+        out.append(pytest.param(module, code, channels, id=name, marks=marks))
+    return out
 
 
 _built: dict[tuple, tuple] = {}
