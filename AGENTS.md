@@ -28,20 +28,56 @@ overwritten: `make record` writes a timestamped file and repoints `sessions/late
 
 ## Checking your work
 
-`make test` is the whole suite and takes about a minute. Spend it once, at the end.
+Three checks. Use the smallest one that can fail.
 
+- `make lint` for a mechanical edit. A rename, a moved line or a prose change learns nothing from a test.
+- `make test` while you work and before a commit. It runs only the tests that the uncommitted changes can
+  break (`tools/affected.py` reads the imports), and it runs nothing on an unchanged tree.
+  `make test T=tests/test_pac_view.py` or `T="tests/test_dsp.py -k envelope"` runs one part.
+- `make test ALL=1` is every test, on every performance core, in about 15 seconds. Run it once before the
+  commit when the change is to a module that many others use, or crosses from one screen to another.
+
+**Never re-run on an unchanged tree.** Committing is not a reason to ask again, and splitting a commit does
+not require re-testing each half unless an intermediate state holds logic that never existed in a tree
+that passed. **"Not run" and "not looked at" are fine things to report.** Say what was checked and what
+was not.
+
+### Where a test goes
+
+Each screen has its own file, named for its module: `pac_view.py` is tested in `tests/test_pac_view.py`.
+`tests/test_screens.py` holds only what two or more screens must share. `tests/harness.py` holds what the
+screen tests share: the stub page, the sources that do not wait, the walks over a built screen.
+`tests/test_layout.py` and `tests/test_ste.py` are rules that run over every screen.
+
+### What earns a test
+
+Add a test when a fault would show in a session (a wrong number, a crash, a dead control, a wrong sound)
+and no test fails for it now. Put it at the lowest layer that shows the fault: if a function returns the
+value, call the function and do not build a screen.
+
+- **A class of fault gets a rule, not a test.** Text that does not fit, a label that is not there, a
+  control that blinks: extend the rule in `test_layout` or `test_ste`, which then holds for every screen.
+- **Do not copy a value.** A test that repeats a default, a band edge or a sentence from the program fails
+  on every intended change and finds no fault. Assert the property the value must have.
+- **Do not read private state** when a public reading shows the same thing. The test then breaks on a
+  refactor and passes on a real fault.
+- **Do not guard history.** "Untouched by the X work" means nothing once X is done.
+- **The docstring says what must hold, in a sentence or two.** The story of the bug goes in the commit
+  message.
+
+### What keeps a test fast
+
+- **A test that uses more than 1.5 s of processor time fails**, unless it carries
+  `@pytest.mark.slow("the reason")`. A slow test is usually slow program code, which the operator pays for
+  too: profile before you mark.
 - **Drive the code, never start it and wait.** `TrainingSession.feed_block` is the feed loop's body, so a
   test is the loop. Sources take `realtime=False`. Beats, frames and states are values: push them in.
 - **No test waits on the clock.** `conftest.waitfor(condition, what=...)` is the only sanctioned wait, for
   genuinely concurrent behaviour. `time.sleep` over 50 ms raises inside the suite.
 - **Convert samples to counts in one pass** with `conftest.counts`, and feed device-sized blocks only where
   blocking is the subject: a gap, a held block, an index discontinuity.
-- **Run the narrowest thing that could fail first.** `make lint` is the check for mechanical edits; a
-  rename or a prose change learns nothing from the suite.
-- **Never re-run on an unchanged tree.** Committing is not a reason to ask again, and splitting a commit does
-  not require re-testing each half unless an intermediate state holds logic that never existed in a tree
-  that passed.
-- **"Not run" and "not looked at" are fine things to report.** Say what was checked and what was not.
+- **A test that only reads a screen shares its build**: `harness.built_screen(module, code, channels, fed)`.
+  A test that presses something builds its own.
 
 **Every string a user can read is Simplified Technical English (ASD-STE100):** captions, notes, help
 dialogs, pills, tooltips, menu items. One topic per sentence, at most 25 words, present tense, active voice,

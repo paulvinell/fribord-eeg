@@ -69,13 +69,21 @@ impedance:  ## electrode contact in kOhm
 capture:  ## raw frame capture, for protocol work
 	uv run optima capture --seconds 10
 
+# `make test` runs the tests that the uncommitted changes can break: tools/affected.py reads the imports.
 # The whole suite runs on the performance cores: measured, a worker on an efficiency core slows the run
-# (35 s on all twelve cores against 19 s on eight). One file runs on one core, since starting the workers
-# costs more than it saves. `loadgroup` keeps the tests that share one built screen in one worker.
+# (35 s on all twelve cores against 19 s on eight). `loadgroup` keeps the tests that share one built
+# screen in one worker. One file runs on one core, since starting the workers costs more than it saves.
 JOBS ?= $(shell sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || echo auto)
+PYTEST = -q --durations=10 --durations-min=0.25
 
-test:  ## run the test suite, or one part of it (T=tests/test_dsp.py, T="tests/test_dsp.py -k envelope")
-	uv run pytest -q --durations=10 --durations-min=0.25 $(if $(T),$(T),-n $(JOBS) --dist loadgroup)
+test:  ## run the tests the uncommitted changes can break (ALL=1 every test, T=tests/test_dsp.py one part)
+ifdef T
+	uv run pytest $(PYTEST) $(T)
+else ifdef ALL
+	uv run pytest $(PYTEST) -n $(JOBS) --dist loadgroup
+else
+	uv run python tools/affected.py --jobs $(JOBS) -- $(PYTEST)
+endif
 
 latency:  ## measure the output half of the latency budget (silent, invisible — writes current values only)
 	uv run python -m nfb_console.latency_bench --all
