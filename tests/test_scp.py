@@ -1,6 +1,6 @@
 """The SCP metric and the trial engine, each against inputs whose answer is known.
 
-Two halves, mirroring `test_wave.py`'s split. The metric half checks `nfb.dsp.scp.SlowShift` recovers a
+Two halves, mirroring `test_wave_view.py`'s split. The metric half checks `nfb.dsp.scp.SlowShift` recovers a
 sustained shift and that `shift_survival` tells the truth about the amplifier's corner — the number the
 screen's wiring check stands on. The engine half drives `nfb_console.trials.TrialRun` with synthetic
 readings, because trial structure is exactly the kind of logic that regresses silently: a mis-scored trial

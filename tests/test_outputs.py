@@ -71,8 +71,8 @@ def test_the_programs_outside_the_eeg_sessions_apply_their_outputs_on_the_output
     """HEG, HRV, Pupil and Pulse pair applied the screen, the volume and the music on the screen's thread,
     the thread a CoreAudio deadlock once hung the console from. They now go through the same pump as the
     EEG programs."""
-    from test_pair import _session as pair_session
-    from test_pupil import _session as pupil_session, _steady
+    from test_pair_view import _session as pair_session
+    from test_pupil_view import _session as pupil_session, _steady
 
     def spy(session) -> list[str]:
         threads: list[str] = []

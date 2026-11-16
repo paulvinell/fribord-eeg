@@ -6,7 +6,7 @@ rests on those two being recovered. The second checks the screen: that nothing i
 have settled and the range has been measured, that the range is then held, and that the one control which is
 genuinely arbitrary (which way is up on a bipolar pair) belongs to the operator.
 
-Signals are fed as `Block`s directly rather than through a recording, for the reason `test_ilf.py` does the
+Signals are fed as `Block`s directly rather than through a recording, for the reason `test_ilf_view.py` does the
 same: what these need is a *known* waveform, and the bench recording is a constant at the rail.
 """
 

@@ -178,7 +178,7 @@ def _paired_session(module):
     import types
 
     from test_hrv_compare import _scene
-    from test_pair import _Runner
+    from test_pair_view import _Runner
 
     _, forehead, reference, f_wave, r_wave, *_ = _scene()
     on = types.SimpleNamespace(on=True)

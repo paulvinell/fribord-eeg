@@ -6,7 +6,7 @@ window and nowhere else, that it is oriented toward the direction the trial cued
 produces none, that the outputs are handed back between trials rather than held at their last value, and
 that the two sounds this protocol has fire exactly when they should.
 
-Signals are fed as `Block`s straight through `consume`, as `test_wave.py` does, because these need a
+Signals are fed as `Block`s straight through `consume`, as `test_wave_view.py` does, because these need a
 *known* waveform: the bench recording is a constant at the rail and a trial engine driven by it would run
 forty trials of nothing.
 """
@@ -72,7 +72,7 @@ def _compliant(session) -> float:
 
 
 def _releases(session) -> list[str]:
-    """Record what the session hands back, the way `test_hrv_level` does. Returns the live list."""
+    """Record what the session hands back, the way `test_hrv_view` does. Returns the live list."""
     released: list[str] = []
     for name in ("display", "output_volume", "music"):
         obj = getattr(session, name)
@@ -419,7 +419,7 @@ def test_every_control_on_the_screen_can_be_pressed():
     page, session = _page(), _session()
     try:
         control = scp_view.view(page, session, _toolbar(), lambda: None)
-        from test_wave import _clickables
+        from test_wave_view import _clickables
 
         handlers = _clickables(control)
         assert len(handlers) > 15, "the screen is supposed to have controls on it"
