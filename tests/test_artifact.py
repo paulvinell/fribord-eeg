@@ -210,7 +210,7 @@ def test_gates_share_one_policy_across_channels():
     assert gates.percent > 0.0
     assert "ch1" in gates.describe()
     gates.policy.enabled = False
-    assert "not rejecting" in gates.describe()
+    assert "no artifact rejection" in gates.describe()
 
 
 def test_a_low_rate_channel_skips_the_band_limit_rather_than_failing():
@@ -335,3 +335,70 @@ def test_a_railed_stretch_does_not_leave_its_step_in_a_slow_filter():
     assert rms_after_recovery(stand_in=False) > 10.0, \
         "the raw rail provably poisons the filters long past recovery"
     assert rms_after_recovery(stand_in=True) < 1.0, "the stand-in idles them through the outage"
+
+
+# --- the input limit -------------------------------------------------------------------------
+
+def _limited_spec():
+    return ChannelSpec(index=0, rate_hz=RATE, unit="µV", scale=800.0 / 32767, input_range=800.0)
+
+
+def test_partly_railed_block_rejected():
+    """An electrode that drifts onto the rail. The judged band removes the drift, so the gate saw nothing
+    and stored a rail sample as the last clean value, and every later stand-in carried it."""
+    spec = _limited_spec()
+    tt = np.arange(int(14 * RATE)) / RATE
+    x = -700.0 + 5.0 * np.sin(2 * np.pi * 10.0 * tt) - 12.5 * np.clip(tt - 4.0, 0.0, None)
+    x = np.maximum(x, -spec.input_range)
+    limit = 0.98 * spec.input_range
+    gate = ArtifactGate(spec)
+    judged = [gate.feed(b) for b in blocks(x, spec=spec, state=0)]
+    at = [any(abs(v) >= limit for v in j.block.values) for j in judged]
+    first = at.index(True)
+    assert all(j.accepted for j in judged[60:first]), "the drift itself is not an excursion"
+    assert not any(j.accepted for j, hit in zip(judged, at) if hit), "a sample at the limit trains nothing"
+    assert judged[first].rejected >= 1, "and the quality figures count it"
+    assert all(max(abs(v) for v in j.fed.values) < limit for j in judged), "no stand-in is a rail sample"
+
+
+def test_sample_file_has_no_input_limit(tmp_path):
+    """A text export has no amplifier behind it. Its count scale times the device's full scale is 32.8 µV,
+    which is no limit of anything, so no sample of it is ever judged against one."""
+    from nfb.sources import SampleFileSource
+
+    tt = np.arange(int(20 * RATE)) / RATE
+    x = 20.0 + tt + 3.0 * np.sin(2 * np.pi * 10.0 * tt)          # wanders up through 32.8 µV to 40
+    path = tmp_path / "export.txt"
+    path.write_text("Sampling rate: 250\n" + "".join(f"{v:.5f}\n" for v in x))
+    source = SampleFileSource(path, realtime=False, loop=False)
+    spec = source.channels()[0]
+    assert spec.input_range is None
+    gate = ArtifactGate(spec)
+    judged = [gate.feed(b) for b in source.blocks()]
+    assert judged and all(j.accepted for j in judged[10:]), "no limit without a stated input range"
+
+
+def test_override_cannot_accept_a_railed_sample():
+    """Forcing a channel on overrules the device's word about the channel, not the rail. A forced channel
+    on the rail still trains nothing, and the gate keeps no rail sample as its last clean value."""
+    from nfb import ReplaySource
+    from nfb_console import scp_view
+    from nfb_console.protocols import BY_CODE
+
+    from conftest import BENCH_OK
+
+    session = scp_view.SCPSession(BY_CODE["SCP"], source=ReplaySource(str(BENCH_OK), realtime=False),
+                                  channels=2)
+    try:
+        spec = session.specs[0]
+        session.trust_channel(0, True)
+        rail = -int(round(spec.input_range / spec.scale))
+        accepted = []
+        for i in range(0, int(2 * spec.rate_hz), 8):
+            session.feed_block(Block(0, i, (rail,) * 8, spec, state=3))
+            accepted.append(session._accepted[0])
+        assert not any(accepted), "a forced channel on the rail is never accepted"
+        held = session.gates.gates[0]._held * spec.scale
+        assert abs(held) < 0.98 * spec.input_range, "and no rail sample is kept as the last clean value"
+    finally:
+        session.stop()

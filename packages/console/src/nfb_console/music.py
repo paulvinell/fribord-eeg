@@ -66,8 +66,7 @@ from scipy.signal import lfilter
 
 from nfb.dsp import Band, CFIREnvelope, bandpass
 
-from . import developer
-from .cues import shut_aside
+from . import audio, developer
 
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".aac", ".wav", ".aiff", ".aif", ".flac", ".ogg")
 SAMPLE_RATE = 48000
@@ -101,11 +100,11 @@ EEG, the ring holds a 43–79 ms lead on its own; the callback bought nothing an
 RING_SECONDS = 2.0
 
 BLOCK_SECONDS = BLOCK_FRAMES / SAMPLE_RATE
-STALL_SECONDS = 2.0
+STALL_SECONDS = audio.STALL_SECONDS
 """How long a stream may go without finishing a write, or without the device taking any of what it was
 given, before it is treated as dead. Both are generous next to the ~230 ms of buffer underneath."""
-REOPEN_TRIES = 3
-REOPEN_PAUSE_SECONDS = 0.25
+TAIL_FRAMES = int(SAMPLE_RATE * audio.FADE_MS / 1000.0)
+"""Held back by each stream, so that a producer with nothing ready fades out rather than stops."""
 
 # Spectral tilts, as IIR filters over white noise. Pink is the standard -3 dB/octave approximation from the
 # DSP literature, accurate to a fraction of a dB across the audible range; brown is a leaky integrator, a
@@ -136,8 +135,8 @@ NOISE_FILTERS = {
 # Nothing is being made audible here, and that is the difference from the EEG sonifier: 2-38 Hz has to be
 # moved up before it can be heard at all, where noise is already broadband audio and band-limiting is the
 # whole job.
-HIGHPASS_HZ = 70.0
-HIGHPASS_ORDER = 2
+HIGHPASS_HZ = audio.SPEAKER_CORNER_HZ
+HIGHPASS_ORDER = audio.CORNER_ORDER
 PEAK = 0.19                 # full scale at 5.3 sigma; see NoisePlayer._callback
 HEADROOM = 0.0833
 """A deliberate **21.6 dB** pad on generated noise, so the operator's own control has room *below*.
@@ -185,10 +184,10 @@ NOISE_COLOURS = {
 # being a pitch at all and is just a tilt again.
 PITCH_OCTAVES = 1.0
 PITCH_ORDER = 2
-PITCH_LO_HZ = HIGHPASS_HZ
-"""Never below the high-pass corner, because that corner is not cosmetic: 28% of pink's power sat below 80 Hz
-and drove a laptop speaker into its excursion limit. A pitch that reached under it would put the crackle back
-by another door."""
+PITCH_LO_HZ = float(round(HIGHPASS_HZ * 2.0 ** (PITCH_OCTAVES / 2.0)))
+"""The band's lower edge on the speaker corner, never below it, because that corner is not cosmetic: 28% of
+pink's power sat below 80 Hz and drove a laptop speaker into its excursion limit. With the centre on the
+corner, half the band sat under it and a quarter of the power was below 70 Hz."""
 PITCH_HI_HZ = 4000.0
 
 
@@ -339,11 +338,8 @@ def pitch_gain(colour: str, centre_hz: float) -> float:
 
 
 def highpass_sos():
-    """The music's band limit, designed once. Both the live stream and the preview use it, or an audition
-    would be a different sound from the thing it previews."""
-    from scipy.signal import butter
-
-    return butter(HIGHPASS_ORDER, HIGHPASS_HZ, btype="highpass", fs=SAMPLE_RATE, output="sos")
+    """The music's band limit: the speaker corner, from `audio`, the same filter every short sound gets."""
+    return audio.corner_sos(SAMPLE_RATE)
 
 
 PREVIEW_SECONDS = 1.6       # long enough to hear a tilt, short enough that nobody waits for it to end
@@ -351,46 +347,43 @@ _preview_cache: dict[str, Path] = {}
 _preview_dir: Path | None = None
 
 
-def preview_path(colour: str, pitch_hz: float = 0.0) -> Path | None:
-    """A short burst of one tilt, rendered to a WAV so it can be auditioned.
+PREVIEW_EDGE_MS = 50.0
+"""The preview's rise and fall: long enough that a burst of noise does not start or stop with a click, which
+would be a second sound on top of the one being auditioned."""
 
-    Rendered and handed to `afplay` rather than opened on the audio device, for the same reason the click
-    is: a live session may already hold that device, and a preview that silenced the music it is previewing
-    would be worse than no preview. Cached per colour per process.
+
+def preview_samples(colour: str, pitch_hz: float = 0.0, rate: int = SAMPLE_RATE) -> np.ndarray | None:
+    """A short burst of one tilt, finished by `audio.finish`, as floats at `rate`.
 
     A noise colour is the one setting here whose name tells you nothing about the sound — "1/f²" does not
     predict how deep brown is — so a preview is not a convenience, it is the only way the control says what
-    it does.
+    it does. Same tilt, pitch, gain and headroom as the live music, and the same speaker corner, which
+    `audio.finish` applies; the volume is applied on top, from the same setting.
     """
-    global _preview_dir
-    if colour not in NOISE_FILTERS:
-        return None
-    # Keyed by the pitch as well, or an audition would be the sound of a *different* setting — the same rule
-    # that made the preview carry the 12 dB pad rather than previewing four times the music.
-    key = f"{colour}@{round(pitch_hz)}"
-    if key in _preview_cache:
-        return _preview_cache[key]
     from scipy.signal import sosfilt
 
+    if colour not in NOISE_FILTERS:
+        return None
     b, a, gain = NOISE_FILTERS[colour]
     samples = int(SAMPLE_RATE * PREVIEW_SECONDS)
     white = np.random.default_rng(0).standard_normal(samples)
     shaped = (white * gain) if len(a) == 1 and len(b) == 1 else lfilter(b, a, white) * gain
-    # The pitch band-pass and its unit-RMS gain, exactly as the live music applies them — an audition at a
-    # different loudness or a different centre is an audition of something else.
     sos = pitch_sos(pitch_hz)
     if sos is not None:
         shaped = sosfilt(sos, shaped) * pitch_gain(colour, pitch_hz)
-    shaped = sosfilt(highpass_sos(), shaped)
-    # A fade at each end, or the burst starts and stops with a click — which would be a second sound on
-    # top of the one being auditioned, and the wrong one to be listening to.
-    edge = int(SAMPLE_RATE * 0.05)
-    ramp = np.ones(samples)
-    ramp[:edge] = np.linspace(0.0, 1.0, edge)
-    ramp[-edge:] = np.linspace(1.0, 0.0, edge)
-    # Same full-scale convention *and the same headroom* as the live music, so the preview is as loud as the
-    # thing it previews — the volume is applied by the player on top, from the same setting.
-    data = np.clip(shaped * ramp * PEAK * HEADROOM, -1.0, 1.0)
+    shaped = audio.resample(shaped * PEAK * HEADROOM, SAMPLE_RATE, rate)
+    return audio.finish(shaped, rate, peak=None, onset_ms=PREVIEW_EDGE_MS, release_ms=PREVIEW_EDGE_MS)
+
+
+def preview_path(colour: str, pitch_hz: float = 0.0) -> Path | None:
+    """The preview as a WAV at `SAMPLE_RATE`, written once per colour and pitch."""
+    global _preview_dir
+    key = f"{colour}@{round(pitch_hz)}"
+    if key in _preview_cache:
+        return _preview_cache[key]
+    data = preview_samples(colour, pitch_hz)
+    if data is None:
+        return None
     if _preview_dir is None:
         _preview_dir = Path(tempfile.mkdtemp(prefix="nfb-noise-"))
     path = _preview_dir / f"{key}.wav"
@@ -398,9 +391,24 @@ def preview_path(colour: str, pitch_hz: float = 0.0) -> Path | None:
         fh.setnchannels(1)
         fh.setsampwidth(2)
         fh.setframerate(SAMPLE_RATE)
-        fh.writeframes((data * 32767).astype(np.int16).tobytes())
+        fh.writeframes(audio.counts(data).tobytes())
     _preview_cache[key] = path
     return path
+
+
+@audio.family
+def every_preview():
+    """Each tilt unpitched and at both ends of the pitch range: every preview the screen can ask for."""
+    return [(f"preview-{c}@{round(p)}", (lambda rate, c=c, p=p: preview_samples(c, p, rate)), None)
+            for c in NOISE_FILTERS for p in (0.0, PITCH_LO_HZ, PITCH_HI_HZ)]
+
+
+def play_preview(colour: str, pitch_hz: float, volume: float | None) -> bool:
+    """Audition a tilt through `audio.play`, the path every short sound takes."""
+    if preview_samples(colour, pitch_hz, SAMPLE_RATE) is None:
+        return False
+    return audio.play(f"preview-{colour}@{round(pitch_hz)}",
+                      lambda rate: preview_samples(colour, pitch_hz, rate), volume)
 
 
 def muted() -> bool:
@@ -543,170 +551,20 @@ class TrackPlayer:
         self._thread = None
 
 
-class _AudioStream:
-    """The output stream every generated sound writes into, and what keeps it alive.
+class _AudioStream(audio.Stream):
+    """The music's settings for `audio.Stream`: 48 kHz, a 2048-frame block and a held-back tail.
 
-    One copy of open, write, watch and stop for the four players below, because the recovery is the part
-    that has to exist once. A player supplies `_block(frames)` and a `stream_name`.
+    **The buffer is the crackle fix, and its depth is set by `BUFFER_LATENCY`.** Each player renders in
+    Python on the writer's thread; the device drains about 230 ms of buffer without it. A player supplies
+    `_block(frames)` and a `stream_name`; the fades, the limit and the recovery are `audio.Stream`'s."""
 
-    **A stream can stop playing without failing.** The output device changing under a running stream —
-    a screenshot's shutter sound, headphones going in, a Bluetooth speaker switching profile — leaves an
-    object that still accepts everything written to it and plays none of it, and the console went silent
-    for the rest of the session with the panel still reading "music on". So the writer measures the device
-    instead of trusting it: audio handed over should be consumed at real time, and a lead that grows past
-    `STALL_SECONDS` means nothing is listening. `start` also re-checks a writer that has not completed a
-    write in that long, for the shape of the same failure where the write blocks forever instead.
+    samplerate = SAMPLE_RATE
+    block_frames = BLOCK_FRAMES
+    latency = BUFFER_LATENCY
+    tail_frames = TAIL_FRAMES
 
-    `starved` is the underrun PortAudio does not flag: the buffer down to under one block, which is a
-    crackle whether or not the host reports it.
-    """
-
-    stream_name = "audio-writer"
-    held = False
-    """Silenced without stopping the stream. The sonifier is never held — see `MusicOutput.apply`."""
-
-    def _init_stream(self) -> None:
-        self.error: str | None = None
-        self._stream = None
-        self._writer = None
-        self._stop = threading.Event()
-        self._swap = threading.Lock()       # `stop` and a writer rebuilding its stream must not cross
-        self._last_write = 0.0
-        self.dropouts = 0
-        """Blocks the device ran out of data for. **Counted rather than ignored**, because a dropout and a
-        speaker at its excursion limit both sound like crackle and the fix differs."""
-        self.starved = 0
-        self.restarts = 0
-
-    @property
-    def running(self) -> bool:
-        return self._stream is not None
-
-    def _open(self):
-        """A started output stream, or None with `error` saying why."""
-        try:
-            import sounddevice as sd
-        except Exception as exc:
-            self.error = f"sounddevice unavailable: {exc}"
-            return None
-        try:
-            # **No callback: a writer thread and a deep buffer.** See `BUFFER_LATENCY` — with a callback,
-            # the device waits on Python every block and every stall in this process is audible.
-            stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                                     blocksize=BLOCK_FRAMES, latency=BUFFER_LATENCY)
-            stream.start()
-        except Exception as exc:
-            self.error = f"no audio output: {exc}"
-            return None
-        return stream
-
-    def start(self) -> bool:
-        if muted():
-            return False
-        if self._stream is not None:
-            if time.monotonic() - self._last_write < STALL_SECONDS:
-                return True
-            self.stop()                 # a writer stuck in a write that will never return
-            self.restarts += 1
-        stream = self._open()
-        if stream is None:
-            return False
-        stop = threading.Event()
-        with self._swap:
-            self._stream, self._stop = stream, stop
-            self._last_write = time.monotonic()
-            self._writer = threading.Thread(target=self._run, args=(stream, stop), daemon=True,
-                                            name=self.stream_name)
-        self._writer.start()
-        self.error = None
-        return True
-
-    def _shut(self, stream) -> None:
-        if stream is None:
-            return
-        try:
-            stream.stop()
-            stream.close()
-        except Exception:
-            pass
-
-    def _reopen(self, stream, stop: threading.Event, why: str):
-        """A fresh stream in place of one that has stopped playing, or None once stopped or given up."""
-        self._shut(stream)
-        for _ in range(REOPEN_TRIES):
-            if stop.wait(REOPEN_PAUSE_SECONDS):
-                return None
-            fresh = self._open()
-            if fresh is None:
-                continue
-            with self._swap:
-                current = not stop.is_set()     # stopped while it opened: then this stream is nobody's
-                if current:
-                    self._stream = fresh
-                    self.restarts += 1
-                    self.error = None
-            if not current:
-                self._shut(fresh)
-                return None
-            return fresh
-        self.error = why
-        return None
-
-    def _run(self, stream, stop: threading.Event) -> None:
-        """Fill the buffer for as long as the stream lives. `write` blocks when it is full, so this paces
-        itself and needs no clock of its own — and how far it runs ahead is the health of the device.
-
-        The writer is handed its stream and its own stop flag and reads neither from the player, so a stop
-        returns at once and a fresh start can open the next stream while this one winds down."""
-        written, began = 0, time.monotonic()
-        while not stop.is_set():
-            try:
-                block = self._block(BLOCK_FRAMES)   # inside the try: a render-time error must reopen, not die
-                if stream.write(block):
-                    self.dropouts += 1
-            except Exception as exc:
-                stream = self._reopen(stream, stop, f"audio write failed: {exc}")
-                if stream is None:
-                    return
-                written, began = 0, time.monotonic()
-                continue
-            now = time.monotonic()
-            self._last_write = now
-            written += len(block)
-            verdict = self._health(written, now - began)
-            if verdict == "dead":
-                stream = self._reopen(stream, stop, "the audio device stopped playing what it was given")
-                if stream is None:
-                    return
-                written, began = 0, time.monotonic()
-            elif verdict == "starved":
-                self.starved += 1
-
-    @staticmethod
-    def _health(written: int, elapsed: float) -> str:
-        """What the lead says about the device — audio handed over that it has not played yet.
-
-        A healthy stream holds the lead at the buffer's depth: it drains in real time, so `write` blocks
-        and this thread paces itself. A lead that keeps growing is a device consuming nothing, and a lead
-        under one block is a buffer about to run dry, which is a crackle whether or not PortAudio says so.
-        """
-        lead = written / SAMPLE_RATE - elapsed
-        if lead > STALL_SECONDS:
-            return "dead"
-        if written > SAMPLE_RATE and lead < BLOCK_SECONDS:
-            return "starved"
-        return ""
-
-    def stop(self) -> None:
-        """Silence the stream and return at once; the writer and the device wind down on a thread of their
-        own (`cues.shut_aside`). Waited for here, the two took 0.85 s on the screen's loop at the end of a
-        Pupil effort, long enough for the trial engine to read a gap in the readings and drop the result."""
-        with self._swap:
-            stream, writer = self._stream, self._writer
-            self._stream = self._writer = None
-            self.held = False
-            self._stop.set()
-        shut_aside(stream, writer)
+    def silenced(self) -> bool:
+        return muted()
 
 
 class NoisePlayer(_AudioStream):
@@ -876,7 +734,7 @@ class NoisePlayer(_AudioStream):
         shaped = self._shape(white, self.colour, "_zi", end=0)
         if self.second_colour is not None:
             other = self._shape(white, self.second_colour, "_zi2", end=1)
-            fade = np.linspace(self._last_balance, self.balance, frames)
+            fade = audio.ramp(self._last_balance, self.balance, frames)
             shaped = (1.0 - fade) * shaped + fade * other
             # Flat loudness across the fade for any overlap between the two ends — see `_fade_rho`. One
             # `sqrt` on an array we already have; at ρ=1 every element is exactly 1.0.
@@ -886,15 +744,11 @@ class NoisePlayer(_AudioStream):
         self._last_balance = self.balance
         shaped = self._band_limit(shaped)
         level = 0.0 if self.held else min(100.0, max(0.0, self.volume)) / 100.0
-        gain = np.linspace(self._last_level, level, frames)
+        gain = audio.ramp(self._last_level, level, frames)
         self._last_level = level
         # `_shape` has already applied each tilt's unit-RMS scaling, and 0.19 puts full scale at 5.3
-        # standard deviations.
-        # Gaussian noise has no bounded peak, so "never clips" is not a thing that can be arranged — the
-        # question is how often, and beyond 5.3σ that is one sample every few minutes, which is inaudible.
-        # It matters because clipped noise is harsh in exactly the way this music is chosen not to be, and
-        # it is audible long before it shows up in a level meter.
-        out = np.clip(shaped * gain * PEAK * HEADROOM, -1.0, 1.0)
+        # standard deviations; `audio.Stream` bends anything past its knee rather than clipping it.
+        out = shaped * gain * PEAK * HEADROOM
         return out.astype(np.float32).reshape(-1, 1)
 
 class TonePlayer(_AudioStream):
@@ -926,6 +780,7 @@ class TonePlayer(_AudioStream):
         self._pitch = TONE_BASE_HZ
         self._phase = 0.0
         self._last_level = 0.0
+        self._last_corner = float(audio.partial_roll_off(TONE_BASE_HZ))
 
     def configure(self, volume: float, level: float, base_hz: float = TONE_BASE_HZ,
                   range_hz: float = TONE_RANGE_HZ) -> None:
@@ -951,9 +806,13 @@ class TonePlayer(_AudioStream):
         angles = self._phase + increment * np.arange(1, frames + 1)
         self._phase = float(angles[-1] % (2 * np.pi))
         level = 0.0 if self.held else min(100.0, max(0.0, self.volume)) / 100.0
-        gain = np.linspace(self._last_level, level, frames)
+        gain = audio.ramp(self._last_level, level, frames)
         self._last_level = level
-        out = np.clip(np.sin(angles) * gain * TONE_PEAK, -1.0, 1.0)
+        # The base can be set down to 40 Hz, under the speaker corner: rolled off, ramped as the pitch glides.
+        corner = float(audio.partial_roll_off(self._pitch))
+        gain = gain * audio.ramp(self._last_corner, corner, frames)
+        self._last_corner = corner
+        out = np.sin(angles) * gain * TONE_PEAK
         return out.astype(np.float32).reshape(-1, 1)
 
 class ShepardPlayer(_AudioStream):
@@ -1058,7 +917,7 @@ class ShepardPlayer(_AudioStream):
         # And below the speaker floor there is nothing to render either — see `SHEPARD_FLOOR_HZ`, where
         # the crackle this removes is explained. Smooth in frequency, so a partial sliding through the
         # corner fades rather than steps.
-        amps = amps / (1.0 + (SHEPARD_FLOOR_HZ / np.maximum(freqs, 1e-9)) ** 4)
+        amps = amps * audio.partial_roll_off(freqs)
         increments = 2 * np.pi * freqs / SAMPLE_RATE
         steps = np.arange(1, frames + 1)
         angles = self._phase[:, None] + increments[:, None] * steps[None, :]
@@ -1068,9 +927,9 @@ class ShepardPlayer(_AudioStream):
         # case (every partial momentarily in phase) reach 1.0 rather than 12.
         mixed = mixed / max(float(amps.sum()), 1e-9)
         level = 0.0 if self.held else min(100.0, max(0.0, self.volume)) / 100.0
-        gain = np.linspace(self._last_level, level, frames)
+        gain = audio.ramp(self._last_level, level, frames)
         self._last_level = level
-        out = np.clip(mixed * gain * SHEPARD_PEAK, -1.0, 1.0)
+        out = mixed * gain * SHEPARD_PEAK
         return out.astype(np.float32).reshape(-1, 1)
 
 # --- the EEG's own frequency, made audible ------------------------------------------------
@@ -1213,10 +1072,9 @@ class Sonifier(_AudioStream):
 
     stream_name = "sonifier"
 
-    SEAM_MS = 5.0
-    """Crossfade across a discontinuity in pitch or loudness. Long enough that a full-scale step is
-    inaudible, far shorter than a cycle of anything in the band being listened to, so nothing the signal
-    does is smoothed by it."""
+    SEAM_MS = audio.FADE_MS
+    """Crossfade across a discontinuity in pitch or loudness: the fade every stream uses. Far shorter than
+    a cycle of anything in the band being listened to, so nothing the signal does is smoothed by it."""
 
     def __init__(self) -> None:
         self.rate_hz = 0.0
@@ -1416,7 +1274,7 @@ class Sonifier(_AudioStream):
         # ramp is arithmetically a no-op, so testing for the discontinuity would only be a way of getting
         # the test wrong.
         seam = min(frames, max(1, int(SAMPLE_RATE * self.SEAM_MS / 1000.0)))
-        blend = np.linspace(0.0, 1.0, seam)
+        blend = audio.ramp(0.0, 1.0, seam)
         amplitude = amplitude.astype(float, copy=True)
         pitches = pitches.astype(float, copy=True)
         amplitude[:seam] = self._last_amp * (1.0 - blend) + amplitude[:seam] * blend
@@ -1444,7 +1302,8 @@ class Sonifier(_AudioStream):
         span = max(hi - lo, EEG_LOUD_SPAN_FLOOR * hi, 1e-12)
         frac = np.clip((amplitude - lo) / span, 0.0, 1.0)
         loud = EEG_QUIET_GAIN + (1.0 - EEG_QUIET_GAIN) * np.sqrt(frac)
-        out = np.clip(loud * np.sin(angles) * gain * TONE_PEAK, -1.0, 1.0)
+        # The pitch ends are the operator's, and a low end can sit under the speaker corner.
+        out = loud * audio.partial_roll_off(pitches) * np.sin(angles) * gain * TONE_PEAK
         return out.astype(np.float32).reshape(-1, 1)
 
 class MusicOutput:
@@ -1538,22 +1397,9 @@ class MusicOutput:
 
     @staticmethod
     def _glitches(player) -> str:
-        """What a crackle looks like from inside, appended to whatever the player is doing.
-
-        **Every player has counted this since it was written and not one of them showed it.** A crackle was
-        therefore diagnosed by ear and by theory — three separate rounds of it — when the program already
-        knew the answer and had nowhere to put it. Same lesson as `NFB_DEBUG`: if a live
-        symptom cannot be reproduced in a test, make the program say what it sees.
-
-        Silent at zero, because a counter that reads "0 dropouts" on every screen forever is noise.
-        """
-        said = []
-        for n, what in ((getattr(player, "dropouts", 0), "dropout"),
-                        (getattr(player, "starved", 0), "starved block"),
-                        (getattr(player, "restarts", 0), "restart")):
-            if n:
-                said.append(f"{n} {what}{'s' if n > 1 else ''}")
-        return f" · {', '.join(said)}" if said else ""
+        """What a crackle looks like from inside, appended to whatever the player is doing. Every player
+        counted it long before any showed it, and three rounds of crackle were diagnosed by ear meanwhile."""
+        return audio.glitches(player)
 
     def describe(self, settings) -> str:
         if not settings.enabled:

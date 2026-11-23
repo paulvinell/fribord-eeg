@@ -9,6 +9,7 @@ a channel, it is not a widget.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Callable
 
@@ -21,7 +22,7 @@ from .feedback import READS
 def num_box(value: float, on_set: Callable[[float], None], width: int = 46,
             suffix: str = "", step: float = 1.0, low: float | None = None,
             high: float | None = None,
-            on_step: Callable[[float], None] | None = None) -> ft.Control:
+            on_step: Callable[[float], None] | None = None, places: int | None = None) -> ft.Control:
     """A number with a stepper: type it, or click the arrows to move by `step`.
 
     `on_step` splits those two apart, and a band edge is why. Typing an edge sets *that* edge, because that
@@ -36,17 +37,25 @@ def num_box(value: float, on_set: Callable[[float], None], width: int = 46,
     from scratch, and adjusting a band edge by 0.5 Hz or a ratio by a point should not require selecting
     text and retyping it.
 
-    Commits on Enter or on losing focus, and clamps rather than rejecting. The trailing `field.update()`
+    Commits on Enter or on losing focus, and only a text that differs from the one the box showed: a
+    click in and out types nothing, and writing the shown value back would fix an automatic setting or
+    restart a run with no edit at all. A text with no number in it, empty included, commits nothing and
+    the box shows its last text again. Clamps rather than rejecting. The trailing `field.update()`
     is guarded because `on_set` usually rebuilds the panel this field lives in, which detaches it — an
     unguarded update then raises "Control must be added to the page first" out of the blur handler.
+
+    The returned row's `data` is `show(value)`, which sets the shown text from outside without a commit,
+    for a value that moves on its own. It leaves a box with an edit in progress alone.
     """
-    places = len(f"{step:g}".split(".")[1]) if "." in f"{step:g}" else 0
+    if places is None:              # the decimals of the step, unless the value needs more than that
+        places = len(f"{step:g}".split(".")[1]) if "." in f"{step:g}" else 0
     fmt = f"{{:.{places}f}}"
     field = ft.TextField(value=fmt.format(value), width=width, height=30, text_size=t.BODY,
                          text_align=ft.TextAlign.CENTER, color=t.TEXT, bgcolor=t.SURFACE,
                          border_color=t.BORDER, content_padding=ft.Padding(2, 2, 2, 2))
 
     accepted = [float(value)]           # the last value that got through, for unparseable input
+    shown = [field.value]               # the text the box last showed, so a commit needs an edit
 
     def apply(raw: float) -> None:
         if low is not None:
@@ -56,17 +65,27 @@ def num_box(value: float, on_set: Callable[[float], None], width: int = 46,
         raw = round(raw, 6)
         accepted[0] = raw
         # write the clamped value back, so the box shows what was accepted even when nothing rebuilds
-        field.value = fmt.format(raw)
+        field.value = shown[0] = fmt.format(raw)
         on_set(raw)
 
-    def current() -> float:
+    def typed() -> float | None:
         try:
             return float(str(field.value).replace(",", "."))
         except (ValueError, TypeError):
-            return accepted[0]          # not the initial value: a clamp may have moved it since
+            return None
+
+    def current() -> float:
+        value = typed()
+        return accepted[0] if value is None else value  # not the initial value: a clamp may have moved it
 
     def commit(_e=None) -> None:
-        apply(current())
+        if field.value == shown[0]:
+            return
+        value = typed()
+        if value is None or not math.isfinite(value):
+            field.value = shown[0]
+        else:
+            apply(value)
         try:
             field.update()
         except Exception:
@@ -82,11 +101,16 @@ def num_box(value: float, on_set: Callable[[float], None], width: int = 46,
                             on_click=lambda _e: (on_step(delta) if on_step is not None
                                                  else apply(current() + delta)))
 
+    def show(raw: float) -> None:
+        if field.value == shown[0]:
+            field.value = shown[0] = fmt.format(raw)
+            accepted[0] = float(raw)
+
     stepper = ft.Column([arrow("▲", step), arrow("▼", -step)], spacing=0)
     parts: list[ft.Control] = [field, stepper]
     if suffix:
         parts.append(ft.Text(suffix, size=t.SMALL, color=t.FAINT))
-    return ft.Row(parts, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    return ft.Row(parts, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER, data=show)
 
 
 def pill(label: str, selected: bool, on_click, enabled: bool = True) -> ft.Control:

@@ -342,7 +342,8 @@ def test_a_channel_reports_two_electrodes_on_alternating_frames(monkeypatch):
     d.close()
 
 
-def test_an_empty_channel_is_dropped_from_the_contact_check(monkeypatch):
+@pytest.mark.parametrize("always_read", [False, True])
+def test_an_empty_channel_is_dropped_from_the_contact_check(monkeypatch, always_read):
     """The device drives the test on every *enabled* channel at once, and a channel with no electrode
     disturbs the ones that have them. Measured on hardware with one electrode at C4 and one reference:
 
@@ -357,6 +358,7 @@ def test_an_empty_channel_is_dropped_from_the_contact_check(monkeypatch):
     from nfb.device import OPEN_KOHM, Contact
 
     d, _ = connected(monkeypatch)
+    d.set_always_read(always_read)
     d.start_impedance()
     waitfor(lambda: bool(d.contact), what="the impedance stream never started")
     # ch0 wired, the rest open — what one electrode on a four-channel amplifier looks like
@@ -371,6 +373,7 @@ def test_an_empty_channel_is_dropped_from_the_contact_check(monkeypatch):
 
     d.stop()
     assert d.status.settings.channels == 4, "the operator's channel count is handed back"
+    assert d.status.mode is (Mode.MEASURING if always_read else Mode.IDLE)
     d.close()
 
 
@@ -926,3 +929,113 @@ def test_a_file_dialog_that_does_not_open_says_so_beside_the_path():
                      and c.content.value == "amplifier")[0]
     amplifier.on_click(None)
     assert not any("the file dialog did not open" in n for n in notes(control)), "the next choice clears it"
+
+
+# --- always read ------------------------------------------------------------------------------------
+
+
+def _starts(fake: FakeOptima) -> int:
+    return fake.sent.count(optima.CMD["START_MES"])
+
+
+def _stops(fake: FakeOptima) -> int:
+    return fake.sent.count(optima.CMD["STOP_MES"])
+
+
+def _first_blocks(sub, n: int = 4) -> list:
+    out = []
+    for item in sub.blocks(timeout=1.0):
+        if not isinstance(item, Gap):
+            out.append(item)
+        if len(out) >= n:
+            break
+    return out
+
+
+def test_always_read_measures_from_connect_to_close_across_consumers(monkeypatch):
+    """A consumer that ends does not stop the measurement, and the next one reads the same stream on: its
+    indices continue rather than restart, and the amplifier is started once and stopped once."""
+    fake = FakeOptima()
+    monkeypatch.setattr(optima, "Optima", lambda *a, **k: fake)
+    d = Device()
+    d.set_always_read(True)                 # before a connection: nothing to start yet
+    assert d.connect()
+    assert d.status.mode is Mode.MEASURING and _starts(fake) == 1
+
+    first = d.subscribe("first")
+    end = max(b.end_index for b in _first_blocks(first))
+    first.close()
+    d.stop()                                # what a session's stop does
+    assert d.status.mode is Mode.MEASURING and _stops(fake) == 0
+
+    second = d.subscribe("second")
+    assert min(b.start_index for b in _first_blocks(second)) >= end, "the stream carries on"
+    second.close()
+    assert _starts(fake) == 1
+
+    d.close()
+    assert _stops(fake) == 1 and fake.closed and d.status.mode is Mode.DISCONNECTED
+
+
+def test_always_read_restarts_once_around_a_reconfigure(monkeypatch):
+    d, fake = connected(monkeypatch)
+    d.set_always_read(True)
+    d.reconfigure(hz=250.0)
+    assert d.status.settings.hz == 250.0
+    assert d.status.mode is Mode.MEASURING
+    assert (_starts(fake), _stops(fake)) == (2, 1)
+    d.close()
+
+
+def test_always_read_gives_way_to_a_contact_check_and_comes_back(monkeypatch):
+    d, fake = connected(monkeypatch)
+    d.set_always_read(True)
+    d.start_impedance()
+    assert d.status.mode is Mode.TESTING and _stops(fake) == 1
+    d.stop()
+    assert d.status.mode is Mode.MEASURING and _starts(fake) == 2
+    d.close()
+
+
+def test_always_read_off_stops_only_a_measurement_nobody_reads(monkeypatch):
+    d, fake = connected(monkeypatch)
+    d.set_always_read(True)
+    sub = d.subscribe("session")
+    d.set_always_read(False)
+    assert d.status.mode is Mode.MEASURING, "a session still reads it, and its own stop ends it"
+    sub.close()
+    d.stop()
+    assert d.status.mode is Mode.IDLE
+
+    d.set_always_read(True)
+    d.set_always_read(False)
+    assert d.status.mode is Mode.IDLE and (_starts(fake), _stops(fake)) == (2, 2)
+    d.close()
+
+
+def test_a_consumer_mid_iteration_ends_when_a_reconfigure_outruns_it(monkeypatch):
+    """The stop and the start of a reconfigure can both happen before the consumer wakes, and the start
+    drains the queue with the end-of-epoch marker in it. The iteration must end, not decode the new epoch
+    with no decoder."""
+    d, _ = connected(monkeypatch)
+    d.set_always_read(True)
+    sub = d.subscribe("session")
+    it = sub.blocks(timeout=1.0)
+    next(it)
+    d.reconfigure(hz=250.0)
+    for _ in range(64):
+        try:
+            next(it)
+        except StopIteration:
+            break
+    else:
+        raise AssertionError("the iteration went on into the new epoch")
+    sub.close()
+    d.close()
+
+
+def test_the_default_range_builds_the_config_of_before_byte_for_byte():
+    """A person who never touches the range gets the config the program wrote before it existed."""
+    assert Settings().build() == optima.build_eeg_config(4, hz=1000.0, reference="linked", mains_hz=50,
+                                                         lower_limit_hz=0.5, silent=True)
+    assert Settings(range_uv=6000.0).build() == optima.build_eeg_config(4, range_uv=6000.0)

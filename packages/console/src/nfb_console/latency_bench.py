@@ -67,33 +67,22 @@ def bench_compute(recording: Path) -> None:
 def bench_audio() -> None:
     """What the audio device actually grants, against what the code asks for.
 
-    `stream.latency` is PortAudio's own figure for output — the delay between writing a sample and the
+    `granted_latency` is PortAudio's own figure for output — the delay between writing a sample and the
     hardware consuming it. It is the number the `latency=` parameter *suggests*, and the gap between
     the two is the 785 ms lesson.
     """
-    try:
-        import sounddevice as sd
-    except Exception as exc:
-        print(f"  sounddevice unavailable: {exc}")
-        return
-
-    from . import music
+    from . import audio, music
 
     cases = [
-        ("music stream, as shipped", dict(samplerate=music.SAMPLE_RATE, blocksize=music.BLOCK_FRAMES,
-                                        latency=music.BUFFER_LATENCY)),
-        ("music stream, asking for 0.25", dict(samplerate=music.SAMPLE_RATE,
-                                             blocksize=music.BLOCK_FRAMES, latency=0.25)),
-        ("click stream, as shipped", dict(samplerate=44100, blocksize=256, latency="low")),
+        ("music stream, as shipped", (music.SAMPLE_RATE, music.BLOCK_FRAMES, music.BUFFER_LATENCY)),
+        ("music stream, asking for 0.25", (music.SAMPLE_RATE, music.BLOCK_FRAMES, 0.25)),
+        ("cue stream, as shipped", (audio.CueStream.samplerate, audio.CueStream.block_frames,
+                                    audio.CueStream.latency)),
     ]
-    for label, kwargs in cases:
+    for label, (rate, block, latency) in cases:
         try:
-            stream = sd.OutputStream(channels=1, dtype="float32", **kwargs)
-            stream.start()
-            granted = float(stream.latency)
-            stream.stop()
-            stream.close()
-            print(f"  {label:34s}  asked {kwargs['latency']!r:8}  granted {granted * 1000:6.1f} ms")
+            granted = audio.granted_latency(rate, block, latency)
+            print(f"  {label:34s}  asked {latency!r:8}  granted {granted * 1000:6.1f} ms")
         except Exception as exc:
             print(f"  {label:34s}  failed: {exc}")
 

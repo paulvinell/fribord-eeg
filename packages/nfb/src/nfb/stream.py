@@ -35,6 +35,9 @@ class ChannelSpec:
     scale: float              # physical units per raw count
     function: str = "voltage"
     decimation: int = 1       # sample groups between this channel's samples
+    input_range: float | None = None
+    """The amplifier's full scale in `unit`, either sign. None when the source cannot know it (a text
+    export), and then no rule may apply a limit."""
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,10 @@ class Block:
     `valid` therefore asks whether the state is one of the two the device uses to say something is *wrong*,
     which is robust to whatever 1 turns out to mean.
     """
+
+    seam: bool = False
+    """True on a channel's first block after a looped source splices its end to its start. The indices run
+    on, but the signal steps there, so a slow filter starts again."""
 
     @property
     def valid(self) -> bool:

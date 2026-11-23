@@ -31,7 +31,12 @@ import pytest
 
 
 
-from harness import OTHER_SCREENS, SCREENS, StubDevice, StubPage, built_screen, screen_params
+from nfb.stream import Block
+from nfb_console.protocols import BY_CODE
+
+from conftest import counts, plausible_eeg
+from harness import (OTHER_SCREENS, SCREENS, StubDevice, StubPage, built_screen, replay, screen_params,
+                     toolbar)
 from test_layout import walk
 
 MAX_WORDS = 25
@@ -211,3 +216,37 @@ def test_every_help_dialog_is_simplified_technical_english(module, code, channel
     page, control = built_screen(module, code, channels, fed)
     found = _help_faults(page, control)
     assert not found, "\n".join(dict.fromkeys(found))
+
+
+def test_scp_text_and_help_at_one_two_and_four_channels():
+    """The **extra channels** row and its help paragraph exist only where there is a channel to pick. At
+    one channel neither shows, and nothing asks for a second channel."""
+    from nfb_console import scp_view
+
+    for channels in (1, 2, 4):
+        session = scp_view.session_for(BY_CODE["SCP"], source=replay(), channels=channels)
+        try:
+            page = StubPage()
+            control = scp_view.view(page, session, toolbar(), lambda: None)
+            if channels > 1:
+                session.set_extra(1, True)
+            session.paused = False
+            waves = {ch: plausible_eeg(10.0, session.rate, ch) for ch in session.specs}
+            if channels == 4:
+                session.set_extra(2, True)
+                waves[2] = [-800.0] * len(waves[2])
+            for i in range(0, int(10.0 * session.rate) - 249, 250):
+                for ch, spec in session.specs.items():
+                    session.feed_block(Block(ch, i, counts(waves[ch][i:i + 250], spec.scale), spec))
+            session.redraw()
+            shown = _texts(control)
+            found = [f for text in dict.fromkeys(shown) for f in faults(text)]
+            found += _help_faults(page, control)
+            assert not found, "\n".join(dict.fromkeys(found))
+            helps, _labels = open_every_help(page, control)
+            said = " ".join("".join(s.text for s in d.content.content.spans) for d in helps)
+            row = any("extra channels" in text for text in shown)
+            assert row == (channels > 1), f"{channels} ch: the extra channels row"
+            assert ("extra channels" in said) == (channels > 1), f"{channels} ch: the help paragraph"
+        finally:
+            session.stop()

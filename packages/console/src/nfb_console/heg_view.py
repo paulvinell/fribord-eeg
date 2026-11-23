@@ -50,8 +50,8 @@ from .plan import SessionPlan
 from .protocols import Protocol
 from .scaling import Scaled, scaling_row
 from .targets import Target
-from .trial_training import MODES, TrialTiming, TrialTraining, TrialUnits, TrialView
-from .trials import NEGATIVE, POSITIVE
+from .trial_training import MODES, TrialTiming, TrialTraining, TrialUnits, TrialView, run_verdict_help
+from .trials import GAP, LOST, NEGATIVE, PAUSED, POSITIVE, REJECTED, THIN_BASELINE
 from .widgets import help_button, labelled, num_box, panel, pill
 
 HANDLES = ("HEG",)
@@ -124,6 +124,12 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
     COUNTS_IN_BASELINE = False
     """No counting task in the baseline: counting works the prefrontal cortex, which is what HEG measures."""
     trial_waiting = "no frames from the headband yet"
+    VOID_ACTIONS = {REJECTED: "keep your head still in the trial",
+                    THIN_BASELINE: "keep your head still in the baseline",
+                    LOST: "examine the connection to the headband",
+                    GAP: "keep the headband connected through a trial"}
+    """A rejected frame here is one held for motion, so the action names the head; the device on this
+    screen is the headband."""
 
     def __init__(self, protocol: Protocol, choice: MendiChoice | None = None,
                  length_seconds: float | None = None, runner: mendi.MendiRunner | None = None,
@@ -340,7 +346,7 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
         """What the readout says the level is, in place of the combining rule's wording."""
         if self.mode == "active":
             return ("the change from this trial's baseline, toward the cue",
-                    f"half = the baseline · full at ±{self.full_at:g} sd")
+                    f"half = the baseline · full at ±{self.scale_in_use()[0]:g} sd")
         spec = self.metric_spec
         scale = normalise.STRATEGIES[self.strategy_id].label
         aim = "less" if self.inverts else "more"
@@ -485,6 +491,13 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
         spread = statistics.pstdev(values) if span >= MIN_SPREAD_S and len(values) > 2 else 0.0
         self.trial_spread = spread if spread > 0 else None
 
+    def void_words(self, trial) -> tuple[str, str]:
+        """A trial cued with no spread to judge it in has no result for that reason, not for a rejection:
+        every reading of it had no unit. `trial_spread` is still the one this trial was cued with."""
+        if self.trial_spread is None and trial.cause in (THIN_BASELINE, REJECTED):
+            return ("no result · the signal has no spread before this trial", "examine the fit of the headband")
+        return super().void_words(trial)
+
     def _mode_changed(self) -> None:
         self.heg.readings.clear()
         self._signal = None
@@ -493,7 +506,7 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
     def _move_level(self, signal: float, now: float, smoothed: bool = True) -> None:
         """A trial's level, smoothed as the passive level is, then the shared mechanisms."""
         self._signal = signal
-        self.signal_target.observe(signal, OBSERVE_HZ)
+        self.signal_target.observe(self.condition_for(signal), OBSERVE_HZ)
         tau = max(0.0, self.feedback.smoothing_seconds) if smoothed else 0.0
         if tau <= 0 or self._level_at is None:
             self._level = signal
@@ -551,6 +564,7 @@ class HEGSession(Scaled, TrialTraining, LevelOutputs):
             self._accumulated = self.elapsed
             self._resumed_at = None
             self.paused = True
+            self.cut_trial(PAUSED)
             self.release_outputs()
 
     def tick(self) -> None:
@@ -659,13 +673,15 @@ MODE_HELP = (
     "all the time. There are no trials. In **active** mode, the screen runs trials, as the Pupil screen does. "
     "Each trial has four parts. First, a tone gives the direction: a high tone for higher, a low tone for "
     f"lower. Then, for {TIMING.baseline_s:g} s, rest and keep still. This measures your baseline. Then, for "
-    f"{TIMING.active_s:g} s, move the signal the way the tone asked. The circle grows past the dashed ring "
+    "the rest of the \"trial length\", move the signal the way the tone asked. The circle grows past the "
+    "dashed ring "
     "when the signal is above your baseline, and shrinks inside the ring when it is below. Last, the circle "
     "turns green for a success or red for no success, and you hear the tone two times for a success.\n\n"
     "During the baseline, the ground behind the circle is grey, and the dashed ring draws itself around "
     "the point. When the effort starts, the ground changes to white, and the circle and the arrows appear. "
-    "The arrows show the direction: out for higher, in for lower. The circle is blue on the side that the "
-    "tone asked for and grey on the other side. A thin faint ring shows the mean of the effort so far. "
+    "The arrows show the direction: out for higher, in for lower. The circle is blue when it is past "
+    "\"succeeds at\" on the side that the tone asked for, and grey at other times. When \"succeeds at\" is "
+    "more than 0, a thin blue ring shows that size. A thin faint ring shows the mean of the effort so far. "
     "The trial is scored on that mean.\n\n"
     "**The unit.** The headband's numbers have no fixed scale. So a trial measures the change from the "
     "baseline in standard deviations, shown as sd. One sd is the usual spread of the signal over the minute "
@@ -675,11 +691,13 @@ MODE_HELP = (
     "signal in every trial. \"alternating\" asks for higher and lower in turn. \"random\" asks for higher and "
     "lower in a random order, and does not show the direction until the effort starts.\n\n"
     "**The settings.** \"succeeds at\" sets how far past the baseline the mean of a trial must be. \"full at\" "
-    "sets the change that moves the level to its end. \"show circle for\" and \"update every\" work as on the "
-    "Pupil screen. A movement of the head holds the signal, and those frames do not count. When too many "
+    "sets the change that moves the level to its end. A typed \"full at\" acts from the next trial. "
+    "\"show circle for\" and \"update every\" work as on the Pupil screen. A movement of the head holds the signal, and those frames do not count. When too many "
     "frames in a trial do not count, the trial has no result.\n\n"
-    f"**The times.** A trial is about {TIMING.trial_s:.0f} s. Blood flow in the forehead changes more slowly "
-    "than the pupil, so these trials are longer than the Pupil trials. These times are a first estimate."
+    f"**The times.** At the start, a trial with its rest is about {TIMING.trial_s:.0f} s, and \"trial length\" "
+    "changes it. Blood flow in the forehead changes more slowly than the pupil, so these trials are longer "
+    "than the Pupil trials. These times are a first estimate.\n\n"
+    + run_verdict_help(HEGSession.DIRECTION_WORD)
 )
 
 
@@ -977,7 +995,9 @@ def view(page: ft.Page, session: HEGSession, toolbar: chrome.Toolbar,
             heart_ui.refresh(session.heart)
             trial_ui.draw_heart_stats()
 
-        level_arc.shapes = _level_arc(ARC_SIDE, session.signal)
+        # In a feedback window the arc is good where the click is: past the trial's **succeeds at**.
+        level_arc.shapes = _level_arc(ARC_SIDE, session.signal, None if session.trial_condition is None
+                                      else session.signal_target.wanted)
         if session.holding:
             level_note.value = "held — motion in the last two seconds"
         elif session.signal is None:

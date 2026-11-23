@@ -27,6 +27,7 @@ class FrameDecoder:
         self.tracker = PhaseTracker()
         self.specs = self._build_specs()
         self.events: list[optima.Message] = []
+        self._seam: set[int] = set()            # channels whose next block follows a loop splice
 
     def _build_specs(self) -> dict[int, ChannelSpec]:
         specs = {}
@@ -45,6 +46,7 @@ class FrameDecoder:
                 scale=scale,
                 function=optima.FUNC_NAME.get(func, str(func)),
                 decimation=c.mask + 1,
+                input_range=abs(scale) * optima.ADC_FULL_SCALE,
             )
         return specs
 
@@ -56,6 +58,7 @@ class FrameDecoder:
         `PhaseTracker.rebase` — this passes the plan's decimation grid so mixed-rate channels keep
         their sample alignment across the seam."""
         self.tracker.rebase(max((c.mask + 1 for c in self.plan if c.enabled), default=1))
+        self._seam = set(self.specs)
 
     def feed(self, code: int, payload: bytes) -> list[Block | Gap]:
         """Decode one frame. Non-data notifications are collected into `events`."""
@@ -86,5 +89,7 @@ class FrameDecoder:
                 samples=tuple(samples),
                 spec=self.specs[c.index],
                 state=frame.channel_states.get(c.index, 0),
+                seam=c.index in self._seam,
             ))
+            self._seam.discard(c.index)
         return out

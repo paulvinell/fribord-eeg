@@ -87,6 +87,12 @@ class StreamFilter:
         self._zi = signal.sosfilt_zi(self.sos) * 0.0
         self._state[:] = 0.0
 
+    def prime(self, value: float) -> None:
+        """Set the state to the filter's steady state for a constant input at `value`, so the output starts
+        there instead of ringing up from zero."""
+        self._zi = signal.sosfilt_zi(self.sos) * float(value)
+        self._state[0] = self._zi
+
     def process(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
         if not len(x):

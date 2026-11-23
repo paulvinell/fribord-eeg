@@ -68,7 +68,7 @@ NIGHT_HELP = (
     "up. Delta share rises in deep sleep. These two lines are not sleep stages, because this screen does "
     "not detect stages. They are the raw numbers that stages are built from. Each channel's health score "
     "shows how much of the night it was usable, the total artifact rejection, and the gaps. It also "
-    "shows how close the signal came to the rail.\n\n"
+    "shows how close the signal came to the input limit.\n\n"
     "**What to do.** Set the alarm in the ALARM panel. If a channel stays unusable past the time you "
     "set, a red banner names the channel and the fix. The beep repeats at the set interval and volume "
     "until the signal recovers. Reattach the electrode to stop the beep. Choose \"silent\" to keep the "

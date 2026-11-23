@@ -29,7 +29,8 @@ from nfb_console.protocols import BY_CODE
 from nfb.stream import Block
 
 from conftest import counts, plausible_eeg, text_width
-from harness import SCREENS, StubDevice, StubPage, built_screen, replay, screen_params, toolbar
+from harness import (FED_SECONDS, SCREENS, StubDevice, StubPage, built_screen, replay, screen_params,
+                     toolbar)
 
 BOLD = {ft.FontWeight.W_500, ft.FontWeight.W_600, ft.FontWeight.W_700, ft.FontWeight.BOLD}
 
@@ -307,5 +308,116 @@ def test_nothing_flickers(module: str, code: str, channels: int):
         blinking = [f"{names[k]!r} changed visibility {n} times in {FLICKER_SECONDS:g} s"
                     for k, n in flips.items() if n > FLIPS_ALLOWED]
         assert not blinking, "\n".join(blinking)
+    finally:
+        session.stop()
+
+
+# --- the slow-potential screen with extra channels, and the lines under its circle --------------------
+
+def _scp(channels: int, extras=(), railed=(), width: int = 880):
+    """The SCP screen at the minimum window, fed through `feed_block`, with `extras` lit and the channels
+    in `railed` sitting on the rail. Returns `(session, page, control)`; the caller stops the session."""
+    from nfb_console import scp_view
+
+    session = scp_view.session_for(BY_CODE["SCP"], source=replay(), channels=channels)
+    page = StubPage()
+    page.width = width
+    control = scp_view.view(page, session, toolbar(), lambda: None)
+    for ch in extras:
+        session.set_extra(ch, True)
+    session.paused = False
+    waves = {ch: (plausible_eeg(FED_SECONDS, session.rate, ch) if ch not in railed
+                  else [-800.0] * int(FED_SECONDS * session.rate)) for ch in session.specs}
+    for i in range(0, int(FED_SECONDS * session.rate) - 249, 250):
+        for ch, spec in session.specs.items():
+            session.feed_block(Block(ch, i, tuple(counts(waves[ch][i:i + 250], spec.scale).tolist()), spec))
+    session.redraw()
+    return session, page, control
+
+
+@pytest.mark.parametrize("channels,extras,railed", [(2, (1,), ()), (4, (1, 2), (2,))],
+                         ids=["2ch-one-lit", "4ch-two-lit-one-railed"])
+def test_scp_layout_with_extra_channels(channels, extras, railed):
+    session, _page, control = _scp(channels, extras, railed)
+    try:
+        texts = " | ".join(c.value for c in walk(control) if isinstance(c, ft.Text) and c.value)
+        assert "extra channels" in texts and "ch1 ·" in texts
+        faults = [f"{rule.__name__}: {fault}" for rule in RULES for fault in rule(control)]
+        assert not faults, "\n".join(faults)
+    finally:
+        session.stop()
+
+
+def test_scp_trial_panel_keeps_its_height_between_the_verdict_and_the_rest():
+    """The two lines under the circle are reserved in every phase, so a verdict never moves the panels
+    under the trial panel."""
+    from nfb_console import scp_view
+    from nfb_console.trial_training import TrialView
+    from nfb_console.trials import ITI, RESULT, TrialRun
+
+    session = scp_view.session_for(BY_CODE["SCP"], source=replay(), channels=1)
+    try:
+        ui = TrialView(session, scp_view.CIRCLE_SIDE, heart=False)
+        panel = ui.fixation_panel()
+        run = session.trials = TrialRun(n_trials=3, transfer_fraction=0.0, seed=1, metric_hz=20.0)
+        shapes = {}
+        t = 0.0
+        while len(shapes) < 2:
+            run.feed(t, 6.0 if run.phase == "active" else 0.0)
+            t += 0.05
+            if run.phase in (ITI, RESULT) and run.results and run.phase not in shapes:
+                ui.draw_fixation("")
+                shapes[run.phase] = [(type(c).__name__, c.visible is not False, getattr(c, "height", None))
+                                     for c in walk(panel) if not isinstance(c, cv.Shape)]
+            assert t < 60.0
+        assert shapes[RESULT] == shapes[ITI], "the panel holds the same controls at the same heights"
+        assert ui.verdict_detail is not None and ui.verdict_detail in list(walk(panel))
+    finally:
+        session.stop()
+
+
+def test_scp_verdict_lines_fit_the_minimum_window():
+    """At the 880 px minimum the left column is 426 px. The longest line under the circle fits it."""
+    from nfb_console import scp_view
+    from nfb_console.trial_training import TrialView
+    from nfb_console.trials import TrialRun
+
+    session = scp_view.session_for(BY_CODE["SCP"], source=replay(), channels=1)
+    try:
+        ui = TrialView(session, scp_view.CIRCLE_SIDE, heart=False)
+        ui.fixation_panel()
+        run = session.trials = TrialRun(n_trials=2, transfer_fraction=0.0, seed=1, metric_hz=20.0)
+        t = 0.0
+        while not run.results:
+            run.feed(t, 0.0, valid=not (run.phase == "active" and run.phase_remaining(t) > 4.2))
+            t += 0.05
+        ui.draw_fixation("")
+        for text in (ui.verdict_text, ui.verdict_detail):
+            assert text.value, "both lines carry text for a void trial"
+            need = text_width(text.value, float(text.size or 14))
+            assert need <= 426 - 6, f"{text.value!r} needs {need:.0f} px of 426"
+    finally:
+        session.stop()
+
+
+def test_the_card_note_leaves_the_input_limit_to_the_level_plot():
+    """One note box of two lines. A channel at its input limit is shown by the level plot, so the note
+    keeps the corner check, which names an action the plot cannot show."""
+    from nfb_console import scp_view
+    from harness import at_corner
+
+    session = scp_view.SCPSession(BY_CODE["SCP"], source=at_corner(0.5, channels=2), channels=2)
+    try:
+        card = scp_view.SCPCard(StubPage(), session, lambda: None)
+        session.paused = False
+        spec = session.specs[0]
+        wave = plausible_eeg(4.0, session.rate, 0)
+        wave[::250] = 800.0
+        for i in range(0, len(wave) - 249, 250):
+            session.feed_block(Block(0, i, tuple(counts(wave[i:i + 250], spec.scale).tolist()), spec))
+        assert session.wiring_problem(), "the corner check has something to say"
+        card.refresh()
+        assert session.at_input_limit(0)
+        assert "input limit" not in card.note.value and "High-pass" in card.note.value, card.note.value
     finally:
         session.stop()

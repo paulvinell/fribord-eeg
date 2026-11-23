@@ -142,9 +142,9 @@ class ReplaySource:
 
     `loop=True` starts over when the file runs out, which turns a short capture into an indefinite
     stand-in for a device. The **same decoder** is kept across the seam, deliberately: recreating it
-    would restart sample indices at zero and they are monotonic by contract. Keeping it means the phase
-    counter appears to jump, so a `Gap` is emitted at each seam and every filter downstream resets —
-    which is the truthful description of what happened, since the signal really is discontinuous there.
+    would restart sample indices at zero and they are monotonic by contract. The decoder is rebased at the
+    seam, so no `Gap` is emitted, and each channel's first block after it carries `Block.seam`, because the
+    signal really is discontinuous there.
     """
 
     def __init__(self, path: str | Path, realtime: bool = False, loop: bool = False):
@@ -252,8 +252,11 @@ class SampleFileSource:
     `loop=True` restarts at the top when the file runs out, which is what makes a short capture usable
     as a stand-in for a live device. Sample indices keep counting across the seam — they are contiguous
     and monotonic by contract, and a loop is not a dropped sample, so no `Gap` is emitted. The signal
-    itself does jump at the seam, and a filter will ring for its group delay afterwards; with 74 s of
-    material that is a transient every 74 s and worth knowing about before reading a spectrum.
+    itself does jump at the seam, so the first block after it carries `Block.seam`. A filter that does not
+    read it rings for its group delay afterwards; with 74 s of material that is a transient every 74 s and
+    worth knowing about before reading a spectrum.
+
+    No input range: an export has no amplifier behind it, so `ChannelSpec.input_range` stays None.
     """
 
     NANOVOLT = 1e-3        # microvolts per stored count
@@ -339,11 +342,12 @@ class SampleFileSource:
         cursor = 0
         while not self._stop:
             take = min(self.block_size, self.samples - cursor)
+            seam = cursor == 0 and emitted > 0
             for c, counts in enumerate(self.counts):
                 yield Block(channel=c, start_index=emitted,
                             samples=tuple(counts[cursor:cursor + take]),
                             spec=self.specs[c],
-                            state=OK if self.active[c] else NO_SIGNAL)
+                            state=OK if self.active[c] else NO_SIGNAL, seam=seam)
             cursor += take
             emitted += take
             if cursor >= self.samples:

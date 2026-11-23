@@ -104,7 +104,7 @@ class Session:
             self.error = f"{type(exc).__name__}: {exc}"
 
     def stop(self) -> None:
-        """Detach. Stops the device's stream but leaves the connection open for the next protocol."""
+        """Detach. Stops the device's stream, unless always read keeps it, and leaves the connection open."""
         self._stop.set()
         try:
             self.source.close()

@@ -36,7 +36,7 @@ import flet as ft
 from nfb.dsp import REJECT_MODES
 from nfb.dsp import artifact as dsp_artifact
 
-from . import chrome, cues, music, quality_pane, shadow, sysvolume
+from . import audio, chrome, cues, music, quality_pane, shadow, sysvolume
 from . import theme as t
 from .feedback import (CONDITION, CONDITIONS, CONDITION_DETAIL, HOLD_FRACTION,
                        LEVEL, STATE,
@@ -656,7 +656,7 @@ class SignalPane:
                 labelled("what to do",
                          *[pill(mode, policy.mode == mode,
                                 (lambda m=mode: lambda _e: self._set(policy, "mode", m))())
-                           for mode in REJECT_MODES],
+                           for mode in getattr(self.session, "reject_modes", REJECT_MODES)],
                          note=REJECT_MODES[policy.mode]),
                 labelled("threshold",
                          num_box(policy.tolerance,
@@ -1087,8 +1087,9 @@ class SignalPane:
                 tone_rows = [labelled("tones", ft.Text("no reward to sound like yet", size=t.SMALL,
                                                        color=t.FAINT))]
             sound_row = ft.Column(
-                tone_rows + [ft.Text(problem or ("pitched by the band that earned it — press to hear each"
-                                                 if derived else "set yourself — press to hear each"),
+                tone_rows + [ft.Text(problem or (("pitched by the band that earned it — press to hear each"
+                                                  if derived else "set yourself — press to hear each")
+                                                 + audio.glitches()),
                                      size=t.SMALL, color=t.WARN if problem else t.FAINT)],
                 spacing=8)
         else:
@@ -1096,7 +1097,7 @@ class SignalPane:
                                  *[pill(name, click.sound == name,
                                         (lambda n=name: lambda _e: self._pick_click_sound(n))())
                                    for name in cues.click_choices()],
-                                 note=f"{cues.duration_ms(click.sound):.0f} ms")
+                                 note=f"{cues.duration_ms(click.sound):.0f} ms{audio.glitches()}")
         # Beside the interval, because the two are the same kind of thing and read as one sentence:
         # hold it for this long, then no faster than that. Hidden when zero would be wrong — a control that
         # says "0 s" is clearer than one that vanishes, since a missing dwell reads as a feature absent
@@ -1230,8 +1231,7 @@ class SignalPane:
             *extra,
             ft.Container(width=6),
             test_button("hear it",
-                        (lambda: lambda _e: cues.play_file(
-                            music.preview_path(getattr(mus, field), pitch), mus.volume))(),
+                        (lambda: lambda _e: music.play_preview(getattr(mus, field), pitch, mus.volume))(),
                         problem is None),
             note=f"{detail} · {problem}" if problem else detail)
 
@@ -1249,7 +1249,7 @@ class SignalPane:
         hz = 0.0 if hz <= 0 else min(music.PITCH_HI_HZ, max(music.PITCH_LO_HZ, hz))
         setattr(self.fb.music, field, hz)
         colour = self.fb.music.colour if field == "pitch_hz" else self.fb.music.second_colour
-        cues.play_file(music.preview_path(colour, hz), self.fb.music.volume)
+        music.play_preview(colour, hz, self.fb.music.volume)
         self.rebuild()
 
     def _balance_text(self, ends: tuple[str, str]) -> str:

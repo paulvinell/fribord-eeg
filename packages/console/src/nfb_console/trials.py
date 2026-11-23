@@ -19,7 +19,9 @@ Three decisions worth stating:
   waveform screen's calibration follows and for the same reason: phase lengths are properties of the
   signal, and a replay driven faster than real time must produce the same trials. A jump in `t` (a device
   gap, a suspend) **aborts the trial in flight** rather than scoring it: its baseline describes signal
-  that no longer precedes its active window.
+  that no longer precedes its active window. The person did that trial, so it stays in the history as a
+  void one. The same clock says how many readings a phase should hold: a reading that never arrived is
+  counted as a lost one, not left out of the count.
 
 - **The per-trial baseline is the de-trend.** Subtracting each trial's own baseline mean removes drift and
   standing offset trial by trial, which is why `nfb.dsp.scp.SlowShift` carries no drift follower — one
@@ -29,13 +31,15 @@ Three decisions worth stating:
   device-invalid blocks) are counted rather than used, and a trial where they exceed `reject_limit` is
   marked invalid: it appears in the history, drawn as such, and is excluded from every success rate. This
   is the clinical arrangement — EOG-contaminated trials are voided — and it is also the only honest one,
-  since a blink's deflection lives in exactly the band this protocol trains.
+  since a blink's deflection lives in exactly the band this protocol trains. A void trial keeps one
+  cause, the first of `CAUSES` that its own readings show, so the screen can say why and what to do.
 """
 
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import Any
 
 BASELINE_S = 2.0
 """The window averaged into the trial's baseline. Two seconds is the standard clinical pre-phase."""
@@ -69,7 +73,26 @@ void for the same reason an artifacted one is."""
 
 JUMP_S = 1.0
 """A step in signal time larger than this is a gap — readings arrive at ~20 Hz, so anything near a second
-means the signal was interrupted — and the trial in flight is aborted rather than scored."""
+means the signal was interrupted — and the trial in flight is aborted rather than scored. Under it, the
+readings the clock expected and did not get are counted as lost."""
+
+LIMIT, NO_SIGNAL, LOST, GAP, THIN_BASELINE, REJECTED = ("limit", "no signal", "lost", "gap", "baseline",
+                                                       "rejected")
+EXTRA = "extra"
+"""An extra channel that the subtraction of eye movements uses has no signal or is at the input limit, so the
+program cannot correct the reading."""
+CAUSES = (LIMIT, NO_SIGNAL, EXTRA, LOST, GAP, THIN_BASELINE, REJECTED)
+"""Why a trial is void. The first that its own readings show of the causes that are not counts: a sample at
+the input limit, a channel with no signal, an extra channel the subtraction cannot use, a jump in time, a
+baseline too thin to measure against. After them, of the two counts (a reading that never arrived, a
+rejected reading), the one with more readings, the missing one on a tie. The void decision itself stays
+the 20% rule and the baseline rule; the cause only names it."""
+
+COUNTS = (LOST, REJECTED)
+
+PAUSED, SEAM = "paused", "seam"
+"""The causes of a cut that the signal's time does not show: the session paused, however briefly, or a
+looped file started again. Like GAP, each ends the trial in flight at once."""
 
 BLOCK = 6
 """Directions and transfer slots are balanced within blocks of this many trials, so no long run of one
@@ -93,6 +116,23 @@ active window opening (absent on transfer trials — that is what a transfer tri
 verdict."""
 
 
+def thin_baseline(valid: float, expected: float) -> bool:
+    """The baseline rule: fewer than `MIN_BASELINE_FRACTION` of the readings a baseline expects are valid."""
+    return valid < MIN_BASELINE_FRACTION * expected
+
+
+def too_many_invalid(invalid: float, total: float, limit: float = REJECT_LIMIT) -> bool:
+    """The 20% rule: more than `limit` of a trial's readings are missing or not valid."""
+    return invalid > limit * total
+
+
+def succeeds(shift: float, required: str | None, limit: float) -> bool:
+    """Whether a shift is past `limit` on the required side: the verdict's rule, and the one every output
+    that says "good" during a trial asks. A zero shift is no shift in either direction, even at a limit of 0."""
+    oriented = shift if required == POSITIVE else -shift
+    return oriented >= limit and shift != 0.0
+
+
 @dataclass(frozen=True)
 class Trial:
     """One completed trial, as history."""
@@ -101,7 +141,11 @@ class Trial:
     transfer: bool
     score_uv: float             # mean shift over the active window, µV
     valid: bool                 # False: artifacted or truncated, excluded from every rate
-    success: bool               # valid and the mean shift on the required side
+    success: bool               # valid and the mean shift past the limit on the required side
+    cause: str | None = None    # one of CAUSES when void, None when valid
+    invalid_share: float = 0.0  # the part of the trial's expected readings that were not valid
+    cause_share: float = 0.0    # the part of them that `cause` alone accounts for
+    scale: Any = None           # the session's record of the limit and the range, from the feedback start
 
 
 @dataclass(frozen=True)
@@ -133,8 +177,11 @@ class TrialRun:
     """Two directions strictly in turn, instead of shuffled in each block."""
     cue_s: float = 0.0
     """Time from the cue to the start of the baseline. Zero puts the cue on the baseline's first reading."""
-    success_uv: float = 0.0
-    """Beyond-the-baseline margin the mean shift must clear, µV. Zero: any shift on the required side."""
+    limit_uv: float = 0.0
+    """Beyond-the-baseline margin the mean shift must clear, µV. Zero: any shift on the required side. A
+    session writes it at each feedback start, so a trial is scored against the limit it was shown."""
+    scale: Any = None
+    """The session's record of the limit and the range, written with `limit_uv` and kept on the trial."""
     reject_limit: float = REJECT_LIMIT
     metric_hz: float = 20.0
     """What rate the readings arrive at, for sizing the baseline-sufficiency check. The session passes
@@ -159,8 +206,12 @@ class TrialRun:
         self._shift_sum = 0.0
         self._shift_n = 0
         self._invalid = 0
+        self._counts: dict[str, int] = {}       # this trial's invalid readings, by cause
         self.shift: float | None = None
         self.last: Trial | None = None
+        self.phase_t: dict[str, float] = {}
+        """When each phase of the trial in flight began: the time of the reading, real or lost, after
+        which its readings count. Replaced whole at each cue."""
 
     # --- the sequence -----------------------------------------------------------------------
 
@@ -237,18 +288,38 @@ class TrialRun:
 
     # --- the feed ---------------------------------------------------------------------------
 
-    def feed(self, t: float, value: float, valid: bool = True) -> list[Event]:
-        """One reading of the metric. Returns the events that fell due, oldest first."""
+    def feed(self, t: float, value: float, valid: bool = True, cause: str | None = None,
+             cut: str | None = None) -> list[Event]:
+        """One reading of the metric. Returns the events that fell due, oldest first. `cause` says why an
+        invalid reading is invalid, LIMIT, NO_SIGNAL, EXTRA or REJECTED; an invalid reading with none counts
+        as REJECTED.
+        `cut` says the signal before this reading does not precede it, and why: PAUSED or SEAM."""
         events: list[Event] = []
+        last = self._t
         # A backward step is a discontinuity like a forward gap (a device clock can wrap or glitch), and it
-        # would stall the phase clock, whose deadline is then never reached again.
-        if self._t is not None and (t - self._t > JUMP_S or t < self._t):
-            self._abort()
-        if self._t is None:
+        # would stall the phase clock, whose deadline is then never reached again. A cut can leave the
+        # clock continuous and is a discontinuity all the same.
+        if last is not None and (cut is not None or t - last > JUMP_S or t < last):
+            events += self._abort(cut or GAP)
+            last = None
+        if last is None:
             self._phase_until = t + LEADIN_S
             self.phase = ITI
-        self._t = t
+        else:
+            # Under a jump, the readings the clock expected and did not get go in at their own times.
+            missing = int((t - last) * self.metric_hz + 0.5) - 1
+            for k in range(1, missing + 1):
+                events += self._step(last + k / self.metric_hz, 0.0, False, LOST)
+        events += self._step(t, value, valid, cause)
+        return events
 
+    def _invalid_reading(self, cause: str) -> None:
+        self._invalid += 1
+        self._counts[cause] = self._counts.get(cause, 0) + 1
+
+    def _step(self, t: float, value: float, valid: bool, cause: str | None) -> list[Event]:
+        events: list[Event] = []
+        self._t = t
         if self.done:
             return events
 
@@ -259,23 +330,28 @@ class TrialRun:
                 self._baseline_sum += value
                 self._baseline_n += 1
             else:
-                self._invalid += 1
+                self._invalid_reading(cause or REJECTED)
         elif self.phase == ACTIVE:
-            if self.baseline_uv is not None and valid:
+            if not valid:
+                self._invalid_reading(cause or REJECTED)
+            elif self.baseline_uv is None:
+                self._invalid += 1      # a good reading with no baseline to measure it against
+            else:
                 self.shift = value - self.baseline_uv
                 self._shift_sum += self.shift
                 self._shift_n += 1
-            else:
-                self._invalid += 1
 
         while self._phase_until is not None and t >= self._phase_until and not self.done:
             if self.phase == ITI:
+                self.phase_t = {}
                 self.required, self.transfer = self._next_assignment()
                 self.phase = CUED if self.cue_s > 0 else BASELINE
                 self._phase_until += self.cue_s if self.cue_s > 0 else self.baseline_s
                 self._baseline_sum = 0.0
                 self._baseline_n = 0
                 self._invalid = 0
+                self._counts = {}
+                self.scale = None
                 self.baseline_uv = None
                 self.shift = None
                 events.append(Event(CUE, self.required, self.transfer))
@@ -283,10 +359,9 @@ class TrialRun:
                 self.phase = BASELINE
                 self._phase_until += self.baseline_s
             elif self.phase == BASELINE:
-                expected = self.baseline_s * self.metric_hz
-                enough = self._baseline_n >= MIN_BASELINE_FRACTION * expected
+                thin = thin_baseline(self._baseline_n, self.baseline_s * self.metric_hz)
                 self.baseline_uv = (self._baseline_sum / self._baseline_n
-                                    if self._baseline_n and enough else None)
+                                    if self._baseline_n and not thin else None)
                 self.phase = ACTIVE
                 self._phase_until += self.active_s
                 self._shift_sum = 0.0
@@ -301,27 +376,48 @@ class TrialRun:
             elif self.phase == RESULT:
                 self.phase = ITI
                 self._phase_until += self._rng.uniform(*self.iti_s)
+            self.phase_t[self.phase] = t
         return events
 
     def _score(self) -> Trial:
         total = self._baseline_n + self._shift_n + self._invalid
-        artifacted = total > 0 and self._invalid / total > self.reject_limit
+        share = self._invalid / total if total else 0.0
+        artifacted = too_many_invalid(self._invalid, total, self.reject_limit)
         score = self._shift_sum / self._shift_n if self._shift_n else 0.0
         valid = (self.baseline_uv is not None and self._shift_n > 0 and not artifacted)
-        wanted = score >= self.success_uv if self.required == POSITIVE else score <= -self.success_uv
-        # `score != 0` keeps a zero mean from counting as success at the zero criterion: no shift is not a
-        # shift in either direction.
+        cause = None if valid else self._cause()
+        return self._record(score, valid, valid and succeeds(score, self.required, self.limit_uv), cause,
+                            share, self._counts.get(cause, 0) / total if total else 0.0)
+
+    def _cause(self) -> str:
+        """The first cause that is not a count, else the count with the most readings: see `CAUSES`."""
+        shown = {cause for cause, n in self._counts.items() if n}
+        if self.baseline_uv is None:
+            shown.add(THIN_BASELINE)
+        fixed = next((cause for cause in CAUSES if cause in shown and cause not in COUNTS), None)
+        if fixed is not None:
+            return fixed
+        counted = [cause for cause in COUNTS if cause in shown]
+        return max(counted, key=lambda cause: self._counts[cause]) if counted else REJECTED
+
+    def _record(self, score: float, valid: bool, success: bool, cause: str | None, share: float,
+                cause_share: float = 0.0) -> Trial:
         trial = Trial(index=len(self.results) + 1, required=self.required or POSITIVE,
-                      transfer=self.transfer, score_uv=score, valid=valid,
-                      success=valid and wanted and score != 0.0)
+                      transfer=self.transfer, score_uv=score, valid=valid, success=success, cause=cause,
+                      invalid_share=share, cause_share=cause_share, scale=self.scale)
         self.results.append(trial)
         self.last = trial
         return trial
 
-    def _abort(self) -> None:
-        """A gap mid-trial: discard the trial in flight — unrecorded, because its baseline describes signal
-        that no longer precedes it — and rest before the next cue."""
+    def _abort(self, cause: str = GAP) -> list[Event]:
+        """A gap mid-trial: the trial in flight is void, because its baseline describes signal that no longer
+        precedes it. It stays in the history, since the person did it, and the run rests before the next
+        cue. Returns its verdict, as the end of any other trial does."""
+        events: list[Event] = []
         if self.phase in (CUED, BASELINE, ACTIVE):
+            if self.required is not None:
+                trial = self._record(0.0, False, False, cause, 1.0)
+                events.append(Event(VERDICT, trial.required, trial.transfer, trial))
             self.phase = ITI
             self.required = None
             self.transfer = False
@@ -330,3 +426,4 @@ class TrialRun:
         # Whatever phase we were in, the clock restarts from the new time.
         self._phase_until = None
         self._t = None
+        return events

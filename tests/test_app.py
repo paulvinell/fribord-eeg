@@ -520,3 +520,209 @@ def test_no_catalogue_card_opens_a_screen_that_is_not_its_protocol():
             assert p.code in screen.HANDLES
         else:
             assert p.note, f"{p.code} is greyed and does not say why"
+
+
+# --- always read ------------------------------------------------------------------------------------
+
+
+def _press(control, label: str, depth: int = 0) -> bool:
+    """Click the device screen's control whose only text is `label`, if a person can."""
+    import flet as ft
+
+    if control is None or depth > 40:
+        return False
+    if isinstance(control, ft.Container) and control.on_click is not None and not control.disabled \
+            and isinstance(control.content, ft.Text) and control.content.value == label:
+        control.on_click(None)
+        return True
+    for child in getattr(control, "controls", None) or []:
+        if _press(child, label, depth + 1):
+            return True
+    return _press(getattr(control, "content", None), label, depth + 1)
+
+
+def _type_path(control, path: str, depth: int = 0) -> bool:
+    import flet as ft
+
+    if control is None or depth > 40:
+        return False
+    if isinstance(control, ft.TextField) and "recording" in (control.hint_text or ""):
+        control.value = path
+        control.on_blur(None)
+        return True
+    for child in getattr(control, "controls", None) or []:
+        if _type_path(child, path, depth + 1):
+            return True
+    return _type_path(getattr(control, "content", None), path, depth + 1)
+
+
+def _screen(console):
+    return console.page.controls[0]
+
+
+def _counts(fake) -> tuple[int, int]:
+    import optima
+
+    return fake.sent.count(optima.CMD["START_MES"]), fake.sent.count(optima.CMD["STOP_MES"])
+
+
+def _always_read(monkeypatch):
+    """A live console on AMP with always read pressed on the device screen, back on its session."""
+    console, fake = _live_console(monkeypatch)
+    console.show_device(return_to=BY_CODE["AMP"])
+    assert _press(_screen(console), "always read")
+    console.resume(BY_CODE["AMP"])
+    return console, fake
+
+
+def _fed(session) -> None:
+    from conftest import waitfor
+
+    waitfor(lambda: any(v is not None for v in session.state.values()),
+            what="the session never got a block")
+
+
+def test_always_read_keeps_one_measurement_across_programs_stops_and_the_launcher(monkeypatch):
+    from nfb.device import Mode
+
+    console, fake = _always_read(monkeypatch)
+    try:
+        assert console.device.status.mode is Mode.MEASURING
+        before = _counts(fake)
+        console.pick(BY_CODE["WAVE"])
+        console.restart()
+        console.show_launcher()
+        console.pick(BY_CODE["AMP"])
+        console.show_device(return_to=BY_CODE["AMP"])
+        console.resume(BY_CODE["AMP"])
+        assert _counts(fake) == before, "no stop and no start between programs"
+        assert console.device.status.mode is Mode.MEASURING
+        _fed(console.session)
+    finally:
+        console.session.stop()
+        console.device.close()
+    assert console.device.status.mode is Mode.DISCONNECTED
+    assert _counts(fake)[1] == before[1] + 1, "the exit stops it"
+
+
+def test_without_always_read_each_program_starts_and_stops_the_amplifier(monkeypatch):
+    from nfb.device import Mode
+
+    console, fake = _live_console(monkeypatch)
+    try:
+        starts, stops = _counts(fake)
+        console.pick(BY_CODE["WAVE"])
+        console.restart()
+        assert _counts(fake) == (starts + 2, stops + 2)
+        console.show_launcher()
+        assert console.device.status.mode is Mode.IDLE
+    finally:
+        console.device.close()
+
+
+def test_always_read_restarts_once_for_each_change_that_needs_it(monkeypatch):
+    """A channel count, a device setting, a contact check and a file as the input each stop the
+    measurement once, and it comes back by itself."""
+    from nfb.device import Mode
+
+    console, fake = _always_read(monkeypatch)
+    dev = console.device
+    try:
+        starts, stops = _counts(fake)
+        console.set_channels(1)
+        assert _counts(fake) == (starts + 1, stops + 1) and dev.status.mode is Mode.MEASURING
+        _fed(console.session)
+
+        console.show_device(return_to=BY_CODE["AMP"])
+        screen = _screen(console)
+        assert _press(screen, "250 Hz"), "a device setting can change while it measures"
+        assert _counts(fake) == (starts + 2, stops + 2) and dev.status.mode is Mode.MEASURING
+        assert dev.status.settings.hz == 250.0
+
+        assert _press(screen, "Check contact")
+        assert dev.status.mode is Mode.TESTING and _counts(fake) == (starts + 2, stops + 3)
+        assert _press(screen, "Stop test")
+        assert dev.status.mode is Mode.MEASURING and _counts(fake) == (starts + 3, stops + 3)
+
+        assert _press(screen, "file") and _type_path(screen, str(BENCH))
+        console.resume(BY_CODE["AMP"])
+        assert dev.status.mode is Mode.IDLE, "a file as the input stops the amplifier"
+        console.show_device(return_to=BY_CODE["AMP"])
+        assert _press(_screen(console), "amplifier")
+        assert dev.status.mode is Mode.MEASURING and _counts(fake) == (starts + 4, stops + 4)
+
+        assert _press(_screen(console), "Disconnect")
+        assert dev.status.mode is Mode.DISCONNECTED and _counts(fake)[1] == stops + 5
+        assert _press(_screen(console), "Connect")
+        assert dev.status.mode is Mode.MEASURING, "it measures again from the connection"
+    finally:
+        console.session.stop()
+        dev.close()
+
+
+def test_always_read_survives_a_pick_inside_a_pick_and_a_double_stop(monkeypatch):
+    from nfb.device import Mode
+    from nfb_console import amplitude_view as av
+
+    console, fake = _always_read(monkeypatch)
+    before = _counts(fake)
+    real = av.session_for
+    reentered = []
+
+    def slow_build(*a, **kw):
+        session = real(*a, **kw)
+        if not reentered:
+            reentered.append(True)
+            console.restart()
+        return session
+
+    av.session_for = slow_build
+    try:
+        console.restart()
+        console.toolbar.stop.on_click(None)
+        console.toolbar.stop.on_click(None)
+        assert reentered
+        assert _counts(fake) == before and console.device.status.mode is Mode.MEASURING
+        _fed(console.session)
+    finally:
+        av.session_for = real
+        console.session.stop()
+        console.device.close()
+
+
+def test_the_input_range_row_acts_and_restarts_the_measurement_once(monkeypatch):
+    from nfb.device import Mode
+
+    console, fake = _always_read(monkeypatch)
+    try:
+        before = _counts(fake)
+        console.show_device(return_to=BY_CODE["AMP"])
+        assert _press(_screen(console), "±6 mV")
+        assert console.device.status.settings.range_uv == 6000.0
+        assert _counts(fake) == (before[0] + 1, before[1] + 1)
+        assert console.device.status.mode is Mode.MEASURING
+        console.resume(BY_CODE["AMP"])
+        assert {s.input_range for s in console.session.specs.values()} == {6000.0}, "rebuilt on the range"
+    finally:
+        console.session.stop()
+        console.device.close()
+
+
+def test_the_command_line_range_reaches_the_device_settings():
+    from nfb_console.app import Console, build_parser
+
+    console = Console(StubPage(), build_parser().parse_args([RECORDING, "--range", "6000"]))
+    assert console.device.status.settings.range_uv == 6000.0
+    console.device.close()
+
+
+def test_the_console_opens_the_cue_stream_when_it_starts(monkeypatch):
+    """So that the first cue of a run plays through the open stream too, and not through a new process."""
+    from nfb_console import audio
+    from nfb_console.app import Console, build_parser
+
+    warmed = []
+    monkeypatch.setattr(audio, "warm", lambda: warmed.append(True))
+    console = Console(StubPage(), build_parser().parse_args([RECORDING]))
+    assert warmed
+    console.device.close()

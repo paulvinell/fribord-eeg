@@ -1,18 +1,14 @@
-"""Short sounds: the session's reminder beep and finishing tone, and one click of a click train.
+"""Short sounds: the session's reminder beep and finishing tone, the clicks, and the reward tones.
 
-Deliberately not the feedback engine. Continuous feedback has to modulate a tone smoothly at low
-latency and belongs in a real audio path; a cue is one short sound at a moment already decided, so
-`afplay` in a detached process is the whole implementation. A reminder half a second late is still a
-reminder.
+What each sound is made of lives here; how it reaches the speaker does not. Every sound is finished by
+`audio.finish` and played by `audio.play`, which hold the rules against crackle for every sound at once.
 
-The click is the same kind of thing: one short sound at a moment already decided — every target met —
-so it plays through here too. What it is *not* is a train whose rate carries the signal; see
-`feedback.Click`. It is also the one sound here that is **generated**: macOS ships nothing short enough
-to read as a click, so `click_path` renders a few milliseconds of band-limited noise to a WAV instead.
+The click is one short sound at a moment already decided — every target met. What it is *not* is a train
+whose rate carries the signal; see `feedback.Click`. It is generated: macOS ships nothing short enough to
+read as a click, so it is a few milliseconds of band-limited noise.
 
 Volume is per-play, because a click and a session-end tone want different loudness and the click's is a
-setting the operator adjusts. `afplay -v` takes 0…1, so a 0–100 setting is divided here rather than at
-every call site.
+setting the operator adjusts.
 
 macOS only, matching the rest of this project. `problem()` reports why a sound would not be heard,
 so a pane can say so rather than presenting a silent control as working.
@@ -20,23 +16,15 @@ so a pane can say so rather than presenting a silent control as working.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
-import tempfile
-import threading
-import time
-import wave
+import struct
 from pathlib import Path
 
-from . import developer
+import numpy as np
 
-CLICK_STALL_SECONDS = 2.0
-"""A click stream whose callback has not run for this long is dead — a device change leaves the object
-alive but unserviced. The same figure `music.STALL_SECONDS` uses for the music writer."""
+from . import audio, developer
 
 SYSTEM = Path("/System/Library/Sounds")
-RATE = 44100
+RATE = audio.WAV_RATE
 
 # The session's own two cues are system sounds, which is fine: they mark a moment and can afford to be
 # a few hundred milliseconds long.
@@ -85,20 +73,13 @@ pitch.
 Its own table for the same reason `_DERIVED` has one: `CLICK_PROFILES` is the *menu* the Click pane lists, and
 generating into it would put "tick+held" in the list of characters to choose from."""
 
-_cache: dict[str, Path] = {}
-_cache_dir: Path | None = None
-
-_last_error: str | None = None
-
-
 def muted() -> bool:
     """Outputs off silences audio for the process. See `developer.outputs_off` for why it exists."""
     return developer.outputs_off()
 
 
 def available() -> bool:
-    return (not muted() and sys.platform == "darwin" and shutil.which("afplay") is not None
-            and all(p.exists() for p in SOUNDS.values()))
+    return not muted() and audio.afplay_available() and all(p.exists() for p in SOUNDS.values())
 
 
 def click_choices() -> list[str]:
@@ -123,92 +104,87 @@ def held(name: str) -> str:
     return doubled
 
 
-RELEASE_MS = 8.0
-"""Every rendered sound is faded to **exactly zero** over its last few milliseconds.
-
-**This is a crackle fix, and it is the third family of them in this codebase.** The other two are in
-`music`: a stream starved of blocks, and a laptop cone driven past its excursion limit by low frequencies.
-This one is neither — it is a step in the waveform. The pacer tone's envelope is an exponential over
-160 ms with a time constant of 160/2.5, so it was still at **8% of full scale when the buffer ended** and
-the speaker was asked to go from there to silence in one sample. A discontinuity is broadband: what comes
-out is a click on the end of every breath cue, and on a small speaker it reads as crackle.
-
-Eight milliseconds is inaudible as a fade and long enough to be gentle at any pitch here — half a cycle
-of the lowest tone this renders is 4.5 ms, so the ramp always spans a full cycle or more."""
-
-
-def _fade_out(wave_data: "np.ndarray", ms: float = RELEASE_MS) -> "np.ndarray":
-    """Raised-cosine fade over the last `ms`, ending at exactly zero. See RELEASE_MS."""
-    import numpy as np
-
-    n = min(len(wave_data), max(1, int(RATE * ms / 1000.0)))
-    ramp = 0.5 * (1.0 + np.cos(np.pi * np.arange(1, n + 1) / n))
-    wave_data[-n:] *= ramp
-    return wave_data
-
-
-def _render(low: float, high: float, decay_ms: float) -> "np.ndarray":
+def _click_shape(low: float, high: float, decay_ms: float, rate: int) -> np.ndarray:
     """A band-limited noise burst under an exponential decay: hard attack, immediate fall.
 
     Noise rather than a tone, because a damped sine at these lengths is heard as a pitched blip while
-    filtered noise is heard as a *click*. Seeded, so the same profile always renders the same file.
+    filtered noise is heard as a *click*. Seeded, so the same profile always renders the same sound.
     """
-    import numpy as np
     from scipy import signal
 
     tau = decay_ms / 1000.0
-    samples = int(RATE * tau * 5)                    # five time constants: silent by the end
-    times = np.arange(samples) / RATE
+    samples = int(rate * tau * 5)                    # five time constants: silent by the end
+    times = np.arange(samples) / rate
     noise = np.random.default_rng(0).standard_normal(samples)
-    sos = signal.butter(2, [low, high], btype="bandpass", fs=RATE, output="sos")
-    wave_data = signal.sosfilt(sos, noise) * np.exp(-times / tau)
-    peak = float(np.abs(wave_data).max()) or 1.0
-    return (_fade_out(wave_data / peak * 0.9) * 32767).astype(np.int16)
+    sos = signal.butter(2, [low, min(high, rate / 2 * 0.9)], btype="bandpass", fs=rate, output="sos")
+    return signal.sosfilt(sos, noise) * np.exp(-times / tau)
 
 
-def click_samples(name: str) -> "np.ndarray | None":
-    """The rendered int16 samples of a click or tone, doubled form included. None for unknown names.
+def _tone_shape(pitch: float, ms: float, rate: int) -> np.ndarray:
+    """A sine under a raised-cosine attack and an exponential decay."""
+    samples = int(rate * ms / 1000.0)
+    times = np.arange(samples) / rate
+    tone = np.sin(2 * np.pi * pitch * times)
+    attack = max(1, int(rate * TONE_ATTACK_MS / 1000.0))
+    envelope = np.exp(-times / (ms / 1000.0 / 2.5))
+    envelope[:attack] *= 0.5 * (1 - np.cos(np.pi * np.arange(attack) / attack))
+    return tone * envelope
 
-    Split out of `click_path` so the persistent stream below can play the samples directly — the whole
-    point of that stream is not touching the filesystem or a child process at the moment of a reward.
-    """
+
+def _read_aiff(path: Path) -> tuple[np.ndarray, float]:
+    """The samples of an uncompressed AIFF as mono floats in -1..1, and its rate. Enough for the two
+    system sounds, which are 24-bit stereo PCM: the standard library's reader leaves Python in 3.13."""
+    data = path.read_bytes()
+    pos, channels, bits, rate, pcm = 12, 1, 16, float(RATE), b""
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], struct.unpack(">I", data[pos + 4:pos + 8])[0]
+        body = data[pos + 8:pos + 8 + size]
+        if cid == b"COMM":
+            channels, _frames, bits = struct.unpack(">hIh", body[:8])
+            exponent, mantissa = struct.unpack(">HQ", body[8:18])
+            rate = mantissa * 2.0 ** ((exponent & 0x7FFF) - 16383 - 63)
+        elif cid == b"SSND":
+            pcm = body[8 + struct.unpack(">I", body[:4])[0]:]
+        pos += 8 + size + (size & 1)
+    width = bits // 8
+    raw = np.frombuffer(pcm[:len(pcm) // width * width], dtype=np.uint8).reshape(-1, width)
+    value = np.zeros(len(raw), dtype=np.int64)
+    for byte in range(width):
+        value = (value << 8) | raw[:, byte]
+    value = np.where(value >= 1 << (bits - 1), value - (1 << bits), value)
+    frames = value[:len(value) // channels * channels].reshape(-1, channels)
+    return frames.mean(axis=1) / float(1 << (bits - 1)), rate
+
+
+def sound_samples(name: str, rate: int = RATE) -> np.ndarray | None:
+    """Any sound here, finished, as floats at `rate`. None for a name that is not a sound.
+
+    A system sound keeps its own level and is resampled to `rate`; a click and a tone are made at `rate`.
+    Every one goes through `audio.finish`, and a doubled one is two finished marks with silence between."""
+    if name in SOUNDS:
+        data, source = _read_aiff(SOUNDS[name])
+        return audio.finish(audio.resample(data, source, rate), rate, peak=None)
     base = _DOUBLES.get(name, name)
-    profile = _profile(base)
-    tone = _TONES.get(base)
+    profile, tone = _profile(base), _TONES.get(base)
     if profile is None and tone is None:
         return None
-    data = _render_tone(*tone) if tone is not None else _render(*profile)
-    if base != name:
-        import numpy as np
+    one = audio.finish(_tone_shape(*tone, rate) if tone is not None else _click_shape(*profile, rate), rate)
+    if base == name:
+        return one
+    return np.concatenate([one, np.zeros(int(rate * HOLD_GAP_MS / 1000.0)), one])
 
-        gap = np.zeros(int(RATE * HOLD_GAP_MS / 1000.0), dtype=data.dtype)
-        data = np.concatenate([data, gap, data])
-    return data
+
+def click_samples(name: str, rate: int = RATE) -> np.ndarray | None:
+    """A sound as 16-bit counts, for a file. None for a name that is not a sound."""
+    data = sound_samples(name, rate)
+    return None if data is None else audio.counts(data)
 
 
 def click_path(name: str) -> Path | None:
-    """Render `name` to a WAV once per process and return its path.
-
-    Clicks and reward tones both come through here — they are the same kind of thing to a caller, a short
-    synthesised sound identified by name — while staying different kinds of thing to the ear and in the
-    tables above.
-    """
-    global _cache_dir
-    if name in _cache:
-        return _cache[name]
-    data = click_samples(name)
-    if data is None:
+    """The sound as a WAV file, written once per process."""
+    if sound_samples(name, RATE) is None:
         return None
-    if _cache_dir is None:
-        _cache_dir = Path(tempfile.mkdtemp(prefix="nfb-clicks-"))
-    path = _cache_dir / f"{name.replace('@', '-').replace('.', '_').replace('+', '_')}.wav"
-    with wave.open(str(path), "wb") as fh:
-        fh.setnchannels(1)
-        fh.setsampwidth(2)
-        fh.setframerate(RATE)
-        fh.writeframes(data.tobytes())
-    _cache[name] = path
-    return path
+    return audio.file_for(name, lambda rate: sound_samples(name, rate))
 
 
 def duration_ms(name: str) -> float:
@@ -322,219 +298,45 @@ def tone_at(pitch_hz: float) -> str:
     return name
 
 
-def _render_tone(pitch: float, ms: float) -> "np.ndarray":
-    """A sine under a raised-cosine attack and an exponential decay."""
-    import numpy as np
+def _highest_hz(name: str) -> float | None:
+    """The highest frequency a sound is meant to hold: a tone's pitch, or an octave over a click's band,
+    where its second-order band-pass is 12 dB down. None for a system sound."""
+    base = _DOUBLES.get(name, name)
+    if base in _TONES:
+        return _TONES[base][0]
+    profile = _profile(base)
+    return 2.0 * profile[1] if profile is not None else None
 
-    samples = int(RATE * ms / 1000.0)
-    times = np.arange(samples) / RATE
-    tone = np.sin(2 * np.pi * pitch * times)
-    attack = max(1, int(RATE * TONE_ATTACK_MS / 1000.0))
-    envelope = np.exp(-times / (ms / 1000.0 / 2.5))
-    envelope[:attack] *= 0.5 * (1 - np.cos(np.pi * np.arange(attack) / attack))
-    return (_fade_out(tone * envelope * 0.9) * 32767).astype(np.int16)
+
+@audio.family
+def every_sound():
+    """Every sound here across its domain: the system sounds, the click menu, each alert step, tones across
+    the pitch range at a sixth of an octave and at both ends, and the doubled form of each."""
+    names = list(SOUNDS) + list(CLICK_PROFILES)
+    names += [frequency_click(ALERT_LO_HZ * (ALERT_HI_HZ / ALERT_LO_HZ) ** (k / 12)) for k in range(13)]
+    sixths = int(np.log2(TONE_HI_HZ / TONE_LO_HZ) * 6)
+    names += [tone_at(TONE_LO_HZ * 2 ** (k / 6)) for k in range(sixths + 1)] + [tone_at(TONE_HI_HZ)]
+    names += [held(n) for n in names if n not in SOUNDS]
+    return [(n, (lambda rate, n=n: sound_samples(n, rate)), _highest_hz(n)) for n in dict.fromkeys(names)]
 
 
 def problem() -> str | None:
     """Why a sound would not be heard, if it would not be."""
-    if sys.platform != "darwin":
-        return f"no sound player on {sys.platform}"
-    if shutil.which("afplay") is None:
-        return "afplay not found"
+    if not audio.afplay_available():
+        return "no sound player on this machine"
     missing = [p.name for p in SOUNDS.values() if not p.exists()]
     if missing:
         return f"missing system sound {missing[0]}"
-    return _last_error
-
-
-def command(name: str, volume: float | None = None) -> list[str] | None:
-    """The argv `play` would run, or None if there is nothing to play. Separated so the volume
-    arithmetic is testable without making a noise."""
-    path = SOUNDS.get(name) or click_path(name)
-    if path is None:
-        return None
-    argv = ["afplay"]
-    if volume is not None:
-        argv += ["-v", f"{min(100.0, max(0.0, volume)) / 100:.3f}"]
-    return argv + [str(path)]
-
-
-def play_file(path: "Path | str | None", volume: float | None = None) -> bool:
-    """Fire and forget an already-rendered file. For auditions of things this module does not own —
-    the noise's tilts, which `music.preview_path` renders. Same guards as `play`."""
-    global _last_error
-    if path is None or muted() or not available():
-        return False
-    argv = ["afplay"]
-    if volume is not None:
-        argv += ["-v", f"{min(100.0, max(0.0, volume)) / 100:.3f}"]
-    try:
-        subprocess.Popen(argv + [str(path)], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-        return True
-    except OSError as exc:
-        _last_error = f"{type(exc).__name__}: {exc}"
-        return False
-
-
-SHUT_WAIT_SECONDS = 2.0
-"""How long `shut_aside` waits for a stream's writer to finish its last write before it shuts the stream."""
-
-
-def shut_aside(stream, writer: threading.Thread | None = None) -> None:
-    """Stop and close an audio stream on a thread of its own, after its writer, if given, has finished.
-
-    Never on the thread that asked for a sound. That is the screen's thread, and closing there hung the
-    whole program: the screen's thread waited inside CoreAudio for a lock held by CoreAudio's own thread,
-    which was running PortAudio's start-and-stop callback and waited for a lock the screen's thread held.
-    If the close deadlocks here, only this thread is lost.
-    """
-    if stream is None:
-        return
-
-    def shut() -> None:
-        if writer is not None and writer is not threading.current_thread():
-            writer.join(timeout=SHUT_WAIT_SECONDS)
-        try:
-            stream.stop()
-            stream.close()
-        except Exception:
-            pass                        # a stream that will not shut has nothing more to give anyone
-
-    threading.Thread(target=shut, daemon=True, name="audio-shut").start()
-
-
-class _ClickStream:
-    """A pre-opened output stream that mixes already-rendered buffers on demand.
-
-    Why this exists, measured: a fresh `afplay` returns from `Popen` in ~3 ms, but the audio hardware does
-    not go active until **74–117 ms** later — CoreAudio session setup, paid again on every click. The click
-    is the most moment-locked sound in the app; it is the one mechanism near the 250 ms budget, and a third of that budget was being spent launching a process to play 9 ms of noise.
-    Keeping one stream open makes a click cost the stream's output latency and nothing else — **71 ms
-    measured** (`make latency`), CoreAudio's floor for a 'low'-latency stream rather than anything the
-    block size buys back — and `subprocess.Popen` leaves the feed thread, where its 2.7 ms was a stall
-    like any other. Against afplay that is 71 ms flat instead of 74–117 ms of session setup plus the
-    child's own buffering, and constant instead of per-click.
-
-    Small block and `latency='low'` on purpose — the opposite trade from the music streams' deep buffer. A
-    dropout in a 9 ms click is inaudible where a dropout in continuous music is a crackle, so this stream
-    buys immediacy where the music streams buy slack. Voices are mixed additively: a reward click landing on a
-    reminder beep's tail must not silence either.
-    """
-
-    def __init__(self) -> None:
-        self._stream = None
-        self._lock = threading.Lock()
-        self._voices: list[list] = []           # [float32 samples, gain, position]
-        self._tried = False
-        self._last_callback: float | None = None
-        self.error: str | None = None
-
-    def _alive(self) -> bool:
-        """Whether the stream's callback is still being serviced. A device change leaves the object open
-        but silent, so a stream is only trusted while its callback has run recently."""
-        return (self._last_callback is not None
-                and time.monotonic() - self._last_callback < CLICK_STALL_SECONDS)
-
-    def _rebuild(self) -> None:
-        """Drop a stalled stream so `start` opens a fresh one. A deliberate rebuild gets a new attempt."""
-        shut_aside(self._stream)
-        self._stream = None
-        self._tried = False
-        self._last_callback = None
-        with self._lock:
-            self._voices = []           # a dead stream never played them; do not carry them over
-
-    def start(self) -> bool:
-        """Whether the stream can play a sound now. When it cannot yet, the stream opens on a thread of its
-        own and this says no, so the caller plays that one sound another way: opening a stream calls into
-        CoreAudio, and the caller is often the screen's thread, where a call that blocks hangs the program."""
-        if self._stream is not None:
-            if self._alive():
-                return True
-            self._rebuild()                      # went silent (device changed): reopen
-        if self._tried:                          # one failure per process, not one per click
-            return False
-        self._tried = True
-        threading.Thread(target=self._open, daemon=True, name="click-stream-open").start()
-        return False
-
-    def _open(self) -> None:
-        try:
-            import sounddevice as sd
-        except Exception as exc:
-            self.error = f"sounddevice unavailable: {exc}"
-            return
-        try:
-            stream = sd.OutputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=256,
-                                     latency="low", callback=self._callback)
-            stream.start()
-        except Exception as exc:
-            self.error = f"no audio output: {exc}"
-            return
-        self._last_callback = time.monotonic()   # trust a just-opened stream until its first callback
-        self._stream = stream
-
-    def trigger(self, name: str, volume: float | None) -> bool:
-        if not self.start():
-            return False
-        import numpy as np
-
-        data = click_samples(name)
-        if data is None:
-            return False
-        gain = 1.0 if volume is None else min(100.0, max(0.0, volume)) / 100.0
-        with self._lock:
-            self._voices.append([data.astype(np.float32) / 32767.0, gain, 0])
-        return True
-
-    def _callback(self, outdata, frames, time_info, status) -> None:
-        self._last_callback = time.monotonic()      # proof of life for the liveness check
-        import numpy as np
-
-        outdata[:] = 0.0
-        with self._lock:
-            keep = []
-            for voice in self._voices:
-                data, gain, pos = voice
-                n = min(frames, len(data) - pos)
-                if n > 0:
-                    outdata[:n, 0] += data[pos:pos + n] * gain
-                    voice[2] = pos + n
-                if voice[2] < len(data):
-                    keep.append(voice)
-            self._voices = keep
-        # **Mixing is addition, and addition overflows.** Each voice is rendered to 0.9 of full scale, so
-        # a reward click landing on a breath cue asks for 1.8 — and what a device does past 1.0 is clip
-        # the samples flat, which is a square wave, which is crackle. Additive mixing is still right (a
-        # click on a cue's tail must not silence either), so the sum is limited here instead: transparent
-        # while nothing overlaps, and a soft ceiling rather than a broken waveform when something does.
-        np.clip(outdata, -1.0, 1.0, out=outdata)
-
-
-_stream = _ClickStream()
+    return audio.last_error()
 
 
 def play(name: str, volume: float | None = None) -> bool:
-    if muted():
-        return False
-    """Fire and forget, one sound. Never raises and never blocks the draw loop.
+    """Fire and forget one sound, through `audio.play`. Never raises and never blocks the screen or the feed.
 
-    `volume` is 0–100, or None for the system volume.
-
-    Synthesised sounds — the click and the reward tones — go through the persistent stream when it can
-    open, because they are moment-locked; see `_ClickStream`. The two system cues, and everything when
-    the stream cannot open, still take `afplay`: a reminder half a second late is still a reminder.
-    """
-    global _last_error
-    if name not in SOUNDS and available() and _stream.trigger(name, volume):
-        return True
-    argv = command(name, volume)
-    if argv is None or not available():
+    `volume` is 0–100, or None for full level."""
+    if muted() or not available():
         return False
-    try:
-        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except OSError as exc:
-        _last_error = f"{type(exc).__name__}: {exc}"
+    if name not in SOUNDS and _profile(_DOUBLES.get(name, name)) is None \
+            and _DOUBLES.get(name, name) not in _TONES:
         return False
+    return audio.play(name, lambda rate: sound_samples(name, rate), volume, file=SOUNDS.get(name))

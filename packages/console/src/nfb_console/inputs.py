@@ -51,10 +51,17 @@ class InputChoice:
     kind: str = "amplifier"        # amplifier | file
     path: str = ""
     loop: bool = True
+    always_read: bool = False
+    """The wish to keep the amplifier measuring between sessions. Held here rather than only on the device
+    because it outlives a file as the input, and comes back into force with the amplifier."""
 
     @property
     def from_file(self) -> bool:
         return self.kind == "file" and bool(self.path)
+
+    def hold(self, device: Device) -> None:
+        """Put the wish into force on the device: only while the amplifier is the input."""
+        device.set_always_read(self.always_read and not self.from_file)
 
     def problem(self) -> str | None:
         """Why this choice would not work, for the screen to say before a session is started."""

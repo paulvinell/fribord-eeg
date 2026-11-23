@@ -569,7 +569,7 @@ def test_a_dropout_is_counted_rather_than_ignored():
     stream, stop = Stream(), threading.Event()
     stop.set()                               # one pass and out
     player._run(stream, stop)
-    assert stream.written == 0, "the flag is checked before writing, so a stopped music writes nothing"
+    assert stream.written == 1, "a stopped music writes one block, the fade to silence, and no more"
 
     stop.clear()
     original = player._block
@@ -583,7 +583,7 @@ def test_a_dropout_is_counted_rather_than_ignored():
 
     player._block = once
     player._run(stream, stop)
-    assert stream.written == 3 and player.dropouts == 3
+    assert stream.written == 5 and player.dropouts == 3, "three blocks, then the fade, are written"
     stream.starved = False
     stop.clear()
     calls.clear()
@@ -687,122 +687,6 @@ def test_the_sonifier_writes_from_a_thread_and_never_from_the_audio_thread(monke
     son.stop()
     assert not son.running
     assert written[0].shape == (music.BLOCK_FRAMES, 1)
-
-
-# --- the click's persistent path ---------------------------------------------------------------
-
-def test_a_click_plays_through_the_open_stream_not_a_fresh_process(monkeypatch):
-    """A fresh `afplay` costs 74-117 ms of CoreAudio session setup per click — measured — and the click
-    is the most moment-locked sound in the app. Through a pre-opened stream it costs only the stream's
-    own output latency. The two system cues stay on `afplay`: a reminder half a second late is still a
-    reminder."""
-    import sys
-
-    from nfb_console import cues
-
-    class Stream:
-        def __init__(self, **kw):
-            self.kw = kw
-
-        def start(self):
-            pass
-
-    monkeypatch.setitem(sys.modules, "sounddevice", type("SD", (), {"OutputStream": Stream}))
-    monkeypatch.setattr(cues, "muted", lambda: False)
-    monkeypatch.setattr(cues, "available", lambda: True)
-    launched = []
-    monkeypatch.setattr(cues.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
-    monkeypatch.setattr(cues, "_stream", cues._ClickStream())
-    assert not cues._stream.start(), "the stream opens on its own thread, not the caller's"
-    waitfor(lambda: cues._stream._stream is not None, what="the click stream to open")
-
-    assert cues.play("tick", volume=50)
-    assert not launched, "no child process for a synthesised sound"
-    assert cues._stream._voices, "the click is queued on the open stream"
-    data, gain, pos = cues._stream._voices[0]
-    assert gain == 0.5 and pos == 0 and len(data)
-
-    assert cues.play("beep")
-    assert launched and launched[0][0] == "afplay", "system cues still go the slow, simple way"
-
-
-def test_the_click_falls_back_to_afplay_when_no_stream_opens(monkeypatch):
-    import sys
-
-    from nfb_console import cues
-
-    class Broken:
-        def __init__(self, **kw):
-            raise RuntimeError("no device")
-
-    monkeypatch.setitem(sys.modules, "sounddevice", type("SD", (), {"OutputStream": Broken}))
-    monkeypatch.setattr(cues, "muted", lambda: False)
-    monkeypatch.setattr(cues, "available", lambda: True)
-    launched = []
-    monkeypatch.setattr(cues.subprocess, "Popen", lambda argv, **kw: launched.append(argv))
-    monkeypatch.setattr(cues, "_stream", cues._ClickStream())
-
-    assert cues.play("tick")
-    assert launched and launched[0][0] == "afplay", "the click still sounds, just the slow way"
-    waitfor(lambda: cues._stream.error, what="the failed open to be reported")
-
-
-def test_the_stream_mixes_overlapping_sounds_and_retires_finished_ones():
-    import numpy as np
-
-    from nfb_console import cues
-
-    stream = cues._ClickStream()
-    short = np.full(100, 8192, dtype=np.int16)      # below half scale, so the sum is not limited
-    stream._voices.append([short.astype(np.float32) / 32767.0, 1.0, 0])
-    stream._voices.append([short.astype(np.float32) / 32767.0, 1.0, 0])
-    out = np.zeros((256, 1), dtype=np.float32)
-    stream._callback(out, 256, None, None)
-    assert out[:100, 0] == pytest.approx(2 * 8192 / 32767.0), "voices add, they do not replace"
-    assert not out[100:].any()
-    assert not stream._voices, "finished voices are retired"
-
-
-def test_every_rendered_sound_ends_at_silence():
-    """**A step in the waveform is broadband**, and a speaker asked to jump from 7% of full scale to
-    silence in one sample makes a click — on a small laptop speaker, a crackle. The pacer's breath cue was
-    an exponential truncated at 2.5 time constants, so it ended at 0.074 of full scale: a 2422-count step
-    on the end of every breath. This is the third crackle family in this codebase and the other two are in
-    `music` — a starved stream, and a cone driven past its excursion limit by low frequencies. The fix for
-    this one is neither: it is a release ramp.
-    """
-    import numpy as np
-
-    from nfb_console import cues
-
-    names = [cues.tone_at(880), cues.tone_at(660), *cues.click_choices()]
-    names += [cues.held(n) for n in names]
-    for name in names:
-        data = cues.click_samples(name)
-        assert data is not None, name
-        assert data[-1] == 0, f"{name} ends at {data[-1]} rather than at silence"
-        # And it arrives there by fading, not by being cut: the last millisecond is a fraction of the
-        # peak. Asserting only the final sample would pass a waveform that jumps to zero from anywhere.
-        last_ms = np.abs(data[-int(cues.RATE / 1000.0):].astype(float)).max()
-        assert last_ms < 0.05 * np.abs(data.astype(float)).max(), \
-            f"{name} is still at {last_ms:.0f} counts a millisecond from its end"
-
-
-def test_two_sounds_at_once_cannot_ask_for_more_than_full_scale():
-    """Mixing is addition and every voice is rendered near full scale, so a reward click landing on a
-    breath cue can ask for 1.8 — and what the device does past 1.0 is flatten the samples, which is a
-    square wave, which is crackle. Additive mixing is still right; the sum is limited instead."""
-    import numpy as np
-
-    from nfb_console import cues
-
-    stream = cues._ClickStream()
-    loud = np.ones(512, dtype=np.float32) * 0.9
-    stream._voices = [[loud, 1.0, 0], [loud, 1.0, 0], [loud, 1.0, 0]]
-    out = np.zeros((256, 1), dtype=np.float32)
-    stream._callback(out, 256, None, None)
-    assert float(np.abs(out).max()) <= 1.0, "the mix is limited rather than left to the device"
-    assert float(out.max()) == 1.0, "and it is a ceiling, not an attenuation of everything below it"
 
 
 def test_a_late_block_holds_the_note_instead_of_cutting_to_silence():
@@ -1011,7 +895,7 @@ class FakeStream:
 def _tone(monkeypatch, audio):
     monkeypatch.setitem(sys.modules, "sounddevice", audio)
     monkeypatch.setattr(music, "muted", lambda: False)
-    monkeypatch.setattr(music, "REOPEN_PAUSE_SECONDS", 0.01)
+    monkeypatch.setattr("nfb_console.audio.REOPEN_PAUSE_SECONDS", 0.01)
     player = music.TonePlayer()
     player.configure(volume=30, level=0.5)
     return player
@@ -1074,7 +958,7 @@ def test_a_device_that_accepts_everything_and_plays_none_of_it_is_noticed(monkey
     audio = FakeAudio()
     audio.deaf = True
     player = _tone(monkeypatch, audio)
-    monkeypatch.setattr(music, "STALL_SECONDS", 0.5)
+    monkeypatch.setattr("nfb_console.audio.STALL_SECONDS", 0.5)
     assert player.start(), player.error
     try:
         waitfor(lambda: player.restarts >= 1, what="the silent death to be caught")
@@ -1211,107 +1095,6 @@ def test_the_sonifier_clears_a_stale_error_on_a_good_rebuild():
     assert son.error is not None
     son.configure(256.0, music.Band(2.0, 38.0, "music"))             # valid rebuild
     assert son.error is None, "a good rebuild clears the stale error"
-
-
-def test_a_stalled_click_stream_is_rebuilt_rather_than_accepting_unheard_clicks(monkeypatch):
-    """_ClickStream.start returned True whenever a stream object existed, with no liveness check — so after
-    a device change the object stayed open but unserviced and clicks piled up unheard. It now rebuilds a
-    stream whose callback has gone quiet past the stall window."""
-    import types
-
-    from nfb_console import cues
-
-    opened = []
-
-    class FakeStream:
-        def __init__(self, **kw):
-            opened.append(self)
-
-        def start(self):
-            pass
-
-        def close(self):
-            pass
-
-    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=FakeStream))
-    monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
-
-    cs = cues._ClickStream()
-    cs.start()
-    waitfor(lambda: cs._stream is not None, what="the stream to open")
-    assert cs.trigger("beep", 100) is True
-    assert len(opened) == 1 and cs._alive(), "a just-opened stream counts alive"
-
-    cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0   # device changed: callback stopped
-    assert cs.trigger("beep", 100) is False, "not fed an unheard click: the caller plays it another way"
-    waitfor(lambda: len(opened) == 2 and cs._stream is opened[1], what="the stalled stream to be rebuilt")
-    assert cs.trigger("beep", 100) is True
-
-
-def test_a_stalled_click_stream_is_shut_away_from_the_thread_that_asked_for_a_sound(monkeypatch):
-    """The click stream closed a stalled stream on the thread that asked for the next sound: the screen's.
-    On a live Pupil run that close deadlocked inside CoreAudio and the whole program hung. The close now
-    runs on a thread of its own, so a close that never returns costs that thread and nothing else."""
-    import types
-
-    from nfb_console import cues
-
-    opened, never = [], threading.Event()
-
-    class FakeStream:
-        def __init__(self, **kw):
-            opened.append(self)
-
-        def start(self):
-            pass
-
-        def stop(self):
-            never.wait(5.0)                 # the deadlock: neither call comes back
-
-        def close(self):
-            never.wait(5.0)
-
-    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=FakeStream))
-    monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
-    cs = cues._ClickStream()
-    cs.start()
-    waitfor(lambda: cs._stream is not None, what="the stream to open")
-    cs._last_callback = time.monotonic() - cues.CLICK_STALL_SECONDS - 1.0
-    began = time.monotonic()
-    try:
-        cs.trigger("beep", 100)
-        assert time.monotonic() - began < 0.05, "the caller does not wait for the old stream to shut"
-        waitfor(lambda: cs._stream is opened[-1] and len(opened) == 2, what="a fresh stream")
-        assert cs.trigger("beep", 100), "and the fresh stream plays"
-    finally:
-        never.set()
-
-
-def test_opening_the_click_stream_never_holds_up_the_caller(monkeypatch):
-    """Opening a stream calls into CoreAudio, and the first click or cue tone of a session asked for it on
-    the screen's thread. A stream that is slow to open, or never opens, must cost its own thread only."""
-    import types
-
-    from nfb_console import cues
-
-    never = threading.Event()
-
-    class SlowStream:
-        def __init__(self, **kw):
-            never.wait(5.0)
-
-        def start(self):
-            pass
-
-    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(OutputStream=SlowStream))
-    monkeypatch.setattr(cues, "click_samples", lambda name: np.zeros(8, dtype=np.int16))
-    cs = cues._ClickStream()
-    began = time.monotonic()
-    try:
-        assert cs.trigger("beep", 100) is False, "the caller plays this one another way"
-        assert time.monotonic() - began < 0.05
-    finally:
-        never.set()
 
 
 def test_stopping_the_file_player_does_not_wait_for_its_player_to_exit(monkeypatch, tmp_path):

@@ -21,7 +21,7 @@ import optima
 
 from nfb import Device, Recorder, Settings
 
-from . import (amplitude_view, at_view, brand, chrome, developer, device_panel, heart, heg_view, hrv_view, cfc_view,
+from . import (amplitude_view, at_view, audio, brand, chrome, developer, device_panel, heart, heg_view, hrv_view, cfc_view,
                ilf_view, mendi, pac_view, pair_view, prefs, pupil, pupil_calibrate, pupil_camera, pupil_view, record_dialog, scp_view, session_view, settings_dialog,
                sleep_view, splash, wakelock, wave_view)
 from . import theme as t
@@ -45,7 +45,7 @@ class Console:
         # one owner of the port, created once and kept for the life of the app, so the connection
         # does not belong to whichever protocol happens to be running
         self.device = Device(Settings(hz=args.hz, reference=args.reference,
-                                      mains_hz=args.mains,
+                                      mains_hz=args.mains, range_uv=args.range,
                                       lower_limit_hz=args.high_pass))
         # Where samples come from, chosen on the device screen and outliving any one session.
         # Without --live the recording *is* the input, so it appears there rather than being an
@@ -66,6 +66,8 @@ class Console:
         # One heart source for the app, like the device: the HRV protocol trains on it and the CFC screen
         # shows the same instruments beside the EEG. Two readers would fail — a strap notifies one
         # subscriber — so this is held here and borrowed.
+        # Open the cue stream now, off this thread, so that the first cue of the run plays through it too.
+        audio.warm()
         self.heart_choice = HeartChoice(kind=args.heart)
         self.heart = heart.HeartRunner(self.heart_choice)
         if self.heart_choice.on:
@@ -272,6 +274,8 @@ class Console:
         # carry on. A fresh session with the same settings is a *different* session — the elapsed clock,
         # every target's trend and calibration, the artifact gate's running level and the on-target history
         # are the session, not decoration on top of it. `restart` is the path that means start again.
+        # Under always read the stop leaves the device measuring and the paused session goes on feeding, as a
+        # replay does; the contact check takes the device when it starts, and gives it back when it ends.
         if self.session is not None:
             self.session.suspend()
             if self.device.status.connected:
@@ -526,6 +530,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="mains frequency the device notches out, in its own hardware")
     ap.add_argument("--high-pass", dest="high_pass", type=float, default=0.5, choices=(0.5, 0.01),
                     help="the device's high-pass corner; 0.01 for ultra-low-frequency work")
+    ap.add_argument("--range", type=float, default=800.0,
+                    choices=tuple(optima.RANGE_BY_FUNCTION[optima.FUNC_VOLTAGE][0].values()),
+                    help="the device's input range, ± this many µV; wider holds a larger electrode offset")
     ap.add_argument("--heart", default="off", choices=("off", "strap", "usb", "simulator"),
                     help="heart-rate source: a Bluetooth strap, the HeartMath on its USB cable, or "
                          "synthetic beats; also settable on the device screen")
@@ -554,6 +561,7 @@ def main() -> None:
             if console.session is not None:
                 console.session.stop()
             console._end_recording()
+            audio.release()
             console.heart.release()
             console.mendi.release()
             console.pupil.release()

@@ -37,6 +37,7 @@ from nfb import Device, Mode, ReplaySource, WaitingSource
 from nfb.dsp import (ArtifactGates, Band, BandPower, CFIRBandPower, DRIFT_CORNER_MAX_HZ,
                      ELLIPTIC_RIPPLE_DB, highpass, lowpass)
 from nfb.dsp import artifact as dsp_artifact
+from nfb.dsp.artifact import REJECT_MODES, input_limit_mask
 from nfb.stream import Block, Gap
 
 from . import cues, developer, music, prefs, quality, sentry, shadow, sysvolume
@@ -61,6 +62,7 @@ def true_metric_hz(rate_hz: float) -> float:
     come at instead.
     """
     return rate_hz / max(1, round(rate_hz / METRIC_HZ)) if rate_hz > 0 else METRIC_HZ
+
 
 # Set NFB_DEBUG=1 to have a running session write what it is actually receiving to this file.
 #
@@ -385,13 +387,6 @@ class TrainingSession:
         self._display_filters: dict[int, object] = {}
         self._response_cache: dict[tuple, float] = {}
         self.state: dict[int, bool | None] = dict.fromkeys(self.specs, None)
-        # What the blocks amount to, kept apart from `state` so an operator override can win without the
-        # next block overwriting it — see `trust_channel`, and `_judge_channel` for how it is decided.
-        self._device_says: dict[int, bool] = {}
-        self.trusted: dict[int, bool] = {}
-        # The standing offset and the closest approach to the rail, per channel — see `_watch_offset`.
-        self._offset_uv: dict[int, float] = {}
-        self._headroom_uv: dict[int, float] = {}
         """Per channel: True usable, False the device says no signal, **None not heard from yet**.
 
         Three states rather than two, because it started as `False` for every channel and that made *not
@@ -400,6 +395,17 @@ class TrainingSession:
         exclusion needs evidence: with every key present and False, every target was excluded from the
         feedback until its first block, rather than the documented "an unknown channel counts as live".
         """
+        # What the blocks amount to, kept apart from `state` so an operator override can win without the
+        # next block overwriting it — see `trust_channel`, and `_judge_channel` for how it is decided.
+        self._device_says: dict[int, bool] = {}
+        self.trusted: dict[int, bool] = {}
+        # The standing offset and the closest approach to the rail, per channel — see `_watch_offset`.
+        self._offset_uv: dict[int, float] = {}
+        self._headroom_uv: dict[int, float] = {}
+        # Per channel: samples left before *at the input limit* clears, and whether the newest block had
+        # a sample there — see `at_input_limit`.
+        self._limit_left: dict[int, int] = {}
+        self._railed: dict[int, bool] = {}
         self.targets: list[Target] = []
         self.amplitudes: dict[tuple, float] = {}
         self.feedback = FeedbackSettings()
@@ -649,6 +655,10 @@ class TrainingSession:
     RR interval is not a sample, so there is no per-block amplitude to reject and the Feedback tab's
     ARTIFACTS panel has nothing to show."""
 
+    reject_modes: tuple[str, ...] = tuple(REJECT_MODES)
+    """The artifact modes the Feedback tab offers here. Every one, unless a protocol states the physical
+    reason one cannot measure it."""
+
     @property
     def trained_floor_hz(self) -> float:
         """The lowest frequency any measurement on this screen depends on.
@@ -763,16 +773,39 @@ class TrainingSession:
         also removes the offset from the only place it was visible.
         """
         values = block.values
-        if not values:
+        if not len(values):
             return
         mean = sum(values) / len(values)
         step = min(1.0, (len(values) / max(1e-6, block.spec.rate_hz)) / self.OFFSET_TAU_SECONDS)
         prior = self._offset_uv.get(block.channel)
         self._offset_uv[block.channel] = mean if prior is None else prior + step * (mean - prior)
-        full = abs(block.spec.scale) * optima.ADC_FULL_SCALE
-        room = full - max(abs(v) for v in values)
-        seen = self._headroom_uv.get(block.channel)
-        self._headroom_uv[block.channel] = room if seen is None else min(seen, room)
+        if block.spec.input_range:
+            room = block.spec.input_range - max(abs(v) for v in values)
+            seen = self._headroom_uv.get(block.channel)
+            self._headroom_uv[block.channel] = room if seen is None else min(seen, room)
+        self._watch_limit(block)
+
+    LIMIT_CLEAR_SECONDS = 5.0
+    """How long *at the input limit* holds after the last sample there, in seconds of samples: long enough
+    that a channel touching the limit now and then reads as one state, not a blink."""
+
+    def _watch_limit(self, block) -> None:
+        """Set *at the input limit* from any sample `input_limit_mask` names, a whole block on the limit or
+        one sample, and count it down by the samples that follow. The one place this state is written."""
+        channel, n = block.channel, len(block.samples)
+        mask = input_limit_mask(block)
+        at = np.flatnonzero(mask) if mask is not None else ()
+        self._railed[channel] = bool(len(at))
+        if len(at):
+            after = n - 1 - int(at[-1])
+            self._limit_left[channel] = max(0, round(self.LIMIT_CLEAR_SECONDS * block.spec.rate_hz) - after)
+        elif self._limit_left.get(channel):
+            self._limit_left[channel] = max(0, self._limit_left[channel] - n)
+
+    def at_input_limit(self, channel: int) -> bool:
+        """Whether this channel had a sample at its input limit in the last `LIMIT_CLEAR_SECONDS` of its
+        samples. Counted in samples, never on the clock, so a replay at any speed clears at one sample."""
+        return self._limit_left.get(channel, 0) > 0
 
     def offset_uv(self, channel: int) -> float | None:
         """The channel's standing offset, or None before anything has arrived."""
@@ -783,10 +816,6 @@ class TrainingSession:
         rather than the current value, because a channel that grazed the rail once will do it again and the
         operator needs to know that after it has recovered."""
         return self._headroom_uv.get(channel)
-
-    OPEN_FRACTION = 0.98
-    """How close to full scale counts as an open input. Measured: an unconnected input rails to *exactly*
-    ±800.0 µV on the 800 µV range, so anything at 98% of scale is the rail and not a signal."""
 
     FLAT_SPAN_COUNTS = 2
     """How many raw counts of spread still count as dead flat over a block. Exact equality was the old
@@ -812,10 +841,12 @@ class TrainingSession:
         live ones on none — the flat branch, unlike the rail, has never been exercised by a real short.
         """
         values = block.values
-        if not values:
+        if not len(values):
             return True
-        full = abs(block.spec.scale) * optima.ADC_FULL_SCALE
-        if full and min(abs(v) for v in values) >= self.OPEN_FRACTION * full:
+        # An unconnected input rails to *exactly* ±800.0 µV on the 800 µV range (measured), so a block
+        # wholly at the input limit is the rail and not a signal. A spec with no input range has no rail.
+        railed = input_limit_mask(block)
+        if railed is not None and railed.all():
             return True                     # railed: an open input
         # signed samples (abs called a ±20 µV alternation constant); near-flat, see FLAT_SPAN_COUNTS
         return max(values) - min(values) <= self.FLAT_SPAN_COUNTS * abs(block.spec.scale)

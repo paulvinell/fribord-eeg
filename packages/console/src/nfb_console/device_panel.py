@@ -32,6 +32,8 @@ from typing import Callable
 
 import flet as ft
 
+import optima
+
 from nfb import Device, Mode
 
 from . import chrome, developer, displays, pupil_guide
@@ -47,6 +49,19 @@ MAINS = (50, 60)
 # ultra-low-frequency work needs, and without it a sub-0.5 Hz reward measures the filter's roll-off. This is
 # hardware filtering, so it happens before we see a sample — there is no software equivalent.
 CORNERS = (0.5, 0.01)
+# The input ranges a voltage channel offers, ± µV. The count is 16-bit on each, so the step grows with the
+# range, and a range wide enough for a drifting electrode offset costs resolution at the quiet end.
+RANGES_UV = tuple(sorted(optima.RANGE_BY_FUNCTION[optima.FUNC_VOLTAGE][0].values()))
+
+
+def range_label(uv: float) -> str:
+    return f"±{uv / 1000:g} mV" if uv >= 1000 else f"±{uv:g} µV"
+
+
+def range_note() -> str:
+    steps = [f"{uv / optima.ADC_FULL_SCALE:.2g}" for uv in RANGES_UV]
+    return (f"a wider range holds a larger electrode offset, with a larger step: "
+            f"{', '.join(steps[:-1])} and {steps[-1]} µV")
 
 # The amplifier's own beeper. On by default in the hardware, which is why stopping a session beeped at you;
 # silent is our default because the host owns every sound a session makes. A control rather than a constant
@@ -222,6 +237,12 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
     def set_kind(kind: str) -> None:
         choice.kind = kind
         dialog_error[0] = ""
+        choice.hold(device)
+        refresh()
+
+    def set_always_read(on: bool) -> None:
+        choice.always_read = on
+        choice.hold(device)
         refresh()
 
     def set_loop(on: bool) -> None:
@@ -235,6 +256,7 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
             # A recording's notes file stands for its recording, and the field shows which file plays.
             choice.path = path_field.value = str(recording_of(choice.path))
         dialog_error[0] = ""
+        choice.hold(device)
         refresh()
 
     path_field.on_submit = commit_path
@@ -278,9 +300,14 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
                      for m in MAINS}
     corner_choices = {c: _Choice(f"{c:g} Hz", (lambda c_=c: lambda: apply(lower_limit_hz=c_))())
                       for c in CORNERS}
+    range_choices = {r: _Choice(range_label(r), (lambda r_=r: lambda: apply(range_uv=r_))())
+                     for r in RANGES_UV}
     silence_choices = {q: _Choice("silent" if q else "beeps",
                                   (lambda q_=q: lambda: apply(silent=q_))())
                        for q in SILENCE}
+    # Two explicit choices, for the reason the loop pills give.
+    read_choices = {False: _Choice("per session", lambda: set_always_read(False)),
+                    True: _Choice("always read", lambda: set_always_read(True))}
 
     # built once; refresh only changes colour and text
     MAX_CH = 4
@@ -333,14 +360,15 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
         log(f"refresh mode={st.mode.value} epoch={st.epoch} contact={device.contact} "
             f"subs={device.subscribers}")
         streaming = st.mode in (Mode.MEASURING, Mode.TESTING)
-        settable = st.connected and not streaming
+        # A resting measurement under always read is stopped and started again around a change.
+        settable = st.connected and (not streaming or device.always_read and st.mode is Mode.MEASURING)
 
         connect_label.value = "Disconnect" if st.connected else "Connect"
         detail.value = (f"{st.model} · serial {st.serial} · firmware {st.firmware} · {st.port}"
                         if st.connected else (st.failure or "not connected"))
         if not st.connected and st.remedy:
             hint.value, hint.color = st.remedy, t.WARN
-        elif streaming:
+        elif streaming and not settable:
             hint.value, hint.color = f"settings locked while {st.mode.value}", t.MUTED
         else:
             hint.value = ""
@@ -353,13 +381,17 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
             ch.set(st.settings.mains_hz == m, settable)
         for c, ch in corner_choices.items():
             ch.set(st.settings.lower_limit_hz == c, settable)
+        for r, ch in range_choices.items():
+            ch.set(st.settings.range_uv == r, settable)
         for q, ch in silence_choices.items():
             ch.set(st.settings.silent == q, settable)
+        for on, ch in read_choices.items():
+            ch.set(choice.always_read == on, True)
 
         testing = st.mode is Mode.TESTING
         if testing:
             test_label.value = "Stop test"
-        elif st.mode is Mode.MEASURING:
+        elif st.mode is Mode.MEASURING and not device.always_read:
             test_label.value = "Stop session and check"
         else:
             test_label.value = "Check contact"
@@ -604,6 +636,11 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
                           ft.Text("notched in the device's hardware", size=t.SMALL,
                                   color=t.FAINT)], spacing=8),
                   ft.Container(height=10),
+                  ft.Row([ft.Text("Input range", size=t.SMALL, color=t.MUTED, width=96),
+                          *[c.container for c in range_choices.values()],
+                          ft.Container(width=12),
+                          ft.Text(range_note(), size=t.SMALL, color=t.FAINT, expand=True)], spacing=8),
+                  ft.Container(height=10),
                   ft.Row([ft.Text("High-pass", size=t.SMALL, color=t.MUTED, width=96),
                           *[c.container for c in corner_choices.values()],
                           ft.Container(width=12),
@@ -616,6 +653,13 @@ def view(page: ft.Page, device: Device, inputs: InputChoice | None = None,
                           ft.Container(width=12),
                           ft.Text("the amplifier's own, which beeps at every mode change · the console "
                                   "owns every other sound a session makes", size=t.SMALL,
+                                  color=t.FAINT, expand=True)], spacing=8),
+                  ft.Container(height=10),
+                  ft.Row([ft.Text("Measuring", size=t.SMALL, color=t.MUTED, width=96),
+                          *[c.container for c in read_choices.values()],
+                          ft.Container(width=12),
+                          ft.Text("always read keeps the amplifier measuring between sessions · "
+                                  "the inputs do not settle again at each start", size=t.SMALL,
                                   color=t.FAINT, expand=True)], spacing=8)),
             ft.Container(height=14),
             panel("ELECTRODE CONTACT",

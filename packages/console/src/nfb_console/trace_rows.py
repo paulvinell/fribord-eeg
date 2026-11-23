@@ -102,9 +102,10 @@ class TraceRows:
             self.session.redraw()
         return handler
 
-    def refresh(self, window_seconds: float, extra: Sequence[str] = ()) -> None:
+    def refresh(self, window_seconds: float, extra: Sequence[str] = (), levels_shown: bool = False) -> None:
         """Draw every row and rebuild the caption. `extra` clauses go after the scale and before the
-        diagnostics, which is where a screen's own note about its window belongs."""
+        diagnostics, which is where a screen's own note about its window belongs. `levels_shown` leaves the
+        input limit out of the caption, for a screen whose level plot shows it."""
         session = self.session
         width = self.width()
         mid = self.height / 2
@@ -144,10 +145,12 @@ class TraceRows:
         # **The offset, because the trace cannot show it and it is what kills a channel.** The picture is
         # drawn high-passed so it stays readable at the 0.01 Hz corner, which also removes the standing
         # offset from view — and the offset is what rails a channel and makes the device report no signal.
-        # Shown as the closest approach to the rail, since that is the quantity that decides whether the
-        # channel survives, and only when it is worth acting on.
-        tight = [(c, room) for c in sorted(session.specs)
-                 if (room := session.headroom_uv(c)) is not None and room < HEADROOM_VISIBLE_UV]
+        # Shown as the closest approach to the input limit, since that is the quantity that decides whether
+        # the channel survives, and only when it is worth acting on; a channel at the limit says so instead.
+        limit = [] if levels_shown else [c for c in sorted(session.specs) if session.at_input_limit(c)]
+        tight = [] if levels_shown else [(c, room) for c in sorted(session.specs)
+                                         if c not in limit and (room := session.headroom_uv(c)) is not None
+                                         and room < HEADROOM_VISIBLE_UV]
         # The window the buffer actually holds, shown only when rounding moved it materially (a 2 s view is
         # 2.56 s at 250 Hz). Focus channel wins on a mixed-rate stack.
         focus_buf = session.traces.get(getattr(session, "focus", None))
@@ -161,6 +164,7 @@ class TraceRows:
             + "".join(f" · {clause}" for clause in extra if clause)
             + (" · " + ", ".join(forced) if forced else "")
             + (f" · rejecting {', '.join(hot)}" if hot else "")
-            + (" · " + ", ".join(f"ch{c} within {room:.0f} µV of the rail" for c, room in tight)
+            + (" · " + ", ".join(f"ch{c}" for c in limit) + " at the input limit" if limit else "")
+            + (" · " + ", ".join(f"ch{c} within {room:.0f} µV of the input limit" for c, room in tight)
                if tight else ""))
-        self.caption.color = t.WARN if (hot or tight) else t.FAINT
+        self.caption.color = t.WARN if (hot or tight or limit) else t.FAINT

@@ -288,6 +288,50 @@ def text_width(value: str, size: float, bold: bool = False) -> float:
     return total * size * (1.06 if bold else 1.0)
 
 
+BETAS = (1.0, 1.25, 1.5, 1.75, 2.0)
+"""The spectral slopes a slow level is drawn from: power in f^-β. 1 is pink, 2 is a random walk."""
+
+STEPS_UV = (2.0, 8.0, 30.0)
+"""Typical change of a level in one second, in µV, fifteen times apart, so that a test which judges a rate
+cannot pass on one scale only. A spread that follows the person must follow each of them."""
+
+
+def wandering(beta: float, seconds: float, rate: float, seed: int, step_uv: float = 8.0) -> np.ndarray:
+    """A slow level that wanders, in µV: power in f^-β, no peak, zero mean, never white.
+
+    Scaled by `step_uv`, the standard deviation of its one-second change, because that is what a trial
+    differences. Periodic over `seconds`, so draw it as long as the run that reads it.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(round(seconds * rate))
+    if n < 4 * rate:
+        raise ValueError("draw a wandering level of at least 4 s, and take the part a test needs")
+    freqs = np.fft.rfftfreq(n, 1.0 / rate)
+    freqs[0] = freqs[1]
+    spectrum = np.fft.rfft(rng.standard_normal(n)) / freqs ** (beta / 2.0)
+    spectrum[0] = 0.0
+    x = np.fft.irfft(spectrum, n)
+    lag = max(1, int(round(rate)))
+    return x * (step_uv / float(np.std(x[lag:] - x[:-lag])))
+
+
+def cue_locked(run, size_uv: float, shape: str = "step", same_sign: bool = False) -> float:
+    """What a source locked to the cues adds now, in µV: `size_uv` in each feedback window, toward the cue.
+
+    `shape` is "step" (the whole window) or "ramp" (from 0 at the window start to `size_uv` at its end).
+    `same_sign` adds it upward whatever the cue asks, as an artifact that ignores the direction does.
+    """
+    from nfb_console.trials import ACTIVE, POSITIVE
+
+    if run.phase != ACTIVE or run.required is None:
+        return 0.0
+    part = 1.0
+    if shape == "ramp":
+        part = min(1.0, max(0.0, 1.0 - run.phase_remaining() / run.active_s))
+    sign = 1.0 if same_sign or run.required == POSITIVE else -1.0
+    return sign * size_uv * part
+
+
 def plausible_eeg(seconds: float, rate: float, channel: int, seed: int = 0) -> np.ndarray:
     """Something a screen can be photographed against.
 
@@ -314,3 +358,30 @@ def plausible_eeg(seconds: float, rate: float, channel: int, seed: int = 0) -> n
         gate = 1.0 - 0.8 * np.cos(np.angle(_sp.hilbert(slow)))
         out = out + slow + gate * band(30.0, 45.0, 6.0)
     return out
+
+
+EYE_DELAY_S = 0.25
+"""How long after the dot moves the eyes follow it: a saccade's reaction time."""
+
+BLINK_DELAY_S, BLINK_S = 0.35, 0.3
+
+
+def eye_source(gaze, tones, seconds: float, rate: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """An artificial eye: the vertical and horizontal rotation that follow `gaze(t) -> (v, h)` after
+    `EYE_DELAY_S`, each a step smoothed over 30 ms, and a blink of unit size `BLINK_DELAY_S` after each tone
+    in `tones` (seconds). Mix them into channels in any proportion."""
+    n = int(round(seconds * rate))
+    t = np.arange(n) / rate
+    target = np.array([gaze(max(0.0, s - EYE_DELAY_S)) for s in t], dtype=float)
+    smooth = np.ones(max(1, int(0.03 * rate)))
+    smooth /= smooth.sum()
+    v = np.convolve(target[:, 0], smooth, mode="same")
+    h = np.convolve(target[:, 1], smooth, mode="same")
+    blink = np.zeros(n)
+    width = int(BLINK_S * rate)
+    bump = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(width) / width)
+    for tone in tones:
+        at = int((tone + BLINK_DELAY_S) * rate)
+        part = bump[:max(0, min(width, n - at))]
+        blink[at:at + len(part)] += part
+    return v, h, blink

@@ -32,8 +32,8 @@ from .plan import SessionPlan
 from .plots import dashed, grid, mark_shapes, place_value_labels, polyline, value_axis
 from .protocols import Protocol
 from .targets import Target
-from .trial_training import MODES, OBSERVE_HZ, TrialTiming, TrialTraining, TrialUnits, TrialView
-from .trials import ACTIVE, NEGATIVE, POSITIVE, RESULT
+from .trial_training import MODES, OBSERVE_HZ, TrialTiming, TrialTraining, TrialUnits, TrialView, run_verdict_help
+from .trials import ACTIVE, GAP, LOST, NEGATIVE, PAUSED, POSITIVE, REJECTED, RESULT, THIN_BASELINE
 from .widgets import help_button, labelled, num_box, panel, pill
 
 HANDLES = ("PUPIL",)
@@ -77,6 +77,12 @@ class PupilSession(TrialTraining, LevelOutputs):
     """Counting backwards keeps the mind busy and level through the baseline, as the published protocol does."""
     trial_subject = "your pupil"
     trial_waiting = "no readings from the eye yet"
+    VOID_ACTIONS = {REJECTED: "keep your eyes open and look at the fixation point",
+                    THIN_BASELINE: "keep your eyes open in the baseline",
+                    LOST: "examine the connection to the eye tracker",
+                    GAP: "keep the eye tracker connected through a trial"}
+    """A rejected reading here is a blink or an eye the tracker lost, so the action names the eyes; the
+    device on this screen is the eye tracker."""
 
     def __init__(self, protocol: Protocol, choice: PupilChoice | None = None,
                  length_seconds: float | None = None, runner: pupil.PupilRunner | None = None,
@@ -189,7 +195,7 @@ class PupilSession(TrialTraining, LevelOutputs):
             return ("pupil size against the last "
                     f"{self.passive_window_s:.0f} s", "half = your mean over that time")
         return ("the change from this trial's baseline, toward the cue",
-                f"half = the baseline · full at ±{self.full_at:g} mm")
+                f"half = the baseline · full at ±{self.scale_in_use()[0]:g} mm")
 
     @property
     def level(self) -> float:
@@ -249,7 +255,7 @@ class PupilSession(TrialTraining, LevelOutputs):
 
     def _move_level(self, signal: float, now: float, smoothed: bool = True) -> None:
         self._signal = signal
-        self.signal_target.observe(signal, OBSERVE_HZ)
+        self.signal_target.observe(self.condition_for(signal), OBSERVE_HZ)
         tau = max(0.0, self.feedback.smoothing_seconds) if smoothed else 0.0
         if tau <= 0 or self._level_at is None:
             self._level = signal
@@ -304,6 +310,7 @@ class PupilSession(TrialTraining, LevelOutputs):
             self._accumulated = self.elapsed
             self._resumed_at = None
             self.paused = True
+            self.cut_trial(PAUSED)
             self.eye.steer(0.0)
             self._go_quiet()
 
@@ -377,7 +384,7 @@ MODE_HELP = (
     "In **active** mode, the screen runs trials. Each trial has four parts. First, a tone gives the "
     "direction: a high tone for larger, a low tone for smaller. Then, for "
     f"{BASELINE_S:g} s, count back by fours from the number on the screen. This measures your baseline. "
-    f"Then, for {ACTIVE_S:g} s, move your pupil. To make it smaller, pull the circle inside the ring; to "
+    "Then, for the rest of the **trial length**, move your pupil. To make it smaller, pull the circle inside the ring; to "
     "make it larger, push it outside. Last, the circle turns green for a success or red for no success, "
     "and you hear the tone two times for a success.\n\n"
     "During the baseline, the dashed ring draws itself around the fixation point, and there is no solid "
@@ -385,6 +392,9 @@ MODE_HELP = (
     "direction: out for larger, in for smaller. A thin faint ring shows the mean of the effort so far. "
     "The trial is scored on that mean. The ground and the colour of the circle do not change during a "
     "trial, because a change in light changes the pupil.\n\n"
+    "When **succeeds at** is more than 0, a thin blue ring shows it. It is at the size that the circle must "
+    "pass, on the side that the tone asked for. Its light does not change during a trial. "
+    "At 0, there is no blue ring, and the dashed ring is the size to pass.\n\n"
     "**The direction.** **increase** asks for a larger pupil in every trial. **decrease** asks for a "
     "smaller pupil in every trial. **alternating** asks for larger and smaller in turn. **random** asks "
     "for larger and smaller in a random order. **random** does not show the direction until the effort "
@@ -403,8 +413,10 @@ MODE_HELP = (
     "without it. **update every** makes the feedback refresh in steps: it waits that many seconds, then "
     "shows the average over them. The circle and the sound step together. Set it to 0 for feedback that "
     "moves all the time. Use these two rows to "
-    "train with less help, before a trial without feedback. A change to **trials**, **without feedback**, "
-    "**succeeds at** or **full at** starts a new run.\n\n"
+    "train with less help, before a trial without feedback. A change to **trials**, **without feedback** "
+    "or **succeeds at** starts a new run. A typed **full at** acts from the next trial. The trial in "
+    "progress keeps the value that it started with.\n\n"
+    + run_verdict_help(DIRECTION_WORD) + "\n\n"
     "**The heart.** When you choose a heart-rate source on the device screen, a heart panel appears here. "
     "It shows the mean heart-rate change from baseline for each direction. It also shows the heart rate "
     "across the run, so you can see how the effort moves the heart."

@@ -995,8 +995,9 @@ class SignalSource:
         self.warmup.bgcolor = t.ACCENT if session.strategy.warmup >= 1.0 else t.WARN
 
 
-def _level_arc(side: float, value: float | None) -> list:
-    """The level as an arc **around** the breathing ring, from the top, clockwise.
+def _level_arc(side: float, value: float | None, good: bool | None = None) -> list:
+    """The level as an arc **around** the breathing ring, from the top, clockwise. `good` says whether
+    the condition is met, where a trial decides it; by default the arc is good from 75%.
 
     One widget carrying two things: the ring says breathe in or out, the arc says how the signal is doing.
     A second dial beside it would be two concentric circles doing different jobs, which is worse than one
@@ -1018,7 +1019,7 @@ def _level_arc(side: float, value: float | None) -> list:
         return [track]
     return [track,
             cv.Arc(left, top, span, span, -math.pi / 2, 2 * math.pi * min(1.0, max(0.0, value)),
-                   paint=ft.Paint(color=t.ACCENT if value < 0.75 else t.GOOD,
+                   paint=ft.Paint(color=t.GOOD if (value >= 0.75 if good is None else good) else t.ACCENT,
                                   stroke_width=ARC_WIDTH, style=ft.PaintingStyle.STROKE))]
 
 

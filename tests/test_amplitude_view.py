@@ -1271,20 +1271,25 @@ def test_the_offset_that_rails_a_channel_is_visible_somewhere():
         session.stop()
 
 
-def test_continuous_outputs_apply_on_their_own_thread_not_the_feed():
+def test_continuous_outputs_apply_on_their_own_thread_not_the_feed(tmp_path):
     """The output calls are the slowest things in the process — a CoreAudio write at 1.1 ms p99, a
     window-server display lookup at 13 ms worst, a subprocess spawn for the music — and they ran inline
     on the thread that decodes and filters against a 32 ms budget. `run` now starts an output pump;
-    `_drive_outputs` snapshots and wakes it, so the feed thread never blocks on an output device."""
+    `_drive_outputs` snapshots and wakes it, so the feed thread never blocks on an output device.
+
+    Fed a signal, not the bench recording: its open inputs sit at the input limit, which trains nothing."""
     import threading as th
 
-    from nfb import ReplaySource
+    from nfb.sources import SampleFileSource
     from nfb_console import amplitude_view as av
 
-    from conftest import BENCH_OK
+    from conftest import plausible_eeg
 
+    export = tmp_path / "eeg.txt"
+    columns = [plausible_eeg(8.0, 250.0, c) for c in range(2)]
+    export.write_text("Sampling rate: 250\n" + "".join(f"{a:.4f}\t{b:.4f}\n" for a, b in zip(*columns)))
     session = av.AmplitudeSession(BY_CODE["AMP"],
-                                  source=ReplaySource(str(BENCH_OK), realtime=False, loop=True),
+                                  source=SampleFileSource(export, realtime=False, loop=True),
                                   channels=2)
     calls: list[str] = []
 

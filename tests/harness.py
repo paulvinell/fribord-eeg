@@ -10,6 +10,7 @@ from __future__ import annotations
 
 
 
+import flet as ft
 from nfb import ReplaySource, Settings, WaitingSource
 from nfb_console import chrome
 from nfb_console.protocols import BY_CODE
@@ -150,7 +151,8 @@ def show_all_panes(control) -> None:
     """Open every tab at once. A hidden pane deliberately paints nothing — repainting four invisible
     panes at 10 Hz is what starved the event loop that delivers clicks — so a test that reads a pane's
     text has to open it first, exactly as a person would."""
-    for pane in control.controls[2].controls:
+    screen = control.controls[0] if isinstance(control, ft.Stack) else control     # under an overlay
+    for pane in screen.controls[2].controls:
         pane.visible = True
 
 
@@ -582,6 +584,8 @@ SCREENS = [
     ("pac_view", "PAC", 4),
     ("pac_view", "PAC", 1),
     ("scp_view", "SCP", 1),
+    ("scp_view", "SCP", 2),
+    ("scp_view", "SCP", 4),
     ("sleep_view", "SLEEP", 2),
     ("wave_view", "WAVE", 1),
 ]

@@ -152,17 +152,16 @@ def test_a_paused_session_does_not_advance_towards_its_cues():
 def test_a_cue_plays_once_at_the_volume_it_was_given():
     """The click audition used to fire three clicks so a *rate* could be judged; there is no rate any
     more, and three sounds cannot tell you what one will sound like."""
-    from nfb_console import cues
+    from nfb_console import audio, cues
 
-    tick = str(cues.click_path("tick"))
-    assert cues.command("tick") == ["afplay", tick], "no -v means the system volume"
-    assert cues.command("tick", 75) == ["afplay", "-v", "0.750", tick]
-    assert cues.command("tick", 0) == ["afplay", "-v", "0.000", tick]
-    assert cues.command("tick", 100) == ["afplay", "-v", "1.000", tick]
-    assert cues.command("tick", 250)[2] == "1.000", "clamped, not passed through"
-    assert cues.command("tick", -5)[2] == "0.000"
-    assert cues.command("beep", 50)[3] == str(cues.SOUNDS["beep"])
-    assert cues.command("nope") is None
+    tick = cues.click_path("tick")
+    assert audio.afplay_argv(tick, None) == ["afplay", str(tick)], "no -v means full level"
+    assert audio.afplay_argv(tick, 75) == ["afplay", "-v", "0.750", str(tick)]
+    assert audio.afplay_argv(tick, 0) == ["afplay", "-v", "0.000", str(tick)]
+    assert audio.afplay_argv(tick, 100) == ["afplay", "-v", "1.000", str(tick)]
+    assert audio.afplay_argv(tick, 250)[2] == "1.000", "clamped, not passed through"
+    assert audio.afplay_argv(tick, -5)[2] == "0.000"
+    assert cues.click_path("nope") is None
     assert not hasattr(cues, "burst"), "one click means there is nothing left to repeat"
 
 
@@ -172,7 +171,7 @@ def test_the_click_carries_its_own_sound():
 
     assert Click().sound == cues.DEFAULT_CLICK == "tick"
     assert Click().sound in cues.click_choices()
-    assert cues.command(Click().sound) is not None, "the default has to be playable"
+    assert cues.sound_samples(Click().sound) is not None, "the default has to be playable"
 
 
 def test_a_click_is_generated_short_and_actually_a_click():
@@ -241,14 +240,14 @@ def test_a_generated_click_decays_to_silence():
 
     import numpy as np
 
-    from nfb_console import cues
+    from nfb_console import audio, cues
 
     with wavelib.open(str(cues.click_path("tick"))) as fh:
         data = np.frombuffer(fh.readframes(fh.getnframes()), dtype=np.int16).astype(float)
     third = len(data) // 3
     assert np.abs(data[:third]).max() > 10 * np.abs(data[-third:]).max(), \
         "the attack has to dominate the tail, or it reads as a tone"
-    assert np.abs(data).max() > 20000, "and it has to be loud enough to hear at all"
+    assert np.abs(data).max() > 0.8 * audio.PEAK * 32767, "and it has to reach the cue level to be heard"
 
 
 def test_clicks_cannot_beat_their_interval_however_the_targets_flicker():

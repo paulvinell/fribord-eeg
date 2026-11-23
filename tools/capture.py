@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from shots import SHOTS, route_of                                     # noqa: E402
+from shots import SHOTS, route_of, waiting                            # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get("SHOTS_PORT", "8553"))
@@ -32,13 +32,16 @@ def wanted(args) -> list:
         out = [s for s in out if s[0].upper() in want]
     if args.state:
         out = [s for s in out if s[0] == "launcher" or s[1] == args.state]
-    return out
+    # A state whose product code is not there yet is named and skipped, not photographed as an error.
+    for shot in [s for s in out if waiting(s)]:
+        print(f"waits: {route_of(shot)} needs {', '.join(waiting(shot))}")
+    return [s for s in out if not waiting(s)]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--screen", help="only these protocol codes, comma separated")
-    ap.add_argument("--state", choices=("cold", "fed", "spindle", "search", "search-early"))
+    ap.add_argument("--state", choices=sorted({s[1] for s in SHOTS if s[1]}))
     ap.add_argument("--width", type=int, default=1240)
     ap.add_argument("--height", type=int, default=1400)
     ap.add_argument("--tab", type=int, help="a tab index instead of Train: 1 Spectrum, 2 Trends, 3 Feedback")

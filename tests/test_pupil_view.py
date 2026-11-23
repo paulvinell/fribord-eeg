@@ -303,7 +303,7 @@ def test_random_direction_hides_the_aim_until_the_effort_starts():
 
 def test_an_eye_with_no_control_does_not_succeed_by_chance_in_most_trials():
     session = _session("none", trial_direction="increase", n_trials=8)
-    session.success_at = 0.1
+    session.set_success_at(0.1, typed=True)
     session.restart_trials()
     try:
         _drive(session, 8 * 32.0)
@@ -805,3 +805,121 @@ def test_the_pupil_circle_draws_each_phase_and_keeps_its_light_steady(monkeypatc
         assert moving.paint.color == t.ACCENT, "one colour on both sides of the baseline"
     finally:
         s.stop()
+
+
+# --- the limit on the circle, and the record a trial is drawn from ----------------------------------
+
+def _eye(session, seed: int = 3):
+    """The simulated eye as the runner's source, and its samples, to be taken across several calls."""
+    from nfb_console.inputs import SIMULATED_RESPONSE_MM
+
+    eye = SimulatedPupil(seed=seed, realtime=False,
+                         response_mm=SIMULATED_RESPONSE_MM[session.choice.response])
+    session.eye.source = eye
+    return iter(enumerate(eye.samples()))
+
+
+def _to_feedback(session, samples, into_s: float = 1.0, after: int = 0) -> None:
+    """Take samples until the feedback window of trial `after + 1` has run for `into_s`."""
+    for i, sample in samples:
+        session.eye.push(sample)
+        if i % 6:
+            continue
+        session.observe()
+        run = session.trials
+        if (run.phase == ACTIVE and session.feedback_now and len(run.results) == after
+                and run.active_s - run.phase_remaining() >= into_s):
+            return
+        assert i < 60 * 300, "no feedback window came"
+
+
+def _limit_rings(session, radius):
+    import flet.canvas as cv
+    from nfb_console import theme as t
+    from nfb_console.pupil_view import CIRCLE_SIDE
+    from nfb_console.trial_training import TrialView
+
+    ui = TrialView(session, CIRCLE_SIDE, heart=False, steady_light=True)
+    ui.fixation_panel()
+    ui.draw_fixation("")
+    assert not [s for s in ui.circle.shapes if isinstance(s, cv.Arc)], "no blocks on the circle"
+    return [s for s in ui.circle.shapes if isinstance(s, cv.Circle) and s.paint.color == t.ACCENT
+            and not s.paint.stroke_dash_pattern and s.radius == pytest.approx(radius)]
+
+
+def test_a_thin_ring_marks_a_typed_limit_with_a_constant_ink():
+    """One thin ring at the radius of **succeeds at** on the cued side, and none at 0, where the baseline
+    ring is the limit. A pupil answers light, so the ring lights the same pixels at every limit."""
+    import math
+
+    from nfb_console.pupil_view import CIRCLE_SIDE
+    from nfb_console.trial_training import _radii
+
+    for limit in (0.0, 0.1, 0.25):
+        session = _session("strong", trial_direction="increase", n_trials=2, success_at=limit)
+        try:
+            _to_feedback(session, _eye(session))
+            r_min, r_max, r_mid = _radii(CIRCLE_SIDE)
+            want = r_min + session.circle_level(limit) * (r_max - r_min)
+            rings = _limit_rings(session, want)
+            if not limit:
+                assert len(rings) <= 1, "no ring at a limit of 0: at most the circle itself is there"
+                continue
+            assert len(rings) == 1, f"one ring at a limit of {limit} mm, on the cued side"
+            lit = rings[0].paint.stroke_width * 2 * math.pi * rings[0].radius
+            assert lit == pytest.approx(2 * math.pi * r_mid * 1.5), "the same ink at every limit"
+        finally:
+            session.stop()
+
+
+def test_a_typed_full_at_acts_from_the_next_trial():
+    """Each trial is drawn from the record of its own feedback start. A **full at** typed in the window
+    changes nothing until the next trial starts."""
+    session = _session("strong", trial_direction="increase", n_trials=3)
+    try:
+        samples = _eye(session)
+        _to_feedback(session, samples)
+        before = session.trial_level(0.1)
+        session.set_full_at(0.9)
+        assert session.trial_level(0.1) == before, "the trial in flight keeps its record"
+        _to_feedback(session, samples, after=1)
+        assert session.trial_level(0.1) == pytest.approx(0.5 + 0.1 / (2 * 0.9)), "the next trial has it"
+    finally:
+        session.stop()
+
+
+def test_a_void_trial_names_its_cause_and_an_action_on_the_pupil_screen(monkeypatch):
+    """The shared line under the circle names an action for this screen, not a panel it does not have."""
+    from nfb_console.pupil_view import CIRCLE_SIDE, PupilSession
+    from nfb_console.trial_training import TrialView
+
+    monkeypatch.setattr(PupilSession, "state", property(lambda _self: object()))
+    session = _session("strong", trial_direction="increase", n_trials=2)
+    try:
+        run = TrialRun(n_trials=2, transfer_fraction=0.0, seed=1, directions=(POSITIVE,),
+                       metric_hz=OBSERVE_HZ)
+        t = 0.0
+        while not run.results:
+            run.feed(t, 4.0, valid=run.phase != ACTIVE)
+            t += 1.0 / OBSERVE_HZ
+        session.trials = run
+        ui = TrialView(session, CIRCLE_SIDE, heart=False, steady_light=True)
+        ui.fixation_panel()
+        ui.draw_fixation("")
+        assert ui.verdict_text.value.startswith("no result · "), ui.verdict_text.value
+        assert ui.verdict_detail.value and "RAW" not in ui.verdict_detail.value
+    finally:
+        session.stop()
+
+
+def test_the_trial_length_starts_at_the_published_length_and_the_run_follows_it():
+    from nfb_console.pupil_view import TIMING
+
+    session = _session(mode="active")
+    try:
+        assert session.trial_length == TIMING.baseline_s + TIMING.active_s
+        assert session.trials.active_s == TIMING.active_s
+        session.set_trial_length(session.trial_length - 5.0)
+        assert session.trials.active_s == TIMING.active_s - 5.0
+    finally:
+        session.stop()

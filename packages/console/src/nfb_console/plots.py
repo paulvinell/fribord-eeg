@@ -314,7 +314,7 @@ def fmt_amplitude(value: float, unit: str, with_unit: bool = False) -> str:
     """
     if unit == "%":
         return f"{value:.0f}%" if value >= 10 or value == 0 else f"{value:.2g}%"
-    text = f"{value:.0f}" if value >= 10 else f"{value:.1f}"
+    text = f"{value:.0f}" if abs(value) >= 10 else f"{value:.1f}"   # a negative label as its positive twin
     return f"{text} {unit}" if with_unit else text
 
 

@@ -33,8 +33,9 @@ from typing import Iterator, Protocol
 from . import proto
 
 HEG_RATE_HZ = 30.0
-"""What the headband actually streams at, nominal. Frames carry their own timestamps and every window
-downstream is time-based, so this is documentation and a simulator default rather than a contract."""
+"""What the headband actually streams at, nominal. A frame carries no time of its own and is stamped at
+its arrival; every window downstream is time-based, so this is documentation and a simulator default
+rather than a contract."""
 
 
 @dataclass(frozen=True)

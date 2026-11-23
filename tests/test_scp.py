@@ -50,14 +50,6 @@ def test_a_sustained_shift_is_recovered_under_the_ongoing_eeg():
     assert float(np.std(after)) < 1.0
 
 
-def test_a_gap_resets_the_filter_and_the_settling_clock():
-    metric = SlowShift(SPEC)
-    _feed(metric, np.full(int(4 * RATE), 5.0))
-    assert metric.warmup >= 1.0
-    _feed(metric, np.full(80, 5.0), start=int(20 * RATE))     # a jump in sample indices
-    assert metric.warmup < 1.0, "settling must restart with the filters"
-
-
 def test_shift_survival_says_the_corner_verdict():
     """The numbers the screen's wiring check stands on: 0.01 Hz keeps most of a six-second shift's mean,
     the 0.5 Hz default keeps almost none of it."""
@@ -170,21 +162,22 @@ def test_a_time_jump_aborts_the_trial_in_flight():
     assert len(run.results) >= before + 1
     aborted = run.results[0]
     assert aborted.index == 1
-    # the interrupted trial was discarded, not scored: the first *recorded* trial began after the jump,
-    # so its verdict is a success like every other compliant one
-    assert all(r.valid and r.success for r in run.results)
+    # the interrupted trial was not scored: it stays as a void cell, and every trial after the jump is a
+    # success like every other compliant one
+    assert not aborted.valid and aborted.cause == "gap"
+    assert all(r.valid and r.success for r in run.results[1:])
 
 
 def test_a_backward_time_step_aborts_rather_than_freezing_the_trial():
     """A device clock that wraps or glitches can hand the engine a reading earlier than the last. Without a
     guard the phase deadline is never reached again and the trial freezes mid-effort (the pupil screen's
     'effort · 0 s'). A backward step is now a discontinuity like a forward gap: the trial in flight is
-    discarded and the run carries on from the new time base."""
+    recorded with no result and the run carries on from the new time base."""
     run = TrialRun(n_trials=8, transfer_fraction=0.0, seed=4)
     _run(run, 5.0, value=_compliant)                 # into the first trial
     assert run.phase in (BASELINE, ACTIVE)
     run.feed(1.0, 0.0, valid=True)                   # one reading from far in the past (a wrap)
-    assert run.phase == ITI, "the backward step discarded the trial in flight and rested"
+    assert run.phase == ITI, "the backward step ended the trial in flight and rested"
     events = _run(run, 60.0, value=_compliant, start=1.0)
     assert any(e.kind == VERDICT for e in events), "the run resumed and scored a trial, not frozen"
 
@@ -194,3 +187,96 @@ def test_rates_are_none_before_there_is_anything_to_rate():
     assert run.success_rate() is None
     assert run.success_rate(POSITIVE) is None
     assert run.phase == ITI and not run.done
+
+
+# --- the level: built from accepted samples only --------------------------------------------------
+
+def _dc_blocks(uv: float, seconds: float, start: int = 0, size: int = 8) -> list[Block]:
+    count = int(round(uv / SPEC.scale))
+    n = int(seconds * RATE)
+    return [Block(SPEC.index, start + i, (count,) * size, SPEC) for i in range(0, n - size + 1, size)]
+
+
+def _level(metric, blocks, accepted: bool = True) -> list:
+    out = []
+    for block in blocks:
+        out.extend(metric.feed(block, accepted=accepted))
+    return out
+
+
+def test_slow_level_starts_at_the_first_accepted_block():
+    """An electrode's standing offset is hundreds of µV. A level that starts from zero, or from a held
+    stand-in, rings toward it for seconds and puts that ring into the first baseline."""
+    metric = SlowShift(SPEC)
+    rail = _dc_blocks(800.0, 3 * 8 / RATE)
+    held = _level(metric, rail, accepted=False)
+    assert held and not any(r.valid for r in held), "a held block gives invalid readings"
+    first = _level(metric, _dc_blocks(-300.0, 0.2, start=rail[-1].end_index))
+    assert first and first[0].valid
+    assert abs(first[0].value + 300.0) < 10.0, f"the level starts at {first[0].value:.1f} µV, not at -300"
+
+
+def test_slow_level_holds_over_a_held_block():
+    """A held block is a stand-in, not signal. The level keeps its value through it and goes on from
+    there, so the next accepted reading has no step in it."""
+    metric = SlowShift(SPEC)
+    before = _level(metric, _dc_blocks(-300.0, 3.0))
+    at = int(3.0 * RATE) - int(3.0 * RATE) % 8
+    held = _level(metric, _dc_blocks(800.0, 8 / RATE, start=at), accepted=False)
+    after = _level(metric, _dc_blocks(-300.0, 0.5, start=at + 8))
+    assert held and not any(r.valid for r in held)
+    assert all(abs(r.value - before[-1].value) < 0.1 for r in held), "it holds, it does not follow the rail"
+    assert max(abs(r.value + 300.0) for r in after) < 1.0, "and goes on with no step"
+
+
+def test_slow_level_holds_over_a_lost_block():
+    """One lost block is 32 ms. Restarting the filter there rings for seconds; holding costs nothing."""
+    metric = SlowShift(SPEC)
+    _level(metric, _dc_blocks(-300.0, 3.0))
+    at = int(3.0 * RATE) - int(3.0 * RATE) % 8
+    after = _level(metric, _dc_blocks(-300.0, 0.5, start=at + 8))      # the block at `at` never came
+    assert max(abs(r.value + 300.0) for r in after) < 0.1, "a lost block does not restart the level"
+
+
+def test_slow_level_restarts_at_a_seam():
+    """A looped source splices its end to its start. The signal steps there, and the level starts again
+    from the first block after the seam instead of ringing across it."""
+    import dataclasses
+
+    metric = SlowShift(SPEC)
+    _level(metric, _dc_blocks(-300.0, 3.0))
+    at = int(3.0 * RATE) - int(3.0 * RATE) % 8
+    seam = [dataclasses.replace(b, seam=(i == 0)) for i, b in enumerate(_dc_blocks(200.0, 0.2, start=at))]
+    first = _level(metric, seam)
+    assert abs(first[0].value - 200.0) < 10.0, f"the level after the seam is {first[0].value:.1f} µV"
+
+
+def test_slow_level_restarts_at_a_step_back():
+    """A step back in sample index is a new source. The level starts again from its first block."""
+    metric = SlowShift(SPEC)
+    _level(metric, _dc_blocks(-300.0, 3.0))
+    first = _level(metric, _dc_blocks(200.0, 0.2, start=0))
+    assert abs(first[0].value - 200.0) < 10.0, f"the level after the step back is {first[0].value:.1f} µV"
+
+
+def test_slow_level_skips_an_empty_block():
+    """An empty block carries no samples, so it is not a gap and it does not move the level."""
+    metric = SlowShift(SPEC)
+    _level(metric, _dc_blocks(-300.0, 3.0))
+    at = int(3.0 * RATE) - int(3.0 * RATE) % 8
+    assert metric.feed(Block(SPEC.index, at + 40, (), SPEC), accepted=True) == []
+    after = _level(metric, _dc_blocks(-300.0, 0.5, start=at))
+    assert max(abs(r.value + 300.0) for r in after) < 0.1, "an empty block is not a gap"
+
+
+def test_slow_level_keeps_its_reading_grid_over_lost_samples():
+    """Across lost samples the readings go on at the same stride, never earlier than the block that
+    carries them, so no reading steps back in time."""
+    metric = SlowShift(SPEC)
+    before = _level(metric, _dc_blocks(-300.0, 1.0))
+    at = int(1.0 * RATE) - int(1.0 * RATE) % 8
+    after = _level(metric, _dc_blocks(-300.0, 0.5, start=at + 20))
+    stride = metric.stride / RATE
+    assert after[0].t >= (at + 20) / RATE and after[0].t > before[-1].t
+    assert all(abs(((r.t - before[0].t) / stride) - round((r.t - before[0].t) / stride)) < 1e-6
+               for r in after), "the readings stay on their grid"

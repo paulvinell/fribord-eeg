@@ -334,3 +334,45 @@ def test_a_screen_with_no_sentry_can_still_be_opened(monkeypatch):
         assert getattr(console.session, "sentry", None) is None, \
             "the point of the test: this screen has none"
     console.show_launcher()
+
+
+def test_a_recording_at_a_wide_range_replays_with_the_same_microvolts(monkeypatch, tmp_path):
+    """The header's config carries the range, so a replay decodes the counts to the µV the live
+    session read, outside the narrow range as well."""
+    import struct
+
+    from nfb import Device, ReplaySource, Settings
+    from nfb.stream import Block
+    from test_device import FakeOptima
+
+    class Loud(FakeOptima):
+        def read_message(self):
+            msg = super().read_message()
+            counts = struct.pack("<32h", *range(-16000, 16000, 1000))
+            return optima.Message(msg.code, msg.payload[:4] + counts)
+
+    fake = Loud()
+    monkeypatch.setattr(optima, "Optima", lambda *a, **k: fake)
+    device = Device(Settings(range_uv=6000.0))
+    assert device.connect()
+    live = device.subscribe("live")
+    rec = Recorder(device, tmp_path / "wide.jsonl.gz", poll_seconds=0.02)
+    rec.start()
+    device.start_measurement()
+
+    def first(blocks, n=16):
+        out = []
+        for item in blocks:
+            if isinstance(item, Block):
+                out.append((item.channel, item.start_index, tuple(item.values), item.spec.input_range))
+            if len(out) >= n:
+                return out
+        return out
+
+    seen = first(live.blocks(timeout=1.0))
+    waitfor(lambda: rec.frames >= 8, what="eight frames written")
+    device.stop()
+    waitfor(lambda: rec.closed, what="recorder finalised")
+    assert max(abs(v) for _c, _i, values, _r in seen for v in values) > 800.0
+    assert first(ReplaySource(rec.path).blocks()) == seen
+    device.close()

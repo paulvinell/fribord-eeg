@@ -1,7 +1,7 @@
 """The slow cortical potential: a lowpassed signed voltage, with **no de-trender on purpose**.
 
 What the SCP screen measures. It looks like `wave.SignedWave` with the drift follower switched off, and the
-resemblance is real — same filter shape, same gap handling, same readings — but the *reason* the de-trender
+resemblance is real — same filter shape, same readings — but the *reason* the de-trender
 is absent is what makes this a different metric rather than a configuration of that one.
 
 **SCP training is trial-based, and the per-trial baseline is the de-trend.** Every trial subtracts the mean
@@ -66,8 +66,15 @@ class SlowShift:
     """One channel's lowpassed signed voltage, in µV. Satisfies the `Metric` protocol.
 
     The value is **not baseline-corrected** — that is the trial engine's job, per trial, against each
-    trial's own baseline window. What this hands over is the settled quasi-DC level for the engine to
-    difference, plus the waveform itself for a trace ring, on the same contract as `SignedWave`.
+    trial's own baseline window. What this hands over is the quasi-DC level for the engine to difference,
+    plus the waveform itself for a trace ring, on the same contract as `SignedWave`.
+
+    **The level is built from accepted samples only.** It starts at the first accepted block, primed to
+    that block's first sample, because an electrode's standing offset is hundreds of µV and a level that
+    rings up from zero puts the ring into the first baseline. A block the gate held, and samples that never
+    arrived, leave the filter untouched: the level holds and goes on from there. It starts again only where
+    the samples before no longer precede these: a step back in index, or a looped source's seam. A channel
+    change is a new instance.
     """
 
     unit = "µV"
@@ -82,12 +89,13 @@ class SlowShift:
         self.stride = max(1, int(round(self.rate_hz / output_hz)))
         self._next_index: int | None = None
         self._expected: int | None = None
-        self.value = 0.0
-        """The last signed reading, in µV — the level itself, not a shift. Signed, because which way it
-        moves against a trial's baseline is the whole content of the protocol."""
+        self._primed = False
+        self._level = math.nan                  # the filter's newest output, which a held block repeats
+        self.value = math.nan
+        """The last signed reading, in µV — the level itself, not a shift. NaN until the first accepted
+        block, because before it there is no level."""
         self.waveform: np.ndarray = np.zeros(0)
         self.wave_start: int | None = None
-        self.samples_seen = 0
 
     name = "scp"
 
@@ -106,17 +114,10 @@ class SlowShift:
         return self.delay_seconds
 
     @property
-    def settle_seconds(self) -> float:
-        """Two over the corner — the same conservative rule `SignedWave.band_settle_seconds` uses, and with
-        no drift follower it is the whole answer: two seconds. The long wait the waveform screen has does
-        not exist here, because the thing that made it long is the thing this metric deliberately lacks."""
-        return 2.0 / SCP_LOWPASS_HZ
-
-    @property
-    def warmup(self) -> float:
-        """0…1 of the way through settling. Public because a screen must be able to say "not yet"."""
-        seconds = self.samples_seen / max(self.rate_hz, 1e-9)
-        return min(1.0, seconds / max(self.settle_seconds, 1e-9))
+    def level(self) -> float:
+        """The newest output of the filter, in µV, which a held block repeats. NaN before the first accepted
+        block. Readings sample it on the stride grid; this is its value at the end of the last block."""
+        return self._level
 
     def describe(self) -> str:
         return (f"below {SCP_LOWPASS_HZ:g} Hz · order {SCP_ORDER} lowpass, no high-pass, no de-trender — "
@@ -124,32 +125,43 @@ class SlowShift:
 
     # --- the feed ---------------------------------------------------------------------------
 
-    def feed(self, block: Block) -> list[Reading]:
-        if block.channel != self.spec.index:
+    def feed(self, block: Block, accepted: bool = True) -> list[Reading]:
+        """Readings on the stride grid. A block that is not accepted gives readings at the held level,
+        `valid=False`; before the first accepted block, and after a restart until the next one, they carry
+        NaN."""
+        if block.channel != self.spec.index or not len(block.samples):
             return []
-        if self._expected is not None and block.start_index != self._expected:
-            # A device gap: the filter's state describes samples that no longer precede these. The trial
-            # engine aborts its trial on the time jump; this only has to stop feeding it a transient and
-            # say, through `warmup`, that it is settling again.
+        if self._expected is not None and (block.start_index < self._expected or block.seam):
             self.filter.reset()
+            self._primed = False
+            self._level = math.nan              # the old signal's level says nothing about the new one
             self._next_index = block.start_index
-            self.samples_seen = 0
         self._expected = block.end_index
-
-        raw = np.asarray(block.samples, dtype=np.float64) * self.spec.scale
-        wave = self.filter.process(raw)
-        self.waveform = wave
-        self.wave_start = block.start_index
-        self.samples_seen += len(wave)
-
         if self._next_index is None:
             self._next_index = block.start_index
+        elif self._next_index < block.start_index:
+            # Lost samples: the level holds across them, and the readings stay on their grid.
+            behind = block.start_index - self._next_index
+            self._next_index += -(-behind // self.stride) * self.stride
+
+        if accepted:
+            raw = np.asarray(block.samples, dtype=np.float64) * self.spec.scale
+            if not self._primed:
+                self.filter.prime(raw[0])
+                self._primed = True
+            wave = self.filter.process(raw)
+            self._level = float(wave[-1])
+        else:
+            wave = np.full(len(block.samples), self._level)
+        self.waveform = wave if self._primed else np.zeros(0)
+        self.wave_start = block.start_index
+
+        valid = accepted and block.valid
         out: list[Reading] = []
         while self._next_index < block.end_index:
-            i = self._next_index - block.start_index
-            self.value = float(wave[i])
+            self.value = float(wave[self._next_index - block.start_index])
             out.append(Reading(name=self.name, value=self.value,
                                t=self._next_index / self.rate_hz, channel=self.spec.index,
-                               unit=self.unit, valid=block.valid))
+                               unit=self.unit, valid=valid))
             self._next_index += self.stride
         return out

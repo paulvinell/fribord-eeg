@@ -152,3 +152,62 @@ def test_the_screen_draws_the_trials_in_active_mode():
     for shown in ("FIXATION", "TRIALS", "succeeds at", "full at", "sd", "higher: 1 of 1"):
         assert shown in texts, shown
     assert "scaled by" not in texts, "the trials judge the shift in their own unit, so the scaling row goes"
+
+
+# --- the limit on the circle, and the void line ------------------------------------------------------
+
+def _drawn(session):
+    from nfb_console.heg_view import CIRCLE_SIDE
+    from nfb_console.trial_training import TrialView
+
+    ui = TrialView(session, CIRCLE_SIDE, heart=False)
+    ui.fixation_panel()
+    ui.draw_fixation("")
+    return ui
+
+
+def test_a_thin_ring_marks_a_typed_limit_on_heg():
+    """One thin ring at the radius of **succeeds at** on the cued side, from the trial's own record."""
+    import flet.canvas as cv
+    from nfb_console import theme
+    from nfb_console.heg_view import CIRCLE_SIDE
+    from nfb_console.trial_training import _radii
+
+    session = _session(trial_direction="increase", n_trials=2, success_at=1.0)
+    t = _push(session, 70.0, 1000.0)
+    session.restart_trials()
+    while not (session.trials.phase == ACTIVE and session.feedback_now):
+        t = _push(session, 0.2, t, rise=0.5)
+    t = _push(session, 1.0, t, rise=0.5)
+    shapes = _drawn(session).circle.shapes
+    assert not [s for s in shapes if isinstance(s, cv.Arc)], "no blocks on the circle"
+    r_min, r_max, r_mid = _radii(CIRCLE_SIDE)
+    want = r_min + session.circle_level(1.0) * (r_max - r_min)
+    rings = [s for s in shapes if isinstance(s, cv.Circle) and s.radius == pytest.approx(want)]
+    assert len(rings) == 1, "one ring at the typed limit"
+    assert rings[0].paint.color == theme.ACCENT
+    assert rings[0].paint.stroke_width == pytest.approx(1.5 * r_mid / want), "a thin line"
+
+
+def test_a_heg_trial_with_no_level_spread_says_so():
+    """A level that does not move has no spread to judge a trial in, so the trial has no result. That is
+    not a rejection, and the line under the circle does not call it one."""
+    session = _session(trial_direction="increase", n_trials=2)
+    result, _ = _first_result(session, 1000.0, spread=0.0)
+    assert not result.valid
+    ui = _drawn(session)
+    lines = f"{ui.verdict_text.value} | {ui.verdict_detail.value}"
+    assert "spread" in lines and "rejected" not in lines, lines
+
+
+def test_the_trial_length_starts_at_the_published_length_and_the_run_follows_it():
+    from nfb_console.heg_view import TIMING
+
+    session = _session()
+    try:
+        assert session.trial_length == TIMING.baseline_s + TIMING.active_s
+        assert session.trials.active_s == TIMING.active_s
+        session.set_trial_length(session.trial_length + 10.0)
+        assert session.trials.active_s == TIMING.active_s + 10.0
+    finally:
+        session.stop()

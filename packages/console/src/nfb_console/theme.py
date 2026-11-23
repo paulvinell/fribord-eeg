@@ -30,6 +30,10 @@ GOOD = "#248647"
 WARN = "#a66306"
 BAD = "#ba392b"
 
+CHANNEL_COLOURS = ("#3d3a36", "#7a4fa0", "#1f7f86", "#b0563a")
+"""Each channel's own ink, by its number and never by its place in a list, for a plot that draws one
+curve per channel. Dark and muted, so a curve does not read as a frequency band."""
+
 H1 = 26
 H2 = 15
 BODY = 13

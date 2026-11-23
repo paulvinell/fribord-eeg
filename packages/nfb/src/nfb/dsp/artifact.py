@@ -69,7 +69,8 @@ from .filters import highpass, lowpass
 
 REJECT_MODES = {
     "hold": "the measurement is fed the last clean value and the block trains nothing",
-    "clamp": "the sample is zeroed and measurement carries on",
+    "clamp": "the gate sets each rejected sample to zero and the measurement continues · it holds a block "
+             "at the input limit",
 }
 
 JUDGE_FLOOR_HZ = 0.5
@@ -107,6 +108,26 @@ move it, and another box on the signal pane is another thing to set wrong; what 
 assumption be *stated*, not that it be adjustable.
 """
 
+INPUT_LIMIT_FRACTION = 0.98
+"""How close to the amplifier's full scale a sample counts as *at the input limit*. An open input rails to
+exactly full scale, so 98% of it is the rail and not a signal. A block with such a sample is never accepted
+and never becomes the held value, whatever the policy, because the measurement there is the rail. A spec
+with no `input_range` gets no such rule."""
+
+
+def input_limit_mask(block: Block) -> np.ndarray | None:
+    """Which samples of `block` are *at the input limit*, or None when none is. **The one rule** for it: the
+    gate, the session's limit state and its check for an open input all read this. A spec that states no
+    `input_range` has no limit, so a sample of it is never at one."""
+    spec, samples = block.spec, block.samples
+    if not spec.input_range or not spec.scale or not len(samples):
+        return None
+    limit = INPUT_LIMIT_FRACTION * spec.input_range / abs(spec.scale)
+    if max(samples) < limit and min(samples) > -limit:
+        return None
+    return np.abs(np.asarray(samples, dtype=float)) >= limit
+
+
 @dataclass
 class ArtifactPolicy:
     """One set of rules, shared by every channel of a session.
@@ -123,12 +144,6 @@ class ArtifactPolicy:
     tau_seconds: float = 8.0        # how fast the threshold adapts
     floor_uv: float = 30.0          # never reject below this, however quiet the channel
     ceiling_uv: float = 250.0       # always reject above this, however loud it has been
-
-    def describe(self) -> str:
-        if not self.enabled:
-            return "off — every sample reaches the measurement, artifacts included"
-        return (f"{self.tolerance:g}× the running level, {self.floor_uv:g}–{self.ceiling_uv:g} µV, "
-                f"judged on {JUDGE_FLOOR_HZ:g}–{self.limit_hz:g} Hz · {REJECT_MODES[self.mode]}")
 
 
 @dataclass
@@ -176,18 +191,21 @@ class ArtifactGate:
         self.level = 0.0
         self.threshold = 0.0
         self.rate = 0.0                     # recent fraction rejected, for the live indicator
+        self.limit_rate = 0.0               # recent fraction at the input limit, which every policy holds
         self.rejected = 0                   # session totals, for the summary
         self.seen = 0
         self._primed = False
         self._filters: list = []
         self._filter_hz: float | None = None
         self._held = 0                      # last accepted raw sample, the fill for a held block
+        self._inside: float | None = None   # last µV inside the input limit the judged band saw
 
     def reset(self) -> None:
-        self.level = self.threshold = self.rate = 0.0
+        self.level = self.threshold = self.rate = self.limit_rate = 0.0
         self.rejected = self.seen = 0
         self._primed = False
         self._held = 0
+        self._inside = None
         for filt in self._filters:
             filt.reset()
 
@@ -214,15 +232,53 @@ class ArtifactGate:
             values = filt.process(values)
         return values
 
+    def _count(self, rejected: int, size: int, at_limit: int) -> None:
+        self.seen += size
+        self.rejected += rejected
+        # A one-pole on the per-block fraction: what the indicator shows is "am I rejecting *now*",
+        # which the session total stops being able to answer within a minute or two.
+        alpha = min(1.0, (size / self.spec.rate_hz) / 5.0)
+        self.rate += alpha * ((rejected / size) - self.rate)
+        self.limit_rate += alpha * ((at_limit / size) - self.limit_rate)
+
+    def _without_limit(self, values: np.ndarray, railed: np.ndarray | None) -> np.ndarray:
+        """The samples the judged band sees: each one at the input limit replaced by the last one inside
+        it, so the rail neither rings the filter nor primes the level. A rail sample decides nothing."""
+        if railed is None:
+            self._inside = float(values[-1])
+            return values
+        out = values.copy()
+        last = self._inside
+        if last is None:
+            last = float(values[~railed][0]) if not railed.all() else 0.0
+        for i in range(out.size):
+            if railed[i]:
+                out[i] = last
+            else:
+                last = float(out[i])
+        self._inside = last
+        return out
+
+    def _stand_in(self, block: Block) -> Block:
+        return dataclasses.replace(block, samples=(self._held,) * len(block.samples))
+
     def feed(self, block: Block) -> Judgement:
         policy = self.policy
         values = np.asarray(block.values, dtype=float)
-        if not policy.enabled or not values.size:
-            if values.size:
-                self._held = block.samples[-1]
+        if not values.size:
+            return Judgement(block, True, 0, 0, 0.0, self.level)
+        railed = input_limit_mask(block)
+        if not policy.enabled:
+            # Off still holds a block at the input limit, so it is counted where the pane counts.
+            at_limit = 0 if railed is None else int(np.count_nonzero(railed))
+            self._count(at_limit, values.size, at_limit)
+            if at_limit:
+                return Judgement(block, False, at_limit, values.size, 0.0, self.level,
+                                 fed=self._stand_in(block))
+            self._held = block.samples[-1]
             return Judgement(block, True, 0, values.size, 0.0, self.level)
 
-        judged = np.abs(self._band_limited(values))
+        judged = np.abs(self._band_limited(self._without_limit(values, railed)))
         if not self._primed:
             # Start from what the channel is actually doing rather than from zero, or the threshold sits on
             # its floor for seconds and rejects ordinary EEG. A non-finite mean does not prime.
@@ -234,15 +290,10 @@ class ArtifactGate:
         threshold = min(policy.ceiling_uv, max(policy.floor_uv, policy.tolerance * self.level))
         self.threshold = threshold
         over = judged > threshold
+        if railed is not None:
+            over |= railed
         rejected = int(np.count_nonzero(over))
-
-        self.seen += values.size
-        self.rejected += rejected
-        # A one-pole on the per-block fraction: what the indicator shows is "am I rejecting *now*",
-        # which the session total stops being able to answer within a minute or two.
-        block_seconds = values.size / self.spec.rate_hz
-        alpha = min(1.0, block_seconds / 5.0)
-        self.rate += alpha * ((rejected / values.size) - self.rate)
+        self._count(rejected, values.size, 0 if railed is None else int(np.count_nonzero(railed)))
 
         # Accepted samples only — see the module docstring. The clean case avoids the boolean index and
         # its allocation, which is most of the difference on an 8-element array; the block is clean
@@ -262,7 +313,7 @@ class ArtifactGate:
         if not rejected:
             self._held = block.samples[-1]
             return Judgement(block, True, 0, values.size, threshold, self.level)
-        if policy.mode == "clamp":
+        if policy.mode == "clamp" and railed is None:
             samples = tuple(0 if bad else s for s, bad in zip(block.samples, over))
             self._held = samples[-1]
             return Judgement(block, True, rejected, values.size, threshold, self.level,
@@ -271,8 +322,9 @@ class ArtifactGate:
         # value so the stream stays contiguous — a skipped block reads as an acquisition gap
         # downstream and resets every filter, which is the expensive failure the module docstring
         # describes. `_held` is deliberately not updated here.
-        stand_in = dataclasses.replace(block, samples=(self._held,) * len(block.samples))
-        return Judgement(block, False, rejected, values.size, threshold, self.level, fed=stand_in)
+        # A sample at the input limit is held in either mode: a zero in its place is no signal either.
+        return Judgement(block, False, rejected, values.size, threshold, self.level,
+                         fed=self._stand_in(block))
 
 
 @dataclass
@@ -337,7 +389,11 @@ class ArtifactGates:
 
     def describe(self) -> str:
         if not self.policy.enabled:
-            return "not rejecting anything"
+            # Off still holds a block at the input limit, so the pane says how much of that it holds.
+            at_limit = max((g.limit_rate for g in self.gates.values()), default=0.0)
+            if not at_limit:
+                return "no artifact rejection · no sample at the input limit"
+            return f"no artifact rejection · holding {at_limit:.0%} at the input limit right now"
         if not self.gates:
             return "waiting for data"
         worst = max(self.gates.items(), key=lambda kv: kv[1].rate)

@@ -57,6 +57,9 @@ class Settings:
     the only other option a voltage channel offers short of DC, and it is what ultra-low-frequency work
     needs — a reward band below the corner measures the filter's roll-off rather than the brain. Like the
     mains setting, this is not a label: the filtering happens before we see a sample."""
+    range_uv: float = 800.0
+    """The input range, ± this many µV, in the device's hardware. The count stays 16-bit, so a wider range
+    holds a larger electrode offset away from the input limit at the cost of a larger step per count."""
     silent: bool = True
     """Whether the amplifier's own beeper is switched off. On by default because the host owns every sound a
     session makes; see `optima.build_eeg_config`, which also records that the bit's polarity is inferred from
@@ -66,7 +69,7 @@ class Settings:
 
     def build(self) -> bytes:
         return optima.build_eeg_config(self.channels, hz=self.hz, reference=self.reference,
-                                       mains_hz=self.mains_hz,
+                                       mains_hz=self.mains_hz, range_uv=self.range_uv,
                                        lower_limit_hz=self.lower_limit_hz, silent=self.silent)
 
 
@@ -215,7 +218,9 @@ class Subscription:
                 if self.device.status.mode in (Mode.IDLE, Mode.DISCONNECTED):
                     return
                 continue
-            if isinstance(item, EpochEnd):
+            if isinstance(item, EpochEnd) or self._decoder is None:
+                # No decoder means a new epoch drained this queue, its `EpochEnd` with it: a reconfigure
+                # under `always_read` stops and starts again faster than a consumer can wake.
                 self._decoder = None
                 return
             code, payload, _arrival = item
@@ -289,6 +294,11 @@ class Device:
         has to keep listing them: a row that vanished when the check narrowed would read as a channel that
         stopped existing rather than as one with nothing plugged into it."""
         self._restore_channels: int | None = None
+        self.always_read = False
+        """Measuring is the resting mode rather than idle: the device measures from connect to close, and
+        `stop` from a measurement leaves it measuring. At the 0.01 Hz corner an input takes minutes to come
+        back from its limit after every start, so a stop between two sessions costs those minutes again.
+        Set through `set_always_read`."""
 
     # --- connection ----------------------------------------------------------------------
 
@@ -312,6 +322,7 @@ class Device:
                 self.status.mode = Mode.IDLE
                 self.status.failure = self.status.remedy = ""
                 self._write_config()
+                self._rest()
                 return True
             except Exception as exc:
                 dev.close()
@@ -382,7 +393,7 @@ class Device:
 
     def close(self) -> None:
         with self._lock:
-            self.stop()
+            self._halt()
             if self._dev is not None:
                 self._dev.close()
                 self._dev = None
@@ -391,9 +402,11 @@ class Device:
     # --- configuration -------------------------------------------------------------------
 
     def reconfigure(self, **changes) -> None:
-        """Change settings. Refused while streaming, because the data format would change mid-run."""
+        """Change settings. Refused while streaming, because the data format would change mid-run — except
+        a resting measurement under `always_read`, which is stopped, reconfigured and started again."""
         with self._lock:
-            if self.status.mode in (Mode.MEASURING, Mode.TESTING):
+            cycle = self.always_read and self.status.mode is Mode.MEASURING
+            if self.status.mode in (Mode.MEASURING, Mode.TESTING) and not cycle:
                 raise RuntimeError(
                     f"cannot change settings while {self.status.mode.value}; stop the session first"
                 )
@@ -401,6 +414,13 @@ class Device:
             problems = optima.validate_config(merged.build())
             if problems:
                 raise ValueError("; ".join(problems))
+            if cycle:
+                self._halt()
+                try:
+                    self.reconfigure(**changes)
+                finally:
+                    self._rest()
+                return
             if self._dev is not None:
                 # Write to the device before committing the settings on the host, so a rejected write keeps
                 # host and hardware agreeing on the old rate rather than disagreeing.
@@ -434,7 +454,30 @@ class Device:
         self._start(Mode.MEASURING)
 
     def start_impedance(self) -> None:
-        self._start(Mode.TESTING)
+        with self._lock:
+            if self.always_read and self.status.mode is Mode.MEASURING:
+                self._halt()            # the resting measurement gives way; `stop` brings it back
+            self._start(Mode.TESTING)
+
+    def set_always_read(self, on: bool) -> None:
+        """Switch `always_read`. On starts measuring at once if the device is connected and idle. Off stops
+        a resting measurement that nobody reads; a session that reads it still owns it, and stops it."""
+        with self._lock:
+            self.always_read = on
+            if on:
+                self._rest()
+            elif self.status.mode is Mode.MEASURING and not self._subs:
+                self._halt()
+
+    def _rest(self) -> None:
+        """Back to the resting mode: measuring under `always_read`, else nothing to do. A start that fails
+        leaves the device idle, and the next session's start raises the reason where it can be shown."""
+        if not self.always_read or self._dev is None or self.status.mode is not Mode.IDLE:
+            return
+        try:
+            self._start(Mode.MEASURING)
+        except Exception:
+            pass
 
     def unwired(self) -> list[int]:
         """Channels in use whose "+" input reads open circuit, so they have no electrode."""
@@ -482,7 +525,7 @@ class Device:
             if keep >= self.status.settings.channels:
                 return []
             was = self.status.settings.channels
-            self.stop()
+            self._halt()
             self.reconfigure(channels=keep)
             self._restore_channels = was
             self.start_impedance()
@@ -526,6 +569,16 @@ class Device:
             self._reader.start()
 
     def stop(self) -> None:
+        """End the running mode and return to the resting one. Under `always_read` a measurement is the
+        resting mode, so this leaves it running, and a contact check ends in a fresh measurement."""
+        with self._lock:
+            if self.always_read and self.status.mode is Mode.MEASURING:
+                return
+            self._halt()
+            self._rest()
+
+    def _halt(self) -> None:
+        """Back to idle, whatever `always_read` says: for a close, a reconfigure and a contact check."""
         with self._lock:
             if self.status.mode not in (Mode.MEASURING, Mode.TESTING):
                 return

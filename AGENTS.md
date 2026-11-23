@@ -98,6 +98,15 @@ renders every screen, cold and fed, into `shots/`; `make shots SCREEN=PAC` narro
 - **`NFB_NO_OUTPUTS=1` for every test run, benchmark and scratch script.** It switches the shadow, the
   system volume and the cues off for the process; `tests/conftest.py` sets it autouse. A session takes the
   operator's display and volume the moment it runs, which is right for a session and wrong for anything else.
+- **Every generated sound goes through `nfb_console.audio`.** Render a short sound with `audio.finish` and
+  play it with `audio.play`; stream a continuous one as an `audio.Stream`. `tests/test_audio.py` fails if
+  another module opens a stream or starts `afplay`; a music file the operator chose is the one exception.
+  Each rule there is a crackle that came back:
+  - a step: a sound starts and ends at zero, a stop fades, a gain change ramps, a late block fades;
+  - starvation: no callback, a writer thread fills a buffer the device drains without Python;
+  - a clip: short sounds peak at -6.9 dBFS, and the sum bends below full scale;
+  - the cone: nothing much under the 70 Hz speaker corner;
+  - a device opened per sound, and a rate converted elsewhere.
 - **The reference is `linked` by default**, one reference electrode serving all four channels, because
   cross-channel measures need a shared reference. The cost: one bad reference electrode makes every channel
   noisy at once, with no channel obviously at fault. The impedance test finds it.
