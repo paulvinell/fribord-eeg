@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import replace
 
 from .beats import Beat
 
@@ -473,5 +474,6 @@ class PpgDecoder:
             if self._seen <= self._warm_up:
                 continue
             self.raw.append((t, sample))
-            out += self._finder.push(t, sample)
+            # A beat is timed after its rise has passed, so it is given later than it happened: say when.
+            out += [replace(beat, arrived=arrival_t) for beat in self._finder.push(t, sample)]
         return out

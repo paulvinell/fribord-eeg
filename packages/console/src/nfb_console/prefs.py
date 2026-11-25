@@ -29,6 +29,7 @@ because one is malformed is worse than one that opens with defaults.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -82,6 +83,19 @@ def capture(feedback) -> dict:
     return out
 
 
+def number(value) -> float | None:
+    """A stored number as a finite float, or None for anything else: a bool, a string, NaN, an infinity, an
+    integer with too many digits for a float. The one place where a saved number is converted and checked,
+    for every key that is restored, so that no value in a file can raise out of a restore."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        as_float = float(value)
+    except OverflowError:
+        return None
+    return as_float if math.isfinite(as_float) else None
+
+
 def apply(feedback, values: dict) -> int:
     """Write stored values back, skipping anything that no longer exists or no longer type-checks.
 
@@ -112,6 +126,8 @@ def apply(feedback, values: dict) -> int:
         elif not (isinstance(current, numbers) and isinstance(value, numbers)):
             if not isinstance(value, type(current)):
                 continue
+        elif number(value) is None:
+            continue
         setattr(mech, attr, type(current)(value))
         n += 1
     return n

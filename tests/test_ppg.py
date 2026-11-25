@@ -324,6 +324,8 @@ def test_beats_come_out_of_a_byte_stream_at_the_rate_that_went_in():
     assert len(beats) >= len(truth) - 5, f"{len(beats)} beats against {len(truth)}"
     assert abs(rate - 66.0) < 1.5, f"{rate:.1f} bpm"
     assert all(b.contact is None for b in beats), "a pulse sensor has no contact flag to report"
+    # A beat is timed after its rise has passed, so it is given later than it happened, and it says when.
+    assert all(b.arrived is not None and 0.3 < b.arrived - b.t < 1.5 for b in beats)
 
 
 def test_sample_times_come_from_arrivals_so_a_wrong_rate_cannot_drift():

@@ -12,11 +12,11 @@ which of the two ways of being wrong you are in — flat, or split. The instrume
 shared with the CFC screen, because the same things matter whether HRV is the session or is running
 beside the EEG.
 
-**The pacer is locked to the heart, not to a clock.** "Only breathe in when the heart rate is accelerating"
-makes the cue a function of the tachogram. A metronome is the fallback when the beat signal is poor, and the
-control says which is running, because they are different instruments and one must not pass for the other.
-Its cycle is settable over 6–30 s, because a resonant frequency is individual, commonly
-4.5–7 breaths a minute, so a fixed 10 s paced everybody at six whatever suited them.
+**The pacer runs on a clock.** A pacer whose cue waits for the turn of the heart rate is late by what the
+detection and the reaction take, and a late instruction in a closed loop settles at a slower rate than the
+heart's own. So the metronome breathes at a cycle that the person sets, and the sweep at the rates of its
+schedule. A cycle is settable over 6–30 s, because a resonant frequency is individual, commonly 4.5–7 breaths
+a minute, so a fixed 10 s paced everybody at six whatever suited them.
 
 **And so is the frequency being scored, for the same reason.** The pacer's cycle was settable while the
 number it was judged against stayed at 0.1 Hz, which paced somebody at their own rate and then marked them
@@ -70,9 +70,11 @@ import flet.canvas as cv
 from nfb.hrv import (DEFAULT_METRIC, HRV_METRICS, NARROW_HALF_RANGE_HZ, TARGET_RANGE_HZ,
                      metric_value)
 from nfb.hrv.metrics import RSA_MIN_BEATS
+from nfb.hrv.sweep import END_PER_MIN, START_PER_MIN, STEP_S, Sweep, SweepSchedule, breath_turn
 
 from . import (chrome, cues, heart, heart_panel, normalise, plan_pane, prefs,
                signal_pane)
+from .sweep_view import SWEEP_HELP, SweepView
 from . import theme as t
 from .feedback import FeedbackSettings
 from .inputs import HeartChoice
@@ -81,7 +83,7 @@ from .plan import SessionPlan
 from .protocols import Protocol
 from .scaling import Scaled, scaling_row
 from .targets import Target
-from .widgets import help_button, labelled, num_box, panel, pill
+from .widgets import help_button, labelled, num_box, panel, pill, seconds_text
 
 HANDLES = ("HRV",)
 EEG_SOURCE = False      # takes its own input; the replay EEG file is not opened for it
@@ -110,12 +112,10 @@ PACER_OUT_HZ = 660.0
 # frequency is individual, commonly 4.5–7 breaths a minute, and somebody whose own is 5.5 was being paced at
 # 6 with no way to say so.
 #
-# 6–30 s, a plain user setting with no resonance search and no adaptation of any kind.
+# 6–30 s, a plain user setting. The sweep, which is a choice of the pacer, never writes it.
 #
-# **Half-second steps rather than whole seconds.** We generate the cue, so nothing stops us being finer —
-# and at this end of the range a second is a coarse step: 10 s to 11 s moves the
-# paced rate from 6.0 to 5.5 breaths a minute, which steps straight over 5.7 and 5.8. Half a second
-# halves that.
+# The arrows move by half a second: a whole second steps from 6.0 to 5.5 breaths a minute. A cycle that a
+# person typed, or that the target gives, runs as it is.
 CONDITION_LEVEL = 0.5
 """Where the level counts as met, for the click and the music's stop — the middle of the scaled range.
 
@@ -174,6 +174,30 @@ PACER_PERIOD_S = 10.0
 PACER_RANGE_S = (6.0, 30.0)
 PACER_STEP_S = 0.5
 
+PACERS = ("metronome", "sweep")
+"""The choices of the pacer, in the order that the row shows them. The first two are the setting that is
+saved; `sweep` is a state of the session, never a setting."""
+
+REAL_SOURCES = ("strap", "usb")
+"""The heart sources whose beats follow the pacer. The simulator's do not, so a rate found on it is chance."""
+
+SAME_BEAT_S = 0.01
+"""Two stamps of the newest beat that differ by less than this are one beat: a stamp is rebuilt from the
+snapshot's time and an age, which leaves a rounding error of a microsecond on a clock of epoch seconds."""
+
+INHALE_PCT = 50.0
+INHALE_RANGE = (1.0, 99.0)
+INHALE_STEP_PCT = 5.0
+"""The part of each breath that is the inhale, in whole percent: the box shows whole percents, the setting
+keeps whole percents, and the arrows move by this step. Equal in and out is the default; the exhale is the
+rest, so the two limits leave each half a hundredth of the breath at least."""
+
+SWEEP_RATE_STEP = 0.25
+SWEEP_RATE_RANGE = (math.ceil(60.0 * TARGET_RANGE_HZ[0] / SWEEP_RATE_STEP - 1e-9) * SWEEP_RATE_STEP,
+                    math.floor(60.0 * TARGET_RANGE_HZ[1] / SWEEP_RATE_STEP + 1e-9) * SWEEP_RATE_STEP)
+"""The step of the arrows of the two ends of a sweep, in breaths a minute, and the limits of the ends: those
+that the target takes, so every rate that a sweep can find is one that `use this rate` can set."""
+
 TARGET_STEP_HZ = 0.005
 """The step the target moves in. Half a bin of a three-minute window, and fine enough to land on a rate
 somebody found by trial: 0.065 Hz is 3.9 breaths a minute, and the next step either way is a tenth of a
@@ -183,7 +207,7 @@ breath a minute apart."""
 # said two ways — a frequency to breathe at — and a screen that let them disagree would be pacing somebody
 # at six breaths a minute while scoring them for four. The metronome's cycle is therefore recomputed from
 # the target whenever the target changes; the reverse is *not* wired up, because the cycle is clamped and
-# snapped to half a second and feeding that back would drag the target off wherever it was set.
+# feeding that back would drag the target off wherever it was set.
 
 
 class HRVSession(Scaled, LevelOutputs):
@@ -217,8 +241,8 @@ class HRVSession(Scaled, LevelOutputs):
         # connected sensor off*. See `adopt_offered`.
         self.offered = offered if offered is not None else choice
         self.heart = runner if runner is not None else heart.HeartRunner(self.choice)
-        self.pacer_locked = True
         self.pacer_period = PACER_PERIOD_S
+        self.inhale_pct = INHALE_PCT
         self.pacer_sound = True
         # The target lives on the processor, which is the app's and shared with the CFC screen's copy of
         # these instruments — so setting it here sets it there too, which is right: it is the person's
@@ -288,8 +312,18 @@ class HRVSession(Scaled, LevelOutputs):
         self.targets = [self.signal_target]
         self._accumulated = 0.0
         self._resumed_at: float | None = None
+        # The one clock for elapsed time and for the sweep, so a test drives both with no wait.
+        self.now: Callable[[], float] = time.monotonic
         self.paused = True
         self._stop = False
+        # The rate search, its beats' source, and the arrival of the newest beat, for the silence hold.
+        self.sweep_start, self.sweep_end = START_PER_MIN, END_PER_MIN
+        self._schedule = SweepSchedule(self.sweep_start, self.sweep_end, STEP_S)
+        self.sweep: Sweep | None = None
+        self._armed = False         # the sweep is chosen and has not begun
+        self._sweep_real = False
+        self._sweep_inhale: float | None = None
+        self._beat_seen: tuple[float | None, float] = (None, 0.0)
         self.redraw: Callable[[], None] = lambda: None
 
     # --- what the shared Feedback pane reads ------------------------------------------------
@@ -377,8 +411,9 @@ class HRVSession(Scaled, LevelOutputs):
             return
         self.plan = previous.plan
         self.plan.rewind()
-        self.pacer_locked = previous.pacer_locked
         self.pacer_period = previous.pacer_period
+        self.inhale_pct = previous.inhale_pct
+        self.set_sweep_range(previous.sweep_start, previous.sweep_end)
         self.pacer_sound = previous.pacer_sound
         # The target needs no line here — it lives on the shared processor, which outlives both sessions.
         # Listed anyway, because "everything the operator configured" is the promise above and a reader
@@ -399,28 +434,31 @@ class HRVSession(Scaled, LevelOutputs):
         band or a threshold, and prefs' own docstring is why those never persist.
         """
         return {**prefs.capture(self.feedback), "pacer_period": self.pacer_period,
-                "pacer_locked": self.pacer_locked, "pacer_sound": self.pacer_sound,
+                "pacer_sound": self.pacer_sound,
+                "pacer_inhale": self.inhale_pct, "sweep_start": self.sweep_start,
+                "sweep_end": self.sweep_end,
                 "target_hz": self.target_hz, "target_half_hz": self.target_half_hz}
 
     def restore_calibration(self, values: dict) -> int:
         used = prefs.apply(self.feedback, values)
         # Before the pacer, because setting the target sets the pacer's period from it — restored in the
         # other order, a stored period would be overwritten by one derived from the target.
-        target = values.get("target_hz")
-        half = values.get("target_half_hz")
-        if isinstance(target, (int, float)) and not isinstance(target, bool):
-            self.set_target_hz(float(target),
-                               float(half) if isinstance(half, (int, float))
-                               and not isinstance(half, bool) else None)
+        target, half = prefs.number(values.get("target_hz")), prefs.number(values.get("target_half_hz"))
+        if target is not None:
+            self.set_target_hz(target, half)
             used += 1
-        period = values.get("pacer_period")
-        if isinstance(period, (int, float)) and not isinstance(period, bool):
-            self.set_pacer_period(float(period))
+        period = prefs.number(values.get("pacer_period"))
+        if period is not None:
+            self.set_pacer_period(period)
             used += 1
-        locked = values.get("pacer_locked")
-        if isinstance(locked, bool):
-            self.pacer_locked = locked
+        inhale = prefs.number(values.get("pacer_inhale"))
+        if inhale is not None:
+            self.set_inhale(inhale)
             used += 1
+        start, end = prefs.number(values.get("sweep_start")), prefs.number(values.get("sweep_end"))
+        if (start is not None or end is not None) and self.set_sweep_range(
+                self.sweep_start if start is None else start, self.sweep_end if end is None else end):
+            used += (start is not None) + (end is not None)
         sound = values.get("pacer_sound")
         if isinstance(sound, bool):
             self.pacer_sound = sound
@@ -644,7 +682,7 @@ class HRVSession(Scaled, LevelOutputs):
 
     @property
     def elapsed(self) -> float:
-        running = (time.monotonic() - self._resumed_at) if self._resumed_at is not None else 0.0
+        running = (self.now() - self._resumed_at) if self._resumed_at is not None else 0.0
         return self._accumulated + running
 
     @property
@@ -663,7 +701,7 @@ class HRVSession(Scaled, LevelOutputs):
         take/follow/release lifecycle inside `apply`."""
         if self.paused:
             self.paused = False
-            self._resumed_at = time.monotonic()
+            self._resumed_at = self.now()
             # The clock advances again: replay the buffered beats onto it to warm the scale, since nothing
             # fed it while paused. This is where "warm before you start" actually happens.
             self.warm_from_history()
@@ -674,9 +712,11 @@ class HRVSession(Scaled, LevelOutputs):
             self.release_outputs()
 
     def tick(self) -> None:
+        self._sweep_step()
         if not self.running:
             return
-        self.cue_breath()
+        if self.sweep_hold() is None:
+            self.cue_breath()
         elapsed = self.elapsed
         for cue in self.plan.due(elapsed):
             self.cue(cue)
@@ -687,6 +727,200 @@ class HRVSession(Scaled, LevelOutputs):
             self.paused = True
             # A timed session that ends must not leave the room held any more than a paused one.
             self.release_outputs()
+
+    # --- the rate search ---------------------------------------------------------------------
+    #
+    # The sweep is a choice of the pacer. It is the pacer while it is armed or runs, and it is nothing else of
+    # the session's: nothing of it is saved, and the metronome is the pacer again when it ends. It writes no setting, and only `use_rate` moves the target, on a press.
+
+    @property
+    def sweep_schedule(self) -> SweepSchedule:
+        """The one schedule: the next sweep runs it and the screen reads it, from the two settings."""
+        return self._schedule
+
+    def set_sweep_start(self, rate: float) -> bool:
+        return self.set_sweep_range(rate, self.sweep_end)
+
+    def set_sweep_end(self, rate: float) -> bool:
+        return self.set_sweep_range(self.sweep_start, rate)
+
+    def set_sweep_range(self, start: float, end: float) -> bool:
+        """Set where the sweep starts and where it ends, in breaths a minute, each clamped into
+        `SWEEP_RATE_RANGE` and otherwise kept as given: `SWEEP_RATE_STEP` is the step of the arrows. True when a setting changed. Refused, with
+        nothing changed, when a rate is not finite or the two are equal, since then no sweep exists.
+
+        A sweep that waits runs the new range when it begins. A sweep that runs keeps its measured
+        breaths when only the end moved, and ends now if its pacer is past the new end. When the start
+        moved, the breaths belong to another schedule, so the sweep is armed again and begins anew."""
+        if not (math.isfinite(start) and math.isfinite(end)):
+            return False
+        lo, hi = SWEEP_RATE_RANGE
+        start, end = (float(min(hi, max(lo, r))) for r in (start, end))
+        if start == end or (start, end) == (self.sweep_start, self.sweep_end):
+            return False
+        moved_start = start != self.sweep_start
+        self.sweep_start, self.sweep_end = start, end
+        self._schedule = SweepSchedule(start, end, STEP_S)
+        if self.sweeping:
+            if moved_start:
+                self.sweep, self._armed, self._breathing_in = None, True, None
+            else:
+                self.sweep.retarget(self._schedule)
+                if self.sweep.reason == "done" and self.plan.finish_cue:
+                    self.cue("finish")
+        return True
+
+    @property
+    def sweeping(self) -> bool:
+        """A sweep that has begun and has not ended."""
+        return self.sweep is not None and self.sweep.reason is None
+
+    @property
+    def pacer_choice(self) -> str:
+        """The chosen pacer, as the row labels it: `sweep` while a sweep is armed or runs, else the
+        metronome."""
+        return "sweep" if self._armed or self.sweeping else "metronome"
+
+    def choose_pacer(self, label: str) -> None:
+        """Choose a pacer. `sweep` arms a sweep, replacing the result of the last one, and begins nothing:
+        the transport runs the session as for every pacer. Another pacer stops a sweep that runs and keeps
+        what it measured as a result. `sweep` again while one runs changes nothing."""
+        if label not in PACERS:
+            raise ValueError(f"the pacer must be one of {PACERS}, not {label!r}")
+        if label == "sweep":
+            if not self.sweeping:
+                self.sweep = None
+                self._armed = True
+                self._breathing_in = None
+            return
+        self._armed = False
+        if self.sweeping:
+            self.sweep.end("stop")
+
+    def clear_sweep(self) -> None:
+        """Drop the result of a sweep that ended. A sweep that runs stays."""
+        if not self.sweeping:
+            self.sweep = None
+
+    def sweep_time_left_s(self) -> float | None:
+        """Seconds that the session maximum leaves, when that is fewer than the sweep takes, else None."""
+        left = self.plan.remaining(self.elapsed)
+        return left if left is not None and left < self.sweep_schedule.total_s else None
+
+    @property
+    def sweep_breath(self) -> int | None:
+        """The breath, counted from 1, that the sweep's clock is in, or None when there is no sweep."""
+        if self.sweep is None:
+            return None
+        at = self.sweep.schedule.breath_at(self.sweep.clock)
+        return self.sweep.schedule.breaths if at is None else at + 1
+
+    def _sweep_wait(self) -> str | None:
+        """What an armed sweep waits for before breath 1: `finished` (the session maximum has passed),
+        `source` (no heart source is on), `error`, `silence` (no beats arrive) or `paused`, else None. The
+        sweep never runs the session, so a pause is a wait."""
+        if self.finished:
+            return "finished"
+        if self.heart.choice is None or not self.heart.choice.on:
+            return "source"
+        if self.error is not None:
+            return "error"
+        if self.heart.stale or not self.heart.ready:
+            return "silence"
+        return "paused" if self.paused else None
+
+    def _begin_sweep(self) -> None:
+        self._armed = False
+        self.sweep = Sweep(self.sweep_schedule, self.heart.source_key)
+        self._sweep_real = self.heart.choice.kind in REAL_SOURCES
+        self._sweep_inhale = self.inhale_pct
+        self._beat_seen = (self._newest_beat(), self.now())
+        self._breathing_in = None
+
+    @property
+    def simulated_beats(self) -> bool:
+        """Whether the beats of the sweep, or of the next one when none exists, are simulated."""
+        if self.sweep is not None:
+            return not self._sweep_real
+        return self.heart.choice is not None and self.heart.choice.kind == "simulator"
+
+    @property
+    def sweep_inhale_pct(self) -> float | None:
+        """The inhale share the sweep ran with, or None when the setting changed during it."""
+        return self._sweep_inhale
+
+    def sweep_hold(self) -> str | None:
+        """What holds the sweep now, else None: one of `nfb.hrv.sweep.CAUSES` while it runs, and while it
+        waits to begin what `_sweep_wait` names."""
+        if self.sweeping:
+            return self.sweep.cause
+        return self._sweep_wait() if self._armed else None
+
+    def _newest_beat(self) -> float | None:
+        """The stamp of the newest accepted beat, or None. A packet with no usable beat moves the stamp of
+        the snapshot and not this one."""
+        state = self.state
+        stamps = [state.t - a for a in state.age_s if math.isfinite(state.t - a)] if state is not None else []
+        return max(stamps) if stamps else None
+
+    def _sweep_cause(self, now: float) -> str | None:
+        """The causes that only the session can see. `stall` and `clock` are the sweep's own. Silence is
+        counted here, from the newest accepted beat: a strap that loses contact keeps notifying."""
+        stamp, seen = self._newest_beat(), self._beat_seen[0]
+        if (stamp is None) != (seen is None) or (stamp is not None and abs(stamp - seen) > SAME_BEAT_S):
+            self._beat_seen = (stamp, now)
+        if self.error is not None:
+            return "error"
+        if self.paused:
+            return "paused"
+        if now - self._beat_seen[1] > heart.HeartRunner.STALE_S:
+            return "silence"
+        return None
+
+    def _sweep_step(self) -> None:
+        """The first thing a draw does, before the pause check: a pause is a cause that the sweep must see.
+        A held sweep sounds its turn again on the way back, and one that ran its course sounds the cue."""
+        if self._armed and self._sweep_wait() is None:
+            self._begin_sweep()
+        if not self.sweeping:
+            return
+        if self.finished:
+            self.sweep.end("plan")
+            return
+        now = self.now()
+        self.sweep.feed(now, self.state, self._sweep_cause(now), self.heart.source_key,
+                        self.inhale_pct / 100.0)
+        if self._sweep_inhale != self.inhale_pct:
+            self._sweep_inhale = None
+        if self.sweep.reason == "done" and self.plan.finish_cue:      # the one switch of a tone at an end
+            self.cue("finish")
+        if self.sweep.cause is not None:
+            self._breathing_in = None
+
+    def cycle_for_rate(self, breaths_per_min: float) -> float:
+        """The metronome cycle in seconds that a target at this rate gives."""
+        return clamp_period(60.0 / breaths_per_min)
+
+    def usable_rate(self) -> float | None:
+        """The breaths a minute that `use_rate` would move the target to: the best rate of a sweep that
+        ended, when it lies inside the swept range, its beats were real and they still come from the same
+        source. Whether the peak was clear is the person's to weigh, so it plays no part."""
+        result = self.sweep.result if self.sweep is not None else None
+        if result is None or result.best is None or not self._sweep_real:
+            return None
+        rate, schedule = result.best.rate, self.sweep.schedule
+        if not schedule.low_per_min <= rate <= schedule.high_per_min:     # false for NaN as well
+            return None
+        return rate if result.source_key == self.heart.source_key else None
+
+    def use_rate(self) -> bool:
+        """Move the target, and the metronome's cycle with it, to `usable_rate`, with the band keeping its
+        width. False, and nothing changes, when no rate can be used."""
+        rate = self.usable_rate()
+        if rate is None:
+            return False
+        self.set_target_hz(rate / 60.0)
+        return True
 
     def adopt_offered(self) -> None:
         """Take the app's source if it has become a real one since this session started.
@@ -753,29 +987,32 @@ class HRVSession(Scaled, LevelOutputs):
     # --- the breathing cue -----------------------------------------------------------------
 
     def breathe_in(self) -> bool:
-        """Whether the person should be inhaling now.
+        """Whether the person should be inhaling now: the turn of the pacer that is chosen. Every pacer runs on a
+        clock, and the share of each breath that is the inhale is the one setting."""
+        return self._turn()[0]
 
-        Locked to the heart when there are beats to lock to, and to the clock when there are not. The
-        locked version is the instruction as written; the clock version is what remains when contact is
-        poor, and it must not silently pretend to be the same thing.
-        """
-        if self.pacer_locked and self.heart.ready:
-            return self.state.accelerating
-        half = self.pacer_period / 2.0
-        return (self.elapsed % self.pacer_period) < half
+    def breath_phase(self) -> float:
+        """How far through the current half-cycle, 0…1, for the ring to breathe with."""
+        return self._turn()[1]
 
-    def breath_phase(self) -> float | None:
-        """How far through the current half-cycle, 0…1, for the ring to breathe with.
+    def _turn(self) -> tuple[bool, float]:
+        """In or out and the ring's phase, from the sweep's own clock while one is armed or runs, and
+        from the session's time under the metronome. A sweep that
+        waits for the beat that ends its last breath stays at the end of it, and one that waits to begin stands
+        at the start."""
+        share = self.inhale_pct / 100.0
+        if self._armed:
+            return breath_turn(0.0, share)
+        if self.sweeping:
+            schedule, clock = self.sweep.schedule, self.sweep.clock
+            at = schedule.phase_at(clock)
+            frac = at[1] if at is not None else math.nextafter(1.0, 0.0) if clock >= schedule.total_s else 0.0
+            return breath_turn(frac, share)
+        return breath_turn(self._metronome_frac(), share)
 
-        Only the metronome has one. The heart-locked pacer turns on an *event* — the heart starting to
-        slow — and how far through the current phase you are is precisely what it does not know, so a
-        ring that swelled smoothly there would be animating a guess. It holds still instead, and the note
-        under it already says which of the two is running.
-        """
-        if self.pacer_locked and self.heart.ready:
-            return None
-        half = self.pacer_period / 2.0
-        return (self.elapsed % half) / half
+    def _metronome_frac(self) -> float:
+        """The part of the metronome's cycle that has passed, from the start of the session's clock."""
+        return (self.elapsed % self.pacer_period) / self.pacer_period
 
     def cue_breath(self) -> None:
         """Sound the turn, once, whichever pacer is running. Called every draw; only a change makes a
@@ -788,20 +1025,37 @@ class HRVSession(Scaled, LevelOutputs):
             self.cue(cues.tone_at(PACER_IN_HZ if now else PACER_OUT_HZ))
 
     def pacer_note(self) -> str:
-        if self.pacer_locked and self.heart.ready:
-            return "following the heart — in as it accelerates, out as it slows"
-        if self.pacer_locked:
-            return "waiting for beats before it can follow the heart"
-        return (f"a metronome on a {self.pacer_period:g} s cycle — "
-                f"{60.0 / self.pacer_period:.1f} breaths a minute, {1.0 / self.pacer_period:.3f} Hz — "
-                f"not the instruction, but it survives poor contact")
+        if self.pacer_choice == "sweep":
+            return self._sweep_note()
+        return (f"The metronome breathes at {60.0 / self.pacer_period:.1f} breaths a minute. "
+                f"Its cycle is {seconds_text(self.pacer_period)} s.")
+
+    def _sweep_note(self) -> str:
+        """What the sweep is doing: where it is while it runs, and what it will do before it begins."""
+        if self.sweeping:
+            schedule, k = self.sweep.schedule, self.sweep_breath - 1
+            return (f"Breath {k + 1} of {schedule.breaths}. The pacer breathes at "
+                    f"{schedule.rates[k]:.1f} breaths a minute.")
+        schedule = self.sweep_schedule
+        verb = "decreases" if schedule.end_per_min < schedule.start_per_min else "increases"
+        return (f"The pacer changes its rate at every breath. The rate {verb} from "
+                f"{schedule.start_per_min:g} to {schedule.end_per_min:g} breaths a minute.")
 
     def set_pacer_period(self, seconds: float) -> None:
-        """Clamped into the range and snapped to `PACER_STEP_S`, not out of it — a control that cannot leave
-        its own default is indistinguishable from a disabled one."""
-        lo, hi = PACER_RANGE_S
-        snapped = round(float(seconds) / PACER_STEP_S) * PACER_STEP_S
-        self.pacer_period = float(min(hi, max(lo, snapped)))
+        """Clamped into the range, not out of it — a control that cannot leave its own default is
+        indistinguishable from a disabled one — and otherwise kept as given. A value that is not finite
+        leaves the period where it was."""
+        if not math.isfinite(seconds):
+            return
+        self.pacer_period = clamp_period(seconds)
+
+    def set_inhale(self, percent: float) -> None:
+        """Rounded to a whole percent, which is what the box shows and the note names, then clamped into
+        `INHALE_RANGE`, as the cycle is. A value that is not finite leaves the share where it was."""
+        if not math.isfinite(percent):
+            return
+        lo, hi = INHALE_RANGE
+        self.inhale_pct = float(min(hi, max(lo, round(percent))))
 
     # --- the target frequency ---------------------------------------------------------------
 
@@ -829,8 +1083,11 @@ class HRVSession(Scaled, LevelOutputs):
         the next one — about a second — so the plot, the percentage and the metrics catch up together
         without a gap. The normaliser is deliberately *left alone*: its window holds the same metric in
         the same units, and the values in it were honestly measured, so rebuilding it would silence the
-        feedback for thirty seconds to remove a bias that ages out on its own in two minutes.
+        feedback for thirty seconds to remove a bias that ages out on its own in two minutes. A target
+        that is not finite changes nothing, the metronome included.
         """
+        if not math.isfinite(hz):
+            return
         self.heart.processor.set_target(hz, half_hz)
         self.set_pacer_period(1.0 / self.target_hz)
 
@@ -841,6 +1098,18 @@ class HRVSession(Scaled, LevelOutputs):
         It also carried "62 s to measure" — how long the spectral metrics used to wait at that target.
         Nothing waits now, so the figure would be describing a rule that no longer exists."""
         return f"{self.target_breaths_per_min:.1f} breaths a minute"
+
+
+def _minutes(schedule: SweepSchedule) -> str:
+    """The time of a sweep in whole minutes, for a note."""
+    minutes = round(schedule.total_s / 60.0)
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
+def clamp_period(seconds: float) -> float:
+    """The cycle that `set_pacer_period` keeps for `seconds`: the same, inside its range."""
+    lo, hi = PACER_RANGE_S
+    return float(min(hi, max(lo, float(seconds))))
 
 
 BREATHE_HELP = (
@@ -855,19 +1124,17 @@ BREATHE_HELP = (
     "**What stays fixed.** Coherence, the coherence ratio and LF/HF use fixed published bands, and do "
     "not move with the target. This keeps them comparable across sessions. Coherence finds the peak on "
     "its own, so use it to search for your own rate.\n\n"
-    "**How to find your rate.** Set the **pacer** to **metronome**. Set the cycle to "
-    f"{PACER_PERIOD_S:g} s, which is 6 breaths a minute. Make the cycle longer in steps of "
-    f"{PACER_STEP_S:g} s, and breathe with it at each step. "
-    "Watch for the point where the tachogram's swing and the spectral peak are both "
-    f"largest. Set the **target** to that rate. The target box moves in steps of {TARGET_STEP_HZ:g} Hz. "
-    "Every number on the screen updates from the beats already recorded, "
-    "and it settles as more beats arrive.\n\n"
+    "**How to find your rate.** Choose **sweep** in the pacer row, and read below what it does. You can "
+    "also type the **target** in its box. The box "
+    f"moves in steps of {TARGET_STEP_HZ:g} Hz. Every number on the screen updates from the beats already "
+    "recorded, and it settles as more beats arrive.\n\n"
     "**The band** sets how exact a match must be: the sharpness metric scores only the power inside it. "
     "±0.02 Hz is about one breath a minute either side.\n\n"
-    "**The pacer** tells you when to breathe, not how fast. 'Follow the heart' matches the written "
-    "instruction: breathe in as the heart rate rises, out as it falls. It needs beats to follow, so it "
-    "switches to the metronome, shown in amber, when there are none. The metronome's cycle follows the "
-    "target, and you can move the cycle on its own without moving the target.\n\n"
+    "**The pacer** tells you when to breathe. Choose one of two. The cycle of the **metronome** "
+    "follows the target, and you can move the cycle on its own without moving the target. The "
+    "**inhale** setting is the share of each breath that is the inhale, and the exhale is the rest. It "
+    "works with the two pacers.\n\n"
+    + SWEEP_HELP + "\n\n" +
     f"**The sound** is a tone at each turn: {PACER_IN_HZ:g} Hz going in, {PACER_OUT_HZ:g} Hz going out. "
     "You can follow the pitch instead of watching the ring."
 )
@@ -1097,9 +1364,11 @@ def view(page: ft.Page, session: HRVSession, toolbar: chrome.Toolbar,
     level_arc = cv.Canvas(shapes=[], width=ARC_SIDE, height=ARC_SIDE)
     pacer_note = ft.Text("", size=t.SMALL, color=t.FAINT)
     pacer_rows = ft.Column(spacing=12)
+    built: list = [None]    # the choice of the pacer and whether the sweep shows, that the rows were built for
+    sweep_ui = SweepView(page, session, on_target=lambda: build_pacer())
 
-    def set_locked(locked: bool) -> None:
-        session.pacer_locked = locked
+    def set_pacer(label: str) -> None:
+        session.choose_pacer(label)
         build_pacer()
 
     def set_period(seconds: float) -> None:
@@ -1108,6 +1377,18 @@ def view(page: ft.Page, session: HRVSession, toolbar: chrome.Toolbar,
 
     def set_sound(on: bool) -> None:
         session.pacer_sound = on
+        build_pacer()
+
+    def set_inhale(percent: float) -> None:
+        session.set_inhale(percent)
+        build_pacer()
+
+    def set_sweep_start(rate: float) -> None:
+        session.set_sweep_start(rate)
+        build_pacer()
+
+    def set_sweep_end(rate: float) -> None:
+        session.set_sweep_end(rate)
         build_pacer()
 
     def set_target(hz: float) -> None:
@@ -1120,27 +1401,51 @@ def view(page: ft.Page, session: HRVSession, toolbar: chrome.Toolbar,
 
     def build_pacer() -> None:
         lo, hi = PACER_RANGE_S
+        choice = session.pacer_choice
+        built[0] = (choice, sweep_ui.present, session.sweep_start, session.sweep_end)
         rows = [
+            # One group with no gap of its own: the three choices and the label are a line of the panel's
+            # width, and the padding of each choice is the gap between two of them.
             labelled("pacer",
-                     pill("follow the heart", session.pacer_locked, lambda _e: set_locked(True)),
-                     pill("metronome", not session.pacer_locked, lambda _e: set_locked(False)),
+                     ft.Row([pill(label, choice == label, (lambda label_=label: lambda _e: set_pacer(label_))())
+                             for label in PACERS], spacing=0),
                      note="", width=54),
         ]
-        # Only under the metronome. It was shown under both, on the argument that the locked pacer falls
-        # back to it while waiting for beats — but a control that does nothing in the mode you are in is
-        # a question about a mode you did not pick, and the fallback is over as soon as beats arrive.
-        if not session.pacer_locked:
+        # Only under the metronome: a sweep sets the breath length.
+        if choice == "metronome":
             rows.append(labelled(
                 "cycle",
                 num_box(session.pacer_period, set_period, suffix="s", step=PACER_STEP_S,
-                        low=lo, high=hi),
-                note=f"{60.0 / session.pacer_period:.1f} breaths a minute · from the target"))
+                        low=lo, high=hi, width=54, places=2),
+                note=f"{60.0 / session.pacer_period:.1f} breaths a minute"))
+        # The two ends are shown while a sweep is chosen: it sets the breath length itself, so it has
+        # no cycle, and what it has instead is where it starts and where it ends.
+        if choice == "sweep":
+            schedule = session.sweep_schedule
+            rows += [labelled(
+                "range",
+                num_box(session.sweep_start, set_sweep_start, step=SWEEP_RATE_STEP, low=SWEEP_RATE_RANGE[0],
+                        high=SWEEP_RATE_RANGE[1], width=54, places=2),
+                ft.Text("to", size=t.SMALL, color=t.FAINT),
+                num_box(session.sweep_end, set_sweep_end, step=SWEEP_RATE_STEP, low=SWEEP_RATE_RANGE[0],
+                        high=SWEEP_RATE_RANGE[1], width=54, places=2, suffix="/min"), width=54),
+                # Under the boxes and not beside them: the two boxes take most of the column.
+                ft.Row([ft.Container(width=54),
+                        ft.Text(f"{schedule.breaths} breaths · about {_minutes(schedule)}",
+                                size=t.SMALL, color=t.FAINT, expand=True)], spacing=6)]
+        # The share acts under every pacer: each of them runs on a clock.
+        rows.append(labelled(
+            "inhale",
+            num_box(session.inhale_pct, set_inhale, suffix="%", step=INHALE_STEP_PCT,
+                    low=INHALE_RANGE[0], high=INHALE_RANGE[1], places=0),
+            note=f"of the breath · exhale {100.0 - session.inhale_pct:g}%"))
         rows += [
             labelled("sound",
                      pill("on", session.pacer_sound, lambda _e: set_sound(True)),
                      pill("off", not session.pacer_sound, lambda _e: set_sound(False)),
                      note="a tone at each turn", width=54),
             pacer_note,
+            *([sweep_ui.body] if sweep_ui.present else []),
             # **Last, and quiet.** The target is the frequency every spectral number is scored against,
             # which makes it the most consequential control here and the least often touched: it is found
             # once, over a session or two, and then persists. Put at the top it pushed the breathing ring
@@ -1220,6 +1525,9 @@ def view(page: ft.Page, session: HRVSession, toolbar: chrome.Toolbar,
 
     def draw() -> None:
         session.tick()
+        if (session.pacer_choice, sweep_ui.present, session.sweep_start, session.sweep_end) != built[0]:
+            build_pacer()
+        sweep_ui.refresh()
         # The chip answers "where are these numbers coming from", and on this screen the answer is never
         # the amplifier. It read "no device" beside a connected pulse sensor, which is true of the
         # amplifier and useless as an answer — and a grey "no device" beside a working instrument reads
@@ -1259,19 +1567,12 @@ def view(page: ft.Page, session: HRVSession, toolbar: chrome.Toolbar,
         # **The ring breathes at the tempo it is asking for.** Words that flip every five seconds tell you
         # what to do but not how far through it you are, so the breath ends up led by the word and not by
         # the pace — you inhale in two seconds and wait. A circle that grows for the whole inhale and
-        # shrinks for the whole exhale is the instruction and the pace in one object. Only the metronome
-        # has a phase to animate; see `breath_phase`.
+        # shrinks for the whole exhale is the instruction and the pace in one object, under every pacer.
         phase = session.breath_phase()
-        side = (RING_SIDE if phase is None else
-                RING_MIN + (RING_SIDE - RING_MIN) * (phase if inhale else 1.0 - phase))
+        side = RING_MIN + (RING_SIDE - RING_MIN) * (phase if inhale else 1.0 - phase)
         pacer_ring.width = pacer_ring.height = side
         pacer_ring.border_radius = side / 2
         pacer_note.value = session.pacer_note()
-        # **Amber when "follow the heart" is not following the heart.** With no beats it falls back to the
-        # clock, which is right — but the fallback is invisible in the pacer's behaviour, so the mode looked
-        # broken rather than waiting. The words said so all along, in the same grey as everything else.
-        waiting = session.pacer_locked and not session.heart.ready
-        pacer_note.color = t.WARN if waiting else t.FAINT
         page.update()
 
     # No amplifier channels on this screen, so the count in the toolbar is a control for a device

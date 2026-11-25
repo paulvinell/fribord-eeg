@@ -64,6 +64,11 @@ SCREENS = {"AMP": "amplitude_view", "A-T": "at_view", "CFC": "cfc_view", "ILF": 
 # of the faults have been, because it is the state nobody opens the app to look at.
 STATES = ("cold", "fed")
 SPINDLE_STATES = ("spindle", "search", "search-early")
+# The HRV screen: cold, the BREATHE panel under the metronome with the inhale row, and the sweep as a pacer
+# choice in the states a person meets, each on a strap unless the name says another source.
+HRV_STATES = ("cold", "metronome", "sweep-armed", "sweep-armed-wide", "sweep-no-source", "sweep-running",
+              "sweep-quickening", "sweep-held", "sweep-clear", "sweep-not-clear", "sweep-quickening-clear",
+              "sweep-simulated", "sweep-in-step")
 
 SHOTS = [("launcher", "", 0)] + [
     (code, state, channels)
@@ -72,7 +77,7 @@ SHOTS = [("launcher", "", 0)] + [
     for channels in ((1, 4) if code == "PAC" else (2,))
 ] + [
     # The spindle card, fed with spindles planted on ch0; a search over the whole run; a search 3 s old.
-    ("AMP", state, 2) for state in SPINDLE_STATES] + [("HRV", "cold", 0)] + [("HEG", state, 0) for state in STATES] + [   # their own devices drive them
+    ("AMP", state, 2) for state in SPINDLE_STATES] + [("HRV", state, 0) for state in HRV_STATES] + [("HEG", state, 0) for state in STATES] + [   # their own devices drive them
     ("PUPIL", state, 0) for state in STATES] + [
     # The arcs at a typed **succeeds at**, in an effort and at a verdict, on the two other trial programs.
     (code, state, 0) for code in ("PUPIL", "HEG") for state in ("arc", "verdict")] + [
@@ -132,6 +137,8 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
             session = _scp_feed(module, state, channels, **heart_kwargs)
         except ScpWaits as e:
             return _waits_control(state, channels, str(e))
+    elif code == "HRV" and state != "cold":
+        session = _hrv_sweep(module, state)
     else:
         session = module.session_for(BY_CODE[code], source=ReplaySource(str(BENCH_OK), realtime=False),
                                      channels=channels, **heart_kwargs)
@@ -163,6 +170,8 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         session.redraw()
     elif state == "fed" and code == "PAIR":
         session.redraw()
+    elif code == "HRV" and state != "cold":
+        session.redraw()
     elif state in ("fed", *SPINDLE_STATES):
         # Fed here rather than by the session's own thread: the whole run in a moment, so a settled
         # screen costs no wall clock and the shot of one is reproducible.
@@ -192,6 +201,79 @@ def build_screen(code: str, state: str, channels: int, page: ft.Page):
         session.redraw()
     control._shot_redraw = session.redraw
     return control
+
+
+def _hrv_sweep(module, state: str):
+    """The HRV screen in one state of the sliding rate search. The heart is a planted one that breathes with
+    the pacer, its beats pushed through the real processor; the session runs on a clock of its own, so a
+    whole sweep costs no wall clock. `sweep-armed` waits for the play button, `sweep-clear` ends with a peak
+    at 5.4 breaths a minute, and `sweep-not-clear` on a heart that does not follow the pacer. The states with
+    `wide` and `quickening` set the range, and `sweep-quickening-clear` has a heart rate that falls."""
+    import time
+
+    from conftest import SWEEP_EPOCH, SWEEP_MONO0, pacer_beats
+    from nfb.hrv import Beat
+    from nfb_console.inputs import HeartChoice
+
+    kind = {"sweep-no-source": "off", "sweep-simulated": "simulator"}.get(state, "strap")
+    session = module.HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind=kind))
+    session.cue = lambda *_a, **_k: None
+    clock = [0.0]
+    session.now = lambda: SWEEP_MONO0 + clock[0]
+    if state == "metronome":
+        session.set_inhale(40.0)
+    if state == "sweep-no-source":
+        session.choose_pacer("sweep")
+        session.tick()
+        return session
+    rate_range = {"sweep-armed-wide": (8.0, 3.0), "sweep-quickening": (4.25, 6.75),
+                  "sweep-quickening-clear": (4.25, 6.75)}.get(state)
+    if rate_range:
+        session.set_sweep_range(*rate_range)
+    schedule = session.sweep_schedule
+    falling = state == "sweep-quickening-clear"
+    swing, noise = ((lambda rate: 20.0), 25.0) if state == "sweep-not-clear" else (
+        (lambda rate: 20.0 + 60.0 * np.exp(-0.5 * ((rate - 5.4) / 0.35) ** 2)), 0.0)
+    if state == "sweep-in-step":     # a heart that has a resonance at 5.4, so the two marks come apart a little
+        from resonant_heart import sweep_beats
+
+        stamps, rr = sweep_beats(5.4, 1, schedule, noise_ms=12.0)
+    else:
+        stamps, rr, _ = pacer_beats(schedule, swing, noise_ms=noise, mean_ms=750.0 if falling else 900.0,
+                                    mean_end_ms=1090.0 if falling else None,
+                                    seed=0 if state == "sweep-not-clear" else 3)
+    pushed = [0]
+
+    def look(at: float) -> None:
+        clock[0] = at
+        while pushed[0] < len(stamps) and stamps[pushed[0]] <= at:
+            i = pushed[0]
+            beat = Beat(t=SWEEP_EPOCH + float(stamps[i]), hr_bpm=60000.0 / float(rr[i]),
+                        rr_intervals=[float(rr[i]) / 1000.0], contact=True)
+            session.heart.state = session.heart.processor.push(beat)
+            pushed[0] += 1
+        session.heart.seen_at = time.monotonic()
+        session.tick()
+
+    look(0.0)
+    if state == "metronome":
+        return session
+    session.choose_pacer("sweep")
+    if state in ("sweep-armed", "sweep-armed-wide"):
+        look(0.0)
+        return session
+    session.toggle_pause()
+    look(0.0)
+    assert session.sweeping, session.sweep_hold()
+    until = schedule.total_s + 60.0 if state in ("sweep-clear", "sweep-not-clear", "sweep-in-step",
+                                                  "sweep-quickening-clear") else 300.0
+    while clock[0] < until and session.sweeping:
+        look(clock[0] + 0.8)
+    if state == "sweep-held":
+        session.toggle_pause()
+        for _ in range(3):
+            look(clock[0] + 0.8)
+    return session
 
 
 def _paired_session(module):

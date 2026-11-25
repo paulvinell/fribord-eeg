@@ -19,11 +19,29 @@ from . import theme as t
 from .feedback import READS
 
 
+def next_multiple(value: float, delta: float) -> float:
+    """The multiple of `|delta|` that follows `value` in the direction of `delta`: one step on from a
+    multiple, and the nearer multiple from a value between two."""
+    size = abs(delta)
+    at = value / size
+    whole = math.floor(at + 1e-9) + 1 if delta > 0 else math.ceil(at - 1e-9) - 1
+    return whole * size
+
+
+def seconds_text(seconds: float) -> str:
+    """A time to the hundredth of a second, with no zeros at its end."""
+    return f"{seconds:.2f}".rstrip("0").rstrip(".")
+
+
 def num_box(value: float, on_set: Callable[[float], None], width: int = 46,
             suffix: str = "", step: float = 1.0, low: float | None = None,
             high: float | None = None,
             on_step: Callable[[float], None] | None = None, places: int | None = None) -> ft.Control:
-    """A number with a stepper: type it, or click the arrows to move by `step`.
+    """A number with a stepper: type it, or click the arrows to move to the next multiple of `step`.
+
+    A typed number is kept as typed, inside the bounds: the step belongs to the arrows. From a number
+    between two multiples an arrow goes to the nearer one in its direction, so the arrows always give
+    round numbers and never undo an entry.
 
     `on_step` splits those two apart, and a band edge is why. Typing an edge sets *that* edge, because that
     is what typing a number into a box means. Nudging one should **slide the whole band** and keep its
@@ -99,7 +117,7 @@ def num_box(value: float, on_set: Callable[[float], None], width: int = 46,
                             width=16, height=15, alignment=ft.Alignment.CENTER,
                             border=ft.Border.all(1, t.BORDER),
                             on_click=lambda _e: (on_step(delta) if on_step is not None
-                                                 else apply(current() + delta)))
+                                                 else apply(next_multiple(current(), delta))))
 
     def show(raw: float) -> None:
         if field.value == shown[0]:

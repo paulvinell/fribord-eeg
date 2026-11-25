@@ -35,6 +35,29 @@ def test_blur_without_edit_calls_nothing():
     assert calls == [7.0], "and only once: the text has not changed since"
 
 
+def test_a_typed_number_is_kept_and_the_arrows_go_to_the_next_multiple_of_the_step():
+    """Typing sets the number that was typed. An arrow moves one step from a multiple of the step, and from
+    a number between two multiples to the nearer one in its direction."""
+    calls: list[float] = []
+    box = num_box(5.0, calls.append, step=0.5, low=0.0, high=10.0, places=2)
+    field = _field(box)
+    up, down = (next(c for c in walk(box) if isinstance(c, ft.Container) and isinstance(c.content, ft.Text)
+                     and c.content.value == glyph) for glyph in "▲▼")
+    up.on_click(None)
+    assert calls[-1] == 5.5
+    field.value = "7.3"
+    field.on_submit(None)
+    assert calls[-1] == 7.3 and float(field.value) == 7.3
+    up.on_click(None)
+    assert calls[-1] == 7.5
+    field.value = "7.3"
+    field.on_submit(None)
+    down.on_click(None)
+    assert calls[-1] == 7.0
+    down.on_click(None)
+    assert calls[-1] == 6.5
+
+
 def test_no_number_box_on_a_trial_screen_commits_an_unedited_text():
     """Every box on the three trial screens, each blurred with no edit: the run is the same run and every
     setting has the value it had."""

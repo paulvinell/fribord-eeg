@@ -650,6 +650,19 @@ def built_screen(module: str, code: str, channels: int, fed: bool):
     return _built[key][:2]
 
 
+_made: dict[object, tuple] = {}
+
+
+def built_once(key, make):
+    """A screen that a test file builds by its own recipe, shared by the tests that only read it and
+    stopped with the others. `make` returns `(page, control, session, extra)`, and so does this."""
+    if key not in _made:
+        _made[key] = make()
+    return _made[key]
+
+
 def stop_built_screens() -> None:
     while _built:
         _built.popitem()[1][2].stop()
+    while _made:
+        _made.popitem()[1][2].stop()

@@ -13,7 +13,7 @@ import random
 import numpy as np
 import pytest
 
-from nfb.hrv import (DEFAULT_METRIC, HRVProcessor, NARROW_BAND, SimulatedBeats, beat_source,
+from nfb.hrv import (Beat, DEFAULT_METRIC, HRVProcessor, NARROW_BAND, SimulatedBeats, beat_source,
                      parse_hr_measurement)
 
 
@@ -294,30 +294,6 @@ def test_batched_intervals_are_spread_backwards_in_time():
     assert len(state.age_s) == 3
 
 
-def test_acceleration_is_reported_because_the_pacer_is_locked_to_it():
-    """"only breath in when the heart rate is accelerating and out when the heart slows down" — so the
-    cue needs the phase, not a metronome.
-
-    A ramp rather than a single faster beat, because one beat is not a phase: the detector requires a
-    retrace of a third of the recent swing and refuses to turn twice inside 1.5 s, which is what stops it
-    flip-flopping on jitter. The rise here is four seconds, the shortest half-breath the pacer offers.
-    """
-    from nfb.hrv import Beat
-
-    processor = HRVProcessor()
-    state = None
-    t = 1000.0
-    for rate in (60.0, 62.0, 66.0, 70.0, 74.0, 76.0):        # accelerating, ~4 s of beats
-        t += 60.0 / rate
-        state = processor.push(Beat(t, rate, [60.0 / rate]))
-    assert state.accelerating, "the rate has climbed for four seconds: this is an inhale"
-
-    for rate in (74.0, 70.0, 66.0, 62.0, 58.0, 56.0):
-        t += 60.0 / rate
-        state = processor.push(Beat(t, rate, [60.0 / rate]))
-    assert not state.accelerating, "and now it is falling"
-
-
 def test_the_factory_rejects_an_unknown_kind():
     with pytest.raises(ValueError):
         beat_source("telepathy")
@@ -487,39 +463,40 @@ def test_the_metronome_period_is_configurable_within_its_range():
     is the frequency the protocol aims the spectral peak at — so the default was right and the problem was
     that it could not move. A resonant frequency is individual, commonly 4.5–7 breaths a minute.
 
-    The range is 6–30 s. The step is **half a second**, not a whole second: at this end of the range a second is
-    coarse — 10 s to 11 s moves the paced rate from 6.0 to 5.5 breaths a minute, stepping over 5.7 and 5.8.
+    The range is 6–30 s, and inside it a cycle is kept as given: the step belongs to the arrows of the box.
     """
-    from nfb_console.hrv_view import HRVSession, PACER_PERIOD_S, PACER_RANGE_S, PACER_STEP_S
+    from nfb_console.hrv_view import HRVSession, PACER_PERIOD_S, PACER_RANGE_S
     from nfb_console.inputs import HeartChoice
     from nfb_console.protocols import BY_CODE
 
     session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
     try:
         assert session.pacer_period == PACER_PERIOD_S == 10.0
-        session.pacer_locked = False        # the clock pacer, so `breathe_in` reads the period
         session.set_pacer_period(12)
         assert session.pacer_period == 12.0
         assert "12 s" in session.pacer_note() and "5.0 breaths a minute" in session.pacer_note()
         assert "metronome" in session.pacer_note(), "it must not pass for the heart-locked cue"
-        # clamped *into* the range rather than out of it, and snapped to the half second
+        # clamped *into* the range rather than out of it
         session.set_pacer_period(1.0)
         assert session.pacer_period == PACER_RANGE_S[0] == 6.0
         session.set_pacer_period(999.0)
         assert session.pacer_period == PACER_RANGE_S[1] == 30.0
-        assert PACER_STEP_S == 0.5
-        session.set_pacer_period(10.4)
-        assert session.pacer_period == 10.5
-        session.set_pacer_period(10.6)
-        assert session.pacer_period == 10.5
-        session.set_pacer_period(10.8)
-        assert session.pacer_period == 11.0
-        # the half second is reachable, which a whole-second step made it not
-        session.set_pacer_period(10.5)
-        assert session.pacer_period == 10.5
-        assert "5.7 breaths a minute" in session.pacer_note()
+        # a cycle between two steps of the arrows runs as it was given, and the note names it
+        session.set_pacer_period(10.37)
+        assert session.pacer_period == 10.37
+        assert "10.37 s" in session.pacer_note() and "5.8 breaths a minute" in session.pacer_note()
     finally:
         session.stop()
+
+
+def test_the_snapshot_says_when_the_source_gave_its_newest_beat():
+    """A source that gives a beat later than it happened says when, and the snapshot carries that on, so a
+    reader can tell the age of the beat from the lateness of its own look."""
+    from nfb.hrv import Beat, HRVProcessor
+
+    p = HRVProcessor()
+    assert p.push(Beat(t=100.0, hr_bpm=60.0, rr_intervals=[1.0])).arrived is None
+    assert p.push(Beat(t=101.0, hr_bpm=60.0, rr_intervals=[1.0], arrived=101.7)).arrived == 101.7
 
 
 def test_the_target_frequency_is_settable_from_the_screen_and_takes_the_metronome_with_it():
@@ -527,8 +504,8 @@ def test_the_target_frequency_is_settable_from_the_screen_and_takes_the_metronom
     could pace somebody at their own resonance and then mark them down for reaching it.
 
     They are one quantity said two ways, so moving the target moves the metronome; the reverse is not
-    wired up, because the cycle is snapped to half a second and feeding that back would drag the target
-    off wherever it was set."""
+    wired up, because the cycle is clamped and feeding that back would drag the target off wherever it was
+    set."""
     from nfb_console.hrv_view import HRVSession
     from nfb_console.inputs import HeartChoice
     from nfb_console.protocols import BY_CODE
@@ -540,7 +517,7 @@ def test_the_target_frequency_is_settable_from_the_screen_and_takes_the_metronom
         session.set_target_hz(0.065)
         assert session.target_hz == 0.065
         assert session.heart.processor.target_hz == 0.065, "one copy, and it lives on the processor"
-        assert session.pacer_period == 15.5, "1/0.065 is 15.4 s, snapped to the pacer's half second"
+        assert session.pacer_period == pytest.approx(1 / 0.065), "the metronome breathes at the target"
         assert "3.9 breaths a minute" in session.target_note()
 
         # the band moves independently, and both are clamped
@@ -592,7 +569,6 @@ def test_the_pacer_period_actually_changes_the_cue():
 
     session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
     try:
-        session.pacer_locked = False
         session.set_pacer_period(20)
         session._accumulated = 0.0
         assert session.breathe_in(), "the first half of the cycle is the inhale"
@@ -643,7 +619,6 @@ def test_stopping_hrv_and_re_entering_it_keeps_the_setup():
     first = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
     try:
         first.set_pacer_period(13.0)
-        first.pacer_locked = False
         first.set_metric("rmssd")
         first.set_strategy("zscore", window_s=90.0)
         first.feedback.music.source = "shepard"
@@ -652,7 +627,7 @@ def test_stopping_hrv_and_re_entering_it_keeps_the_setup():
         second = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
         try:
             second.adopt(first)
-            assert second.pacer_period == 13.0 and second.pacer_locked is False
+            assert second.pacer_period == 13.0
             assert second.metric == "rmssd"
             assert second.strategy_id == "zscore" and second.strategy.window_s == 90.0
             assert second.feedback.music.source == "shepard"
@@ -747,43 +722,6 @@ def test_a_dropout_ends_the_spectrum_window_instead_of_becoming_a_ramp():
             "the dropout's ramp must not masquerade as sympathetic drive"
 
 
-def test_the_breathing_cue_follows_the_breath_not_the_jitter():
-    """The cue is the whole instruction — breathe in while the rate climbs — so it must reverse when the
-    breath does, about twelve times a minute at 0.1 Hz, and not when the beats wobble.
-
-    **Across swing depth and jitter, not at one operating point**, because that is where the version this
-    replaced failed. Its fixed 1.5 bpm band on the raw per-beat rate held at 12 reversals a minute on a
-    clean signal and went to 26 at a shallow swing with 25 ms of RR jitter — worst on exactly the resting
-    signal a beginner has, and the reason this reads as flip-flopping on a real sensor. The detector
-    — three-beat smoothing, a threshold scaled to the person's own
-    swing, a minimum interval and a stuck timeout — measures 10-12 over the whole grid below.
-    """
-    import random
-
-    from nfb.hrv.beats import HRVProcessor, Beat
-
-    def reversals(depth_s: float, jitter_s: float, seconds: float = 180.0) -> float:
-        rng = random.Random(5)
-        proc = HRVProcessor()
-        flips, last, elapsed = 0, None, 0.0
-        while elapsed < seconds:
-            rr = max(0.35, 0.92 + depth_s * math.sin(2 * math.pi * 0.1 * elapsed)
-                     + rng.gauss(0.0, jitter_s))
-            elapsed += rr
-            state = proc.push(Beat(t=1000.0 + elapsed, hr_bpm=60.0 / rr, rr_intervals=[rr]))
-            if last is not None and state.accelerating != last:
-                flips += 1
-            last = state.accelerating
-        return flips / (seconds / 60.0)
-
-    for depth in (0.02, 0.05, 0.08, 0.14, 0.20):
-        for jitter in (0.004, 0.012, 0.025):
-            rate = reversals(depth, jitter)
-            assert 9.0 <= rate <= 14.0, (
-                f"{rate:.1f} reversals/min at swing {depth:g}s, jitter {jitter * 1000:.0f}ms — "
-                f"against the breath's 12")
-
-
 def test_time_domain_metrics_do_not_difference_across_withheld_beats():
     """Withholding is right for the spectrum and used to inflate RMSSD and pNN50: the accepted-beat
     array closes up, and np.diff produced differences between intervals that were never neighbours —
@@ -857,3 +795,176 @@ def test_no_contact_means_no_training_data():
     state = proc.push(Beat(1001.0, 60.0, [1.0], contact=False))
     assert len(proc._live) == before, "no-contact intervals stay out of the buffers"
     assert state.contact is False, "and the screen is told why"
+
+
+def _good_beats(first: float, count: int):
+    return [Beat(first + i, 60.0, [1.0 + 0.05 * math.sin(first + i)]) for i in range(count)]
+
+
+@pytest.mark.parametrize("bad", [
+    Beat(math.nan, 60.0, [1.0]), Beat(math.inf, 60.0, [1.0]), Beat(-math.inf, 60.0, [1.0]),
+    Beat(1020.5, 60.0, [math.nan]), Beat(1020.5, 60.0, [math.inf]), Beat(1020.5, 60.0, [-math.inf]),
+    Beat(1020.5, 60.0, [1.0, math.nan])],
+    ids=["nan stamp", "inf stamp", "-inf stamp", "nan interval", "inf interval", "-inf interval",
+         "nan interval in a packet"])
+def test_a_beat_that_is_not_finite_is_refused_and_the_beats_after_it_still_flow(bad):
+    """A stamp or an interval that is not finite never reaches a buffer, whatever it is, and the beats
+    that follow fill the tachogram exactly as they do when it did not come."""
+    refused, control = HRVProcessor(), HRVProcessor()
+    for beat in _good_beats(1000.0, 20):
+        refused.push(beat)
+        control.push(beat)
+    refused.push(bad)
+    for beat in _good_beats(1021.0, 20):
+        got, want = refused.push(beat), control.push(beat)
+    assert got.tachogram == want.tachogram and got.age_s == want.age_s
+    assert np.all(np.isfinite(got.tachogram)) and np.all(np.isfinite(got.age_s))
+    assert all(math.isfinite(v) for v in (got.rr_s, got.rmssd_ms, got.sdnn_ms, got.pnn50_pct))
+    assert len(got.tachogram) > 10
+
+
+def test_a_target_that_is_not_finite_is_ignored_and_a_far_one_is_clamped():
+    """`set_target` keeps the old target and the old band for a value that is not finite, and moves to
+    the nearest end of the range for one that is finite and far."""
+    from nfb.hrv import NARROW_HALF_RANGE_HZ, TARGET_RANGE_HZ
+
+    proc = HRVProcessor()
+    proc.set_target(0.08, NARROW_HALF_RANGE_HZ[1])
+    for bad in (math.nan, math.inf, -math.inf):
+        proc.set_target(bad)
+        assert (proc.target_hz, proc.narrow_half_hz) == (0.08, NARROW_HALF_RANGE_HZ[1])
+        proc.set_target(0.09, bad)
+        assert (proc.target_hz, proc.narrow_half_hz) == (0.09, NARROW_HALF_RANGE_HZ[1])
+        proc.set_target(0.08)
+    proc.set_target(1e-9)
+    assert proc.target_hz == TARGET_RANGE_HZ[0]
+    proc.set_target(1e9)
+    assert proc.target_hz == TARGET_RANGE_HZ[1]
+
+
+# --- when a beat happened, against when its packet arrived ------------------------------------------------
+
+def _strap(seed: int, seconds: float = 150.0, lose=(), set_at: float | None = None, set_by: float = 0.0):
+    """A strap that notifies once a second. Beats at their true times, a breath's swing on the interval, and
+    one packet a second with the intervals of the beats since the last: `(arrival, intervals, last beat)`.
+    `lose` names notifications that never arrive, and the wall clock moves by `set_by` at `set_at`."""
+    rng = np.random.default_rng(seed)
+    t, beats = 0.3, []
+    while t < seconds:
+        rr = 0.95 + 0.08 * math.sin(2 * math.pi * t / 11.0) + rng.normal(0.0, 0.02)
+        t += rr
+        beats.append((t, rr))
+    packets, i = [], 0
+    for n in range(1, int(seconds)):
+        mine = []
+        while i < len(beats) and beats[i][0] <= n:
+            mine.append(beats[i])
+            i += 1
+        if n in lose or not mine:
+            continue
+        moved = set_by if set_at is not None and n >= set_at else 0.0
+        packets.append((n + 0.01 + abs(rng.normal(0.0, 0.03)) + moved, [rr for _, rr in mine], mine[-1][0] + moved))
+    return packets
+
+
+def _late(packets, since: float) -> np.ndarray:
+    """How late the timeline puts the last beat of each packet that arrives after `since`."""
+    from nfb.hrv.beats import BeatTimeline
+
+    timeline = BeatTimeline()
+    out = [(arrived, timeline.last_beat(arrived, intervals) - true) for arrived, intervals, true in packets]
+    return np.array([late for arrived, late in out if arrived > since])
+
+
+def test_a_beat_gets_the_time_it_happened_and_not_the_time_its_packet_arrived():
+    """A strap delivers a beat up to a second after it happened. The arrivals are half a second late and
+    scatter; the times that the beats get are near the beats and scatter far less."""
+    for seed in range(5):
+        packets = _strap(seed)
+        arrivals = np.array([arrived - true for arrived, _, true in packets if arrived > 30.0])
+        assert arrivals.mean() > 0.35 and arrivals.std() > 0.2, "the strap of this test delivers late"
+        late = _late(packets, 30.0)
+        assert abs(late.mean()) < 0.1 and late.std() < 0.08, (seed, late.mean(), late.std())
+
+
+def test_the_processor_gives_its_beats_those_times():
+    """The stamps of the tachogram are the times of the beats, through `push`."""
+    packets = _strap(1)
+    processor = HRVProcessor(reject_artifacts=False)
+    for arrived, intervals, last in packets:
+        state = processor.push(Beat(t=arrived, hr_bpm=60.0, rr_intervals=intervals))
+        newest = arrived - state.age_s[-1]
+        if arrived > 30.0:
+            assert abs(newest - last) < 0.25, (arrived, newest - last)
+
+
+def test_no_beat_is_put_before_the_beat_that_it_follows_while_the_times_settle():
+    """The first packet is put at its arrival, and the place is corrected as sooner packets arrive. Each
+    correction is a part of an interval, so the times still rise and keep most of each interval."""
+    from nfb.hrv.beats import BeatTimeline
+
+    for seed in range(5):
+        timeline, before = BeatTimeline(), None
+        for arrived, intervals, _ in _strap(seed, seconds=60.0):
+            at = timeline.last_beat(arrived, intervals)
+            if before is not None:
+                assert at - before >= 0.7 * sum(intervals), (seed, arrived, at - before, sum(intervals))
+            before = at
+
+
+@pytest.mark.parametrize("lose", [{60}, {60, 61, 62, 63, 64}])
+def test_packets_that_never_arrive_do_not_leave_the_times_early(lose):
+    """Lost intervals leave the running sum behind the beats. The timeline starts again and is back near the
+    beats well inside a minute, where the sum alone would stay early by what was lost."""
+    for seed in range(5):
+        late = _late(_strap(seed, lose=lose), 105.0)
+        assert np.all(np.abs(late) < 0.25), (seed, late.min(), late.max())
+
+
+@pytest.mark.parametrize("set_by", [7.0, -7.0])
+def test_a_wall_clock_that_is_set_moves_the_times_with_it_at_once(set_by):
+    """After the clock is set, a beat's time is on the new clock within a second from the first packet on."""
+    for seed in range(3):
+        late = _late(_strap(seed, set_at=60, set_by=set_by), 60.0)
+        assert np.all(np.abs(late[:5]) < 1.3), (seed, late[:5])
+        assert np.all(np.abs(late[-20:]) < 0.25), (seed, late[-20:])
+
+
+def test_a_short_loss_that_no_single_arrival_shows_is_gone_after_the_window():
+    """Packets that arrive exactly with their last beat, then half a second of intervals goes missing: every
+    later packet looks half a second late, which a notification can be. The times are early by that until
+    the arrivals from before the loss are forgotten, and correct after it."""
+    from nfb.hrv.beats import BeatTimeline
+
+    timeline, t = BeatTimeline(), 0.0
+    for _ in range(30):
+        t += 1.0
+        assert timeline.last_beat(t, [0.5, 0.5]) == pytest.approx(t)
+    t += 1.0
+    assert timeline.last_beat(t, [0.5]) == pytest.approx(t - 0.5), "early by the lost interval"
+    for _ in range(int(BeatTimeline.WINDOW_S) + 10):
+        t += 1.0
+        at = timeline.last_beat(t, [0.5, 0.5])
+    assert at == pytest.approx(t)
+
+
+def test_a_source_that_stamps_each_beat_keeps_its_stamps():
+    from nfb.hrv.beats import BeatTimeline
+
+    timeline, t = BeatTimeline(), 10.0
+    for rr in [0.9, 1.0, 1.1, 0.8, 1.2] * 6:
+        t += rr
+        assert timeline.last_beat(t, [rr]) == pytest.approx(t)
+
+
+def test_a_packet_without_contact_ends_the_run_of_the_times():
+    """Its intervals are not beats, so a second of beats is missing from the sum, which is less than a late
+    notification can be. The first beat after it is put at its arrival again, not a second early."""
+    processor = HRVProcessor(reject_artifacts=False)
+    t = 0.0
+    for _ in range(10):
+        t += 1.0
+        processor.push(Beat(t=t, hr_bpm=120.0, rr_intervals=[0.5, 0.5]))
+    processor.push(Beat(t=t + 1.0, hr_bpm=120.0, rr_intervals=[0.5, 0.5], contact=False))
+    state = processor.push(Beat(t=t + 2.0, hr_bpm=120.0, rr_intervals=[0.5, 0.5]))
+    assert state.age_s[-1] == pytest.approx(0.0)

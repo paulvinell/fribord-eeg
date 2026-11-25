@@ -385,3 +385,119 @@ def eye_source(gaze, tones, seconds: float, rate: float) -> tuple[np.ndarray, np
         part = bump[:max(0, min(width, n - at))]
         blink[at:at + len(part)] += part
     return v, h, blink
+
+
+# --- a heart that follows a sliding pacer --------------------------------------------------------
+
+SWEEP_EPOCH = 1.7e9
+"""The epoch seconds that a beat stamp is added to, so a test runs on the large numbers a real stamp has."""
+
+SWEEP_MONO0 = 5000.0
+"""Where the session's monotonic clock stands when the sweep starts. The two clocks share no origin."""
+
+
+def schedule_of(breaths: int, start: float = 6.75, end: float = 4.25):
+    """A sweep schedule of exactly `breaths` breaths between two rates, for a test that needs a short one."""
+    from nfb.hrv.sweep import SweepSchedule
+
+    return SweepSchedule(start, end, step_s=abs(60.0 / end - 60.0 / start) / (breaths - 1))
+
+
+def pacer_beats(schedule, swing_ms, *, mean_ms: float = 900.0, mean_end_ms: float | None = None,
+                noise_ms: float = 0.0, seed: int = 0, lead_s: float = 20.0, tail_s: float = 6.0,
+                rests=(), rest_swing_ms: float = 300.0):
+    """Beat stamps and intervals of a heart that breathes with the pacer.
+
+    Stamps are seconds on the schedule's own axis: 0 is the start of breath 0, so the first `lead_s`
+    seconds come before the sweep and the last `tail_s` after it. An interval is the base interval plus a
+    sine with one cycle per breath, and the sine follows the schedule's instantaneous rate, so a breath
+    of any length holds exactly one cycle. `swing_ms(rate)` is the peak-to-peak swing planted at a rate in
+    breaths a minute. `rests` are `(at_s, length_s)` pairs on the true axis: the pacer stops there, the
+    heart swings by `rest_swing_ms` for `length_s`, and then the pacer restarts the breath it was in.
+    Returns `(stamps, rr_ms, axis)` where `axis(true_s)` is the schedule time at a true time.
+    """
+    rng = np.random.default_rng(seed)
+    n, total = schedule.breaths, schedule.total_s
+    segments = [(-lead_s, -lead_s)]          # (true time, schedule time) from which the pacer runs on
+    held = []
+
+    def axis(true_s):
+        for lo, hi in held:
+            if lo <= true_s < hi:
+                return None
+        base = max(seg for seg in segments if seg[0] <= true_s)
+        return base[1] + (true_s - base[0])
+
+    starts = np.array([schedule.start_s(k) for k in range(n)])
+    periods = np.array([schedule.period_s(k) for k in range(n)])
+
+    def breath(s):
+        return min(n - 1, int(np.searchsorted(starts, s, side="right")) - 1)
+
+    for at, length in sorted(rests):
+        k = breath(axis(at))
+        held.append((at, at + length))
+        segments.append((at + length, schedule.start_s(k)))
+
+    def cycles(s):
+        if s < 0:
+            return None
+        k = breath(s)
+        return k + (s - starts[k]) / periods[k]
+
+    def rate(s):
+        return 60.0 / periods[breath(s)]
+
+    end_true = total + sum(length for _, length in rests) + tail_s
+    stamps, rr_list, t = [], [], -lead_s
+    while t < end_true:
+        s = axis(t + mean_ms / 1000.0)
+        mean = mean_ms if mean_end_ms is None else mean_ms + (mean_end_ms - mean_ms) * max(0.0, t) / end_true
+        rr = mean + rng.normal(0.0, noise_ms) if noise_ms else mean
+        if s is None:
+            rr += 0.5 * rest_swing_ms * np.sin(2 * np.pi * 0.1 * t)
+        elif cycles(s) is not None:
+            rr += 0.5 * swing_ms(rate(s)) * np.sin(2 * np.pi * cycles(s))
+        t += rr / 1000.0
+        stamps.append(t)
+        rr_list.append(rr)
+    return np.asarray(stamps), np.asarray(rr_list), axis
+
+
+def beat_state(stamps, rr_ms, at_s: float, *, lag_s: float = 0.0, window_s: float = 180.0):
+    """What the heart processor shows at true time `at_s`: the newest beat's arrival and the accepted
+    beats of the last `window_s`, oldest first, as ages before it. `lag_s` delays every stamp, as a slow
+    link does, so the arrival of a beat is its stamp plus the lag on the epoch axis."""
+    from nfb.hrv import BeatState
+
+    last = int(np.searchsorted(stamps, at_s, side="right"))
+    if last == 0:
+        return BeatState(t=SWEEP_EPOCH + at_s + lag_s)
+    first = int(np.searchsorted(stamps, stamps[last - 1] - window_s, side="left"))
+    arrival = SWEEP_EPOCH + lag_s + float(stamps[last - 1])
+    ages = arrival - (SWEEP_EPOCH + lag_s + stamps[first:last])
+    return BeatState(t=arrival, age_s=[float(a) for a in ages],
+                     tachogram=[float(v) for v in 60000.0 / rr_ms[first:last]])
+
+
+def run_sweep(sweep, stamps, rr_ms, *, until_s: float, step_s: float = 0.5, first_old_s: float = 0.0,
+              jitter_s: float = 0.0, burst_s: float = 0.0, lag_s: float = 0.0, cause_at=None,
+              looks_from_s: float = 0.0, seed: int = 0) -> None:
+    """Draw the sweep the way the screen does: one `feed` per look, `step_s` apart on the monotonic clock.
+
+    `jitter_s` delays each look by a random part of it, `burst_s` delays every seventeenth look so that
+    the next ones bunch behind it, and `first_old_s` makes the first look see the snapshot of that long
+    before. `cause_at(true_s)` names the cause that holds the sweep at a look, or None. Stops when the
+    sweep ends or at `until_s`."""
+    rng = np.random.default_rng(seed)
+    count = int((until_s - looks_from_s) / step_s) + 1
+    at = looks_from_s + step_s * np.arange(count)
+    at = at + rng.uniform(0.0, jitter_s, count) if jitter_s else at
+    if burst_s:
+        at[::17] += burst_s
+    at = np.maximum.accumulate(at)
+    for i, t in enumerate(at):
+        state = beat_state(stamps, rr_ms, float(t) - (first_old_s if i == 0 else 0.0), lag_s=lag_s)
+        sweep.feed(SWEEP_MONO0 + float(t), state, cause_at(float(t)) if cause_at else None)
+        if not sweep.active:
+            return

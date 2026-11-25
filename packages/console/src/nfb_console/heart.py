@@ -69,6 +69,13 @@ class HeartRunner(SensorRunner):
     def _reads_something_else(self) -> bool:
         return self._reading != self._wanted()
 
+    @property
+    def source_key(self) -> tuple:
+        """Equal for as long as the beats come from one reader of one device. A new reader (`attach`, or a
+        release and a start) or a different choice changes it, and the processor's record starts over with
+        it, so anything built on the old beats must end."""
+        return (self._generation, self._wanted())
+
     def _already_serving(self) -> bool:
         # A retrying reader is still running, so keep the live one only when it is reading what is now asked;
         # a different choice replaces it.

@@ -20,6 +20,7 @@ peaks are found and named, and the split is flagged.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -141,6 +142,7 @@ class Beat:
     hr_bpm: float
     rr_intervals: list[float]       # seconds, oldest first
     contact: bool | None = None     # None when the device does not report it
+    arrived: float | None = None    # when the source gave the beat, on the clock of `t`, if that is later
 
 
 RR_SCALE_SPEC = 1024.0      # the Bluetooth Heart Rate Service's mandated unit: 1/1024 s
@@ -487,6 +489,7 @@ class BeatState:
     """A snapshot after each beat. Everything a screen draws comes from here."""
 
     t: float = 0.0
+    arrived: float | None = None    # when the source gave the newest beat, if later than `t`
     hr_bpm: float = 0.0
     hr_smoothed: float = 0.0
     rr_s: float = 0.0
@@ -495,15 +498,81 @@ class BeatState:
     pnn50_pct: float = 0.0
     beats: int = 0
     contact: bool | None = None
-    accelerating: bool = False
-    """Whether the heart rate is currently rising. The cue to breathe *in*. The instruction is
-    cardiac-phase-locked, not clock-locked."""
     age_s: list = field(default_factory=list)
     tachogram: list = field(default_factory=list)
     spectrum: Spectrum = field(default_factory=lambda: Spectrum(np.zeros(0), np.zeros(0)))
     reject_fraction: float = 0.0
     """Share of beats the artifact filter threw away. On the state rather than only on the processor because
     a screen showing a *spectrum* has no way to tell a clean tachogram from a heavily filtered one by eye."""
+
+
+class BeatTimeline:
+    """When the beats of a packet happened, from the intervals that the sensor measured and the times at
+    which its packets arrived.
+
+    **A packet arrives after its beats, by a time that changes from packet to packet.** A strap that
+    notifies once a second delivers a beat between no time and a second after it happened, so the arrival
+    is half a second late in the mean and scatters by a quarter of a second around that. The intervals
+    carry no such error: the sensor measured them. So the times of the beats are the running sum of the
+    intervals, and the arrivals only place that sum: no beat can arrive before it happens, so the packet
+    that arrived soonest after its last beat, over `WINDOW_S`, says where the sum stands. A source that
+    stamps each beat itself arrives equally late every time and keeps its own stamps.
+    """
+
+    WINDOW_S = 60.0
+    """How long the soonest arrival is remembered. A notification each second gives 60 arrivals, of which the
+    soonest is a sixtieth of a second late in the mean, and a clock of the sensor that runs a little fast or
+    slow moves the sum against the arrivals by far less than that in a minute."""
+
+    LOST_S = 1.3
+    """Intervals that never arrived leave the sum behind the beats by their length, and every later packet
+    then looks later by that much. A packet is at most one notification late, a second for a strap, and its
+    delivery scatters by a little more; an arrival later than the soonest remembered by more than this has
+    lost beats before it, and the sum starts again there. A loss too short to pass this leaves the times
+    early by its length until the soonest arrivals from before it leave the window."""
+
+    BACK_S = 3.0
+    """An arrival this much sooner than the soonest remembered is a wall clock that was set back, and the
+    sum starts again. A little sooner is only a packet that was delivered faster than any before it."""
+
+    SLEW = 0.2
+    """The most that the place of the sum moves at one packet, as a share of the intervals in it, so that a
+    correction never puts a beat before the one that it follows."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Start again: the next packet's last beat is put at its arrival, as a single packet must be."""
+        self._sum: float | None = None
+        self._late: deque[tuple[float, float]] = deque()
+        self._place = 0.0
+
+    def last_beat(self, arrived: float, intervals: list[float]) -> float:
+        """The time of the last beat of a packet that `arrived` with these `intervals`, in seconds."""
+        total = float(sum(intervals))
+        if not intervals or not total > 0.0:
+            return arrived              # no beat to place, and nothing learned about the sum
+        if self._sum is None:
+            return self._begin(arrived)
+        at = self._sum + total
+        late = arrived - at
+        while self._late and self._late[0][0] < arrived - self.WINDOW_S:
+            self._late.popleft()
+        soonest = min((v for _, v in self._late), default=late)
+        if late - soonest > self.LOST_S or soonest - late > self.BACK_S:
+            return self._begin(arrived)
+        self._late.append((arrived, late))
+        self._sum = at
+        limit = self.SLEW * total
+        self._place += max(-limit, min(limit, min(soonest, late) - self._place))
+        return at + self._place
+
+    def _begin(self, arrived: float) -> float:
+        self._sum = arrived
+        self._late = deque([(arrived, 0.0)])
+        self._place = 0.0
+        return arrived
 
 
 class HRVProcessor:
@@ -528,15 +597,12 @@ class HRVProcessor:
         # evicts in the same popleft and cannot desync from the array. See push() for what sets it.
         self._beats: deque[tuple[float, float, bool]] = deque()
         self._gap = False     # a beat has been dropped since the last accepted one
-        # **The live readouts do not wait for the artifact filter, and that is not a shortcut.** The filter
-        # holds each beat until its successor arrives, because the ectopic test needs it — about a second at
-        # resting rates. That latency is invisible in a spectrum and fatal in the breathing cue: the whole
-        # instruction is "breathe in when the heart rate is accelerating", so a cue a beat late is a cue
-        # pointing the wrong way for half the time at six breaths a minute.
+        # **The live readouts do not wait for the artifact filter.** The filter holds each beat until its
+        # successor arrives, because the ectopic test needs it — about a second at resting rates. That latency
+        # is invisible in a spectrum and shows in the heart rate now, which reads this.
         #
         # So the windowed things — the tachogram, the spectrum, RMSSD, SDNN, pNN50 — read accepted beats,
-        # and the instantaneous ones read this. An artifact can therefore glitch the cue for one beat, which
-        # is strictly better than every cue being a beat stale.
+        # and the instantaneous ones read this. An artifact can therefore glitch the rate for one beat.
         self._live: deque[tuple[float, float]] = deque(maxlen=8)
         # **We had no artifact rejection at all**, and a single ectopic beat moves the spectral peak.
         # Measured before rejection existed: on a corrupted synthetic series the resonance ratio
@@ -547,15 +613,8 @@ class HRVProcessor:
         # instead would compress the time axis and zero-filling would inject broadband power — both corrupt
         # the spectrum, which is the only thing this protocol reads.
         self.artifacts = ArtifactFilter() if reject_artifacts else None
-        # The breathing cue's phase and everything the detector needs — see `_update_cue`.
-        self._cue_up = False
-        self._cue_ref: float | None = None          # the running extreme of the current phase
-        self._cue_recent: deque[float] = deque(maxlen=self.CUE_SMOOTH_BEATS)
-        self._cue_turned_at = 0.0
-        self._cue_swing = self.CUE_SWING_BOOTSTRAP_BPM
-        self._cue_peak: float | None = None
-        self._cue_trough: float | None = None
         self._last_t: float | None = None    # newest beat time handed to any buffer; see push()
+        self._timeline = BeatTimeline()
 
     def set_target(self, hz: float, half_hz: float | None = None) -> None:
         """Move the frequency every spectral claim is scored against, clamped to `TARGET_RANGE_HZ`.
@@ -564,11 +623,12 @@ class HRVProcessor:
         beats on the next one to arrive — about a second — and it is stamped with whatever the target
         is then. Clamped rather than refused, for the same reason `set_pacer_period` clamps: a control
         that silently ignores what you typed is worse than one that shows you the nearest thing it can
-        do.
+        do. A value that is not finite has no nearest thing, so it leaves the old one.
         """
-        lo, hi = TARGET_RANGE_HZ
-        self.target_hz = float(min(hi, max(lo, float(hz))))
-        if half_hz is not None:
+        if math.isfinite(hz):
+            lo, hi = TARGET_RANGE_HZ
+            self.target_hz = float(min(hi, max(lo, float(hz))))
+        if half_hz is not None and math.isfinite(half_hz):
             lo, hi = NARROW_HALF_RANGE_HZ
             self.narrow_half_hz = float(min(hi, max(lo, float(half_hz))))
 
@@ -582,13 +642,8 @@ class HRVProcessor:
         self._beats.clear()
         self._gap = False
         self._live.clear()
-        self._cue_up = False
-        self._cue_ref = None
-        self._cue_recent.clear()
-        self._cue_turned_at = 0.0
-        self._cue_swing = self.CUE_SWING_BOOTSTRAP_BPM
-        self._cue_peak = self._cue_trough = None
         self._last_t = None
+        self._timeline.reset()
         if self.artifacts is not None:
             self.artifacts.reset()
 
@@ -631,23 +686,33 @@ class HRVProcessor:
 
     def push(self, beat: Beat) -> BeatState:
         t = beat.t
-        # Timestamp each RR in the packet backwards from arrival, so a batched packet does not stack
+        if not math.isfinite(t) or not all(math.isfinite(rr) for rr in beat.rr_intervals):
+            # Stamps count back from the arrival and the intervals, so one non-finite value spoils them all;
+            # an infinite stamp would stay newest and drop every later beat.
+            if self._last_t is None:
+                return BeatState(spectrum=self._empty_spectrum())
+            return self._state(self._last_t, beat)
+        # Timestamp each RR in the packet backwards from its last beat, so a batched packet does not stack
         # several beats at one instant and manufacture a spike in the tachogram.
         # An RR interval is the time *between* beats, so the beat it timestamps is the one that ends it —
-        # the last interval in a packet ends at arrival, not one interval before it. Getting this
-        # backwards shifts the whole tachogram by one beat, which is invisible in the numbers and wrong
-        # in the spectrum.
+        # the last interval in a packet ends at the packet's last beat, not one interval before it. Getting
+        # this backwards shifts the whole tachogram by one beat, which is invisible in the numbers and wrong
+        # in the spectrum. Where that last beat lies is the timeline's to say: the arrival is late by a
+        # time that scatters from packet to packet.
         offset = sum(beat.rr_intervals)
         # A strap reporting no skin contact is reporting that its intervals are whatever the detector
         # latched onto — the state still carries `contact` so the screen can say so, but the buffers
         # must not train on it. The hole this leaves is a dropout, which the spectrum's gap handling
         # (`GAP_FACTOR`) already knows how to refuse.
         intervals = beat.rr_intervals if beat.contact is not False else []
+        if beat.contact is False:
+            self._timeline.reset()      # its intervals are not beats, so the sum of the beats ends here
+        last = self._timeline.last_beat(t, intervals)
         if not intervals:
             self._gap = True        # a no-contact or HR-only packet is a hole between accepted beats
         for rr in intervals:
             offset -= rr                            # decremented first, and outside any validity check
-            bt = t - offset
+            bt = last - offset
             # Arrival time is wall clock and BLE delivery jitter is unbounded, so a delayed packet
             # followed by a prompt one can compute a beat *before* its predecessor — and `np.interp`
             # returns silent garbage on a non-monotonic grid. A beat that would go backwards is a
@@ -664,7 +729,6 @@ class HRVProcessor:
             if RANGE_MIN_S <= rr <= RANGE_MAX_S:
                 self._last_t = bt
                 self._live.append((bt, rr))
-                self._update_cue(bt, 60.0 / rr)
                 if self.artifacts is None:
                     self._beats.append((bt, rr, not self._gap))
                     self._gap = False
@@ -684,89 +748,11 @@ class HRVProcessor:
             self._beats.popleft()
         return self._state(t, beat)
 
-    CUE_SMOOTH_BEATS = 3
-    """How many beats the cue's own rate is averaged over before anything is decided from it.
-
-    **The cue was reading the raw per-beat rate**, which carries the full beat-to-beat jitter: at 8-20 ms
-    of RR noise that is 0.5-1.4 bpm of wobble on top of a respiratory swing of perhaps five, and every
-    guard below then has to fight the noise instead of measuring the breath. Three beats is short enough to keep a turn inside a second of where it happened."""
-
-    CUE_HYSTERESIS_FRAC = 0.35
-    CUE_HYSTERESIS_MIN_BPM = 2.0
-    """How far the rate must retrace from its running extreme before the cue turns: a third of *this
-    person's own* recent swing, never less than 2 bpm.
-
-    A fixed band cannot do this job at both ends. Measured over three-minute runs against a 0.1 Hz breath,
-    which makes 12 reversals a minute, the fixed 1.5 bpm version gave 26 reversals a minute at a shallow
-    swing with 25 ms of RR jitter, 23 at a moderate swing, and only settled to 13 once the swing was very
-    large — i.e. it failed hardest on the resting signal a beginner actually has. Scaling to the measured
-    swing, with the floor keeping a shallow one out of the noise, gives 10-12 across that whole grid."""
-
-    CUE_SWING_ALPHA = 0.25
-    CUE_SWING_BOOTSTRAP_BPM = 6.0
-    """The swing estimate: an exponential average of true peak-to-trough excursions, updated only when
-    both ends of one exist, and started at a plausible resting figure so the first breath has a threshold
-    to work against."""
-
-    CUE_MIN_INTERVAL_S = 1.5
-    """No two turns closer than this, whatever the signal does. The pacer's fastest cycle is six seconds,
-    so the shortest honest half-breath is three; 1.5 s rejects ringing and nothing a person can do."""
-
-    CUE_STUCK_S = 15.0
-    """And a turn is forced if none has happened for this long. Without it a rate that drifts one way for
-    a long time — or a swing estimate that has grown too large after a burst of artifacts — leaves the cue
-    stuck on one instruction indefinitely, which is worse than being wrong twice."""
-
-    def _update_cue(self, t: float, hr: float) -> None:
-        """Track the breath phase from the heart rate.
-
-        The rate is smoothed over three beats; the running extreme of the current phase is tracked; and a
-        turn fires when the rate has retraced from that extreme by more than a third of the person's own
-        recent peak-to-trough swing. Two guards then sit on top: no two turns closer than
-        `CUE_MIN_INTERVAL_S`, and a forced turn after `CUE_STUCK_S` with nothing.
-
-        A fixed 1.5 bpm band with no guards flip-flops on exactly the breath it should be steadiest on,
-        because a fixed band is a smaller and smaller fraction of the swing as the swing gets better.
-        """
-        self._cue_recent.append(hr)
-        smooth = sum(self._cue_recent) / len(self._cue_recent)
-        if self._cue_ref is None:
-            self._cue_ref = smooth
-            self._cue_turned_at = t
-            return
-        if self._cue_up:
-            self._cue_ref = max(self._cue_ref, smooth)
-        else:
-            self._cue_ref = min(self._cue_ref, smooth)
-
-        band = max(self.CUE_HYSTERESIS_MIN_BPM, self.CUE_HYSTERESIS_FRAC * self._cue_swing)
-        turned = (self._cue_ref - smooth > band) if self._cue_up else (smooth - self._cue_ref > band)
-        since = t - self._cue_turned_at
-        if not (turned or since > self.CUE_STUCK_S) or since < self.CUE_MIN_INTERVAL_S:
-            return
-
-        # The extreme just left behind closes one half of a cycle; with the other half already recorded,
-        # that is a true peak-to-trough excursion and the only honest thing to feed the swing estimate.
-        if self._cue_up:
-            self._cue_peak = self._cue_ref
-            other = self._cue_trough
-        else:
-            self._cue_trough = self._cue_ref
-            other = self._cue_peak
-        if other is not None:
-            swing = abs(self._cue_peak - self._cue_trough)
-            if swing > 0:
-                self._cue_swing += self.CUE_SWING_ALPHA * (swing - self._cue_swing)
-
-        self._cue_up = not self._cue_up
-        self._cue_ref = smooth
-        self._cue_turned_at = t
-
     def _state(self, t: float, beat: Beat) -> BeatState:
         if not self._live:
             return BeatState(t=t, hr_bpm=beat.hr_bpm, hr_smoothed=beat.hr_bpm,
                              contact=beat.contact, spectrum=self._empty_spectrum())
-        # Instantaneous, from every plausible beat: the cue cannot wait a beat. See `_live`.
+        # Instantaneous, from every plausible beat: the readout cannot wait a beat. See `_live`.
         live_hr = np.asarray([60.0 / r for _bt, r in self._live])
         window = live_hr[-self.smoothing_beats:]
 
@@ -783,6 +769,7 @@ class HRVProcessor:
             diffs = np.zeros(0)
         return BeatState(
             t=t,
+            arrived=beat.arrived,
             hr_bpm=float(live_hr[-1]),
             hr_smoothed=float(window.mean()),
             rr_s=float(self._live[-1][1]),
@@ -791,7 +778,6 @@ class HRVProcessor:
             pnn50_pct=float(100.0 * np.mean(np.abs(diffs) > 50.0)) if diffs.size else 0.0,
             beats=len(self._live) if len(self._live) < self._live.maxlen else len(self._beats) + 1,
             contact=beat.contact,
-            accelerating=bool(live_hr.size > 1 and self._cue_up),
             age_s=[float(t - bt) for bt in times],
             tachogram=[float(v) for v in hr],
             spectrum=self._spectrum(t, times, hr) if rr.size else self._empty_spectrum(),
