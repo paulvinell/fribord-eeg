@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from nfb_console.spectrum_pane import SpectrumSource, TILE_BANDS
+from nfb_console.spectrum_pane import SpectrumSource
 from nfb_console.traces import RawRing
 from nfb_console.trends_pane import UPDATE_SECONDS, BandTrends
 
@@ -146,7 +146,7 @@ def test_collection_resumes_after_a_device_epoch_restarts_signal_time():
 def test_the_pane_collects_whether_or_not_its_tab_was_ever_opened():
     """The session average must not depend on when the operator first clicked Trends, so the sampling is
     driven from the screen's draw loop, not from the pane being visible."""
-    from harness import StubPage, replay
+    from harness import StubPage, _chosen, _pills, replay
 
     from nfb_console import amplitude_view as av
     from nfb_console import trends_pane
@@ -168,6 +168,8 @@ def test_the_pane_collects_whether_or_not_its_tab_was_ever_opened():
         assert any(v not in ("", "—") for v in shown), "and the tiles carry numbers from it"
         assert "µV" not in pane.caption.value or "%" not in pane.caption.value
 
+        assert _pills(pane.source_pills) == [], "one source is named, not offered as a choice"
+
         # The third pill: the graph redraws as each band's dominant frequency, on its own Hz axis.
         pane.tick(1000.0)                    # a second sample, so the peak lines have two points
         pane._show_peaks()
@@ -176,6 +178,11 @@ def test_the_pane_collects_whether_or_not_its_tab_was_ever_opened():
         assert "Hz ·" in pane.caption.value and "energy sits" in pane.caption.value
         pane._set_relative(False)
         assert pane.graph_shows == "amplitude", "choosing a unit returns the graph to amplitudes"
+        assert _chosen(pane.unit_pills) == {"absolute µV"}
+        for relative in (False, True):
+            pane._set_relative(relative)
+            pane._show_peaks()
+            assert _chosen(pane.unit_pills) == {"peak Hz"}, "only the peak pill is lit on the peak graph"
     finally:
         session.stop()
 
@@ -207,22 +214,3 @@ def test_the_history_survives_the_view_being_rebuilt_around_it():
             "half an hour of trend, thrown away by a look at the electrodes"
     finally:
         session.stop()
-
-
-def test_a_summed_ring_reads_as_the_ring_of_the_sum():
-    """Derived from the channel rings rather than fed, and byte-for-byte the spectrum a fed ring of the
-    same sum would give — which is what lets every screen offer it without plumbing."""
-    import numpy as np
-
-    from nfb_console.traces import RawRing, SummedRing
-
-    rate = 250.0
-    rng = np.random.default_rng(1)
-    a, b = rng.standard_normal(500), rng.standard_normal(500)
-    ra, rb, fed = (RawRing(2.0, rate, 1.0, 40.0, 1.0) for _ in range(3))
-    for i in range(0, 500, 250):
-        ra.push(a[i:i + 250]); rb.push(b[i:i + 250]); fed.push(a[i:i + 250] + b[i:i + 250])
-    derived = SummedRing([ra, rb])
-    assert derived.filled == 500 and derived.top_hz == fed.top_hz
-    assert np.allclose(derived.spectrum(), fed.spectrum())
-    assert derived.band_peaks(TILE_BANDS) == fed.band_peaks(TILE_BANDS)

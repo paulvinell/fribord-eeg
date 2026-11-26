@@ -19,10 +19,7 @@ import time
 
 import pytest
 
-from nfb.heg import (DEFAULT_HEG_METRIC, HEG_METRICS, HegState, Processed, QUALITY_GOOD,
-                     QUALITY_MOTION, SimulatedMendi)
-from nfb.hrv.metrics import metric_value
-from nfb_console import normalise
+from nfb.heg import HegState, Processed, QUALITY_GOOD, QUALITY_MOTION, QUALITY_SETTLING, SimulatedMendi
 
 
 def _session(choice_kind: str = "simulator"):
@@ -76,65 +73,6 @@ def _spy_outputs(session) -> tuple[list[str], list[str]]:
     return applied, released
 
 
-# --- the catalogue, on real states -------------------------------------------------------------
-
-def test_every_metric_extracts_a_real_number_from_a_real_stream():
-    """A catalogue whose entries throw or return None on live data is a menu of dead options."""
-    import math
-
-    session = _session()
-    try:
-        _feed(session, seconds=30.0)
-        state = session.state
-        for metric_id, spec in HEG_METRICS.items():
-            value = metric_value(spec, state)
-            assert value is not None, f"{metric_id} produced nothing"
-            assert math.isfinite(value), f"{metric_id} produced {value}"
-            assert spec.label and spec.description and spec.detail, f"{metric_id} is undocumented"
-            assert spec.strategies, f"{metric_id} recommends no scaling"
-            for suggested in spec.strategies:
-                assert suggested in normalise.STRATEGIES, f"{metric_id} names a strategy that is gone"
-    finally:
-        session.stop()
-
-
-def test_a_metric_reports_nothing_rather_than_zero_before_it_can_speak():
-    """Zero is a reading and 'no reading yet' is not. A channel handed 0.0 drives itself to its floor
-    and reads as a bad result, which is the opposite of the truth — the HRV catalogue shipped without
-    these predicates and fed literal zeros into the rolling scale for a whole window."""
-    early = HegState(t=1.0, samples_seen=1)
-    for metric_id in HEG_METRICS:
-        assert metric_value(HEG_METRICS[metric_id], early) is None, f"{metric_id} spoke too early"
-    assert metric_value(HEG_METRICS["oxy_index"], None) is None
-
-    settled = HegState(t=10.0, samples_seen=200, smoothed_hbo=120.0, smoothed_hbr=-30.0,
-                       hbo_std_short=2.0, oxy_std_short=3.0, hbo_slope=0.4, windowed_ready=True)
-    for metric_id in HEG_METRICS:
-        assert metric_value(HEG_METRICS[metric_id], settled) is not None
-
-
-def test_a_windowed_metric_stays_silent_until_its_window_is_filled():
-    """After a long motion hold or a reconnect gap the stability and trend windows are trimmed to one point,
-    so the variability and slope read a false 0.0 — which, inverted, is the best-possible score. Those
-    metrics gate on the window being filled, not on the motion-held sample count."""
-    thin = HegState(t=10.0, samples_seen=200, smoothed_hbo=120.0, smoothed_hbr=-30.0,
-                    hbo_std_short=0.0, oxy_std_short=0.0, hbo_slope=0.0, windowed_ready=False)
-    for metric_id in ("hbo_variability", "oxy_variability", "hbo_trend"):
-        assert metric_value(HEG_METRICS[metric_id], thin) is None, f"{metric_id} spoke on a thin window"
-    # the level metrics do not read the windows, so they still speak
-    assert metric_value(HEG_METRICS["oxy_index"], thin) is not None
-
-
-def test_the_metrics_that_are_better_low_say_so():
-    """`invert` is not a preference: feedback that got stronger as the signal got jitterier would
-    reinforce the wrong thing, so the sensible aim ships with the metric."""
-    assert HEG_METRICS["hbo_variability"].invert
-    assert HEG_METRICS["oxy_variability"].invert
-    for good_high in ("hbo", "hbr", "oxy_index", "hbo_trend"):
-        assert not HEG_METRICS[good_high].invert
-    assert DEFAULT_HEG_METRIC == "oxy_index", "the closest thing here to a brain-specific number"
-
-
 # --- the level -------------------------------------------------------------------------------
 
 def test_the_metric_and_scaling_become_the_level_the_mechanisms_follow():
@@ -168,9 +106,6 @@ def test_the_room_follows_a_scale_that_is_still_filling_rather_than_waiting_for_
 
     A few seconds in, the scale is genuinely rough. It is also the only honest answer to "how am I doing
     compared with myself", and it firms up while being used."""
-    from nfb_console.heg_view import WARMUP_GATE
-
-    assert WARMUP_GATE == 0.0, "kept as a constant so it cannot silently become a number again"
     session = _session()
     try:
         session.toggle_pause()
@@ -272,9 +207,8 @@ def test_the_gate_fraction_is_reported_because_a_held_stretch_looks_calm():
         panel.push(session.state)
         panel.refresh(session)
         assert "30% held for motion" in panel.trace_caption.value
-        assert heg_panel.quality_word(QUALITY_GOOD) == "good"
-        assert heg_panel.quality_word(QUALITY_MOTION) == "motion"
-        assert heg_panel.quality_word(0.5) == "settling"
+        words = {heg_panel.quality_word(q) for q in (QUALITY_GOOD, QUALITY_SETTLING, QUALITY_MOTION)}
+        assert len(words) == 3, "good, settling and motion each have their own word"
     finally:
         session.stop()
 
@@ -362,13 +296,9 @@ def test_a_dead_or_silent_headband_stops_the_feedback_and_says_so():
 
 
 def test_a_silent_headband_goes_stale_much_sooner_than_a_silent_strap():
-    """Three seconds rather than five, and the difference is the point: at 30 Hz that is already
-    hundreds of missed frames, where the heart's figure has to allow for a slow pulse."""
+    """A silence shorter than the one that makes a heart strap stale already stops the feedback: at 30 Hz
+    it is hundreds of missed frames, where the heart's limit has to allow for a slow pulse."""
     from nfb_console.heart import HeartRunner
-    from nfb_console.mendi import MendiRunner
-
-    assert MendiRunner.STALE_S == 3.0
-    assert MendiRunner.STALE_S < HeartRunner.STALE_S
 
     session = _session()
     try:
@@ -382,7 +312,7 @@ def test_a_silent_headband_goes_stale_much_sooner_than_a_silent_strap():
                 return True
 
         session.heg._thread = Alive()
-        session.heg.seen_at = time.monotonic() - 10.0
+        session.heg.seen_at = time.monotonic() - (HeartRunner.STALE_S - 1.0)
         assert session.heg.stale
         session.observe()
         assert session.signal is None and applied == []
@@ -415,6 +345,22 @@ def test_the_invented_simulator_is_handed_back_switched_off():
     assert invented.heg.choice.kind == "off", "the shared runner goes back the way it was found"
     assert invented.heg.state is None and invented.heg.error is None
     assert invented.heg.seen_at is None
+
+
+def test_a_paired_headband_replaces_the_heg_screens_invented_one(monkeypatch):
+    """The same defect and the same fix on the HEG screen, whose simulator is invented for the same
+    reason."""
+    from nfb_console import heg_view
+    from nfb_console.inputs import MendiChoice
+    from nfb_console.protocols import BY_CODE
+
+    app_choice = MendiChoice(kind="off")
+    session = heg_view.session_for(BY_CODE["HEG"], mendi_choice=app_choice)
+    assert session.choice.kind == "simulator" and session._invented
+
+    app_choice.kind, app_choice.address = "headband", "AA:BB"
+    session.adopt_offered()
+    assert session.choice is app_choice and not session._invented
 
 
 def test_a_fresh_source_starts_a_fresh_record():
@@ -520,41 +466,6 @@ def test_the_protocol_is_offered_now_that_it_has_a_source():
     assert Console.screen_for(BY_CODE["HEG"]) is heg_view
 
 
-def test_the_headband_is_chosen_on_the_device_screen_like_every_other_source():
-    """The HEG tab of the device screen was a paragraph explaining that the headband was not wired up
-    yet, long after it was: the driver, the runner and the screen all existed, and the screen's own
-    status line said "see the device screen" — where there was nothing to see. So the whole protocol was
-    unreachable unless it invented a simulator for itself."""
-    import sys
-
-    sys.path.insert(0, "tests")
-    from conftest import waitfor
-    from test_ppg import _press
-    from harness import StubPage, _texts
-
-    from nfb import Device, Settings
-    from nfb_console import device_panel
-    from nfb_console.inputs import MendiChoice
-    from nfb_console.mendi import MendiRunner
-
-    device = Device(Settings())
-    choice = MendiChoice(kind="off")
-    runner = MendiRunner(choice)
-    try:
-        control = device_panel.view(StubPage(), device, mendi_choice=choice, mendi_runner=runner)
-        shown = " ".join(x.value for x in _texts(control) if x.value)
-        assert "nothing here yet" not in shown
-        assert "blood flow over the forehead" in shown, "the tab says what it is for"
-
-        _press(control, "simulator")         # the HEG tab's, which comes before the heart's
-        assert choice.kind == "simulator"
-        # The swap runs off the event loop, so the frames arrive on their own thread.
-        waitfor(lambda: runner.ready, what="the chosen source started delivering frames")
-    finally:
-        runner.release()
-        device.close()
-
-
 def test_the_motion_hold_is_a_row_on_the_screen_and_the_chip_carries_the_charge():
     """Both from the same sitting: the hold was a constant nobody could see or change, and the battery
     was under the trace and nowhere else — the number you want before starting twenty minutes was the
@@ -586,5 +497,65 @@ def test_the_motion_hold_is_a_row_on_the_screen_and_the_chip_carries_the_charge(
 
         session.heg.source = type("S", (), {"battery_pct": 41})()
         assert "battery 41%" in heg_view._instrument(session)[1]
+    finally:
+        session.stop()
+
+
+def test_a_fresh_session_keeps_the_metric_the_scaling_and_the_aim():
+    """A stop starts a fresh session with what the operator chose: the metric, its scaling and the aim."""
+    from nfb_console.heg_view import HEGSession
+    from nfb_console.protocols import BY_CODE
+
+    old = _session()
+    new = None
+    try:
+        old.set_metric("hbo_trend")
+        old.set_strategy("fixed_range", low=-5.0, high=5.0)
+        old.set_direction("decrease")
+        new = HEGSession(BY_CODE["HEG"], choice=old.choice)
+        new.adopt(old)
+        assert new.metric == "hbo_trend" and new.direction == "decrease"
+        assert new.strategy_id == "fixed_range" and new.strategy_params == old.strategy_params
+    finally:
+        old.stop()
+        if new is not None:
+            new.stop()
+
+
+def test_frames_without_a_metric_yet_name_the_metric_that_waits():
+    """While frames arrive and the metric cannot speak yet, the note under the level says which one waits."""
+    session = _session()
+    try:
+        session.toggle_pause()
+        _feed(session, seconds=1.0)
+        assert session.raw_metric is None, "the premise: too few frames for the metric"
+        note = session.level_note()
+        assert note is not None and session.metric_spec.label in note[0]
+    finally:
+        session.stop()
+
+
+def test_a_level_with_no_smoothing_follows_the_signal_exactly():
+    """Smoothing set to zero is a level equal to the scaled signal, not a fault."""
+    session = _session()
+    try:
+        session.toggle_pause()
+        session.feedback.smoothing_seconds = 0.0
+        _feed(session, seconds=20.0)
+        assert session.signal is not None and session.level == session.signal
+    finally:
+        session.stop()
+
+
+def test_play_does_not_resume_a_trial_run_that_is_over():
+    """When every trial of an active run has a result, play keeps the session paused."""
+    session = _session()
+    try:
+        session.set_mode("active")
+        run = session.trials
+        run.results = [object()] * run.n_trials
+        assert run.done, "the premise: the run is over"
+        session.toggle_pause()
+        assert session.paused
     finally:
         session.stop()

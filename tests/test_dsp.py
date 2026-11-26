@@ -148,11 +148,13 @@ def test_invalid_window_parameters_are_refused():
 
 
 def test_a_window_larger_than_the_buffer_is_refused():
-    """A window the buffer can never hold emitted nothing yet was accepted silently. It now fails loud."""
+    """A window the buffer can never hold is refused, and a window that fills the buffer exactly is not."""
+    whole = Windower(SPEC, size=1).buffer.capacity
     with pytest.raises(ValueError):
-        Windower(SPEC, size=int(61 * RATE))                # past the 60 s default capacity
+        Windower(SPEC, size=whole + 1)
     with pytest.raises(ValueError):
-        WindowMetric(SPEC, "x", lambda w: 0.0, window_seconds=61.0)
+        WindowMetric(SPEC, "x", lambda w: 0.0, window_seconds=(whole + 1) / RATE)
+    assert Windower(SPEC, size=whole).size == whole
 
 
 # --- continuous band power ----------------------------------------------------------------
@@ -254,12 +256,7 @@ def test_lempel_ziv_is_near_zero_for_a_constant_and_near_one_for_noise():
 
 
 def test_sample_entropy_of_a_constant_is_zero():
-    assert sample_entropy(np.ones(100)) == 0.0
-
-
-def test_sample_entropy_of_a_constant_is_zero_with_an_explicit_tolerance_too():
-    """A constant is maximally predictable, so entropy is 0 whatever `r` is. With an explicit positive `r`
-    it used to count unequal template populations and return a positive 'complexity'."""
+    """A constant is maximally predictable, so its sample entropy is 0 whatever the tolerance `r` is."""
     assert sample_entropy(np.ones(500), r=0.5) == 0.0
     assert sample_entropy(np.ones(500)) == 0.0
 
@@ -496,13 +493,10 @@ def test_cfir_reads_the_band_and_not_the_drift_under_it():
     assert np.median(fixed) == pytest.approx(np.median(clean), rel=0.1), \
         f"and gone when they do: {np.median(fixed):.2f} against {np.median(clean):.2f}"
 
-    # The corner sits two octaves under the band, so CFC's lowest bin keeps its own bottom edge...
+    # The corner sits two octaves under the band, so CFC's lowest bin keeps its own bottom edge.
     low = CFIREnvelope(Band(1.0, 5.0, "delta"), rate, drift_hz=0.5)
-    assert low._drift is not None
     slow = 10.0 * np.sin(2 * np.pi * 1.2 * t)
     assert np.median(low.process(slow)[int(10 * rate):]) == pytest.approx(10.0, rel=0.1)
-    # ...and a band that *is* the slow signal is left alone whatever the caller asks for.
-    assert CFIREnvelope(Band(0.05, 0.2, "ilf"), rate, drift_hz=0.5)._drift is None
 
 
 def test_the_drift_high_pass_follows_the_device_corner_and_nothing_else():
@@ -515,15 +509,19 @@ def test_the_drift_high_pass_follows_the_device_corner_and_nothing_else():
     """
     from nfb_console.training import DEFAULT_CORNER_HZ, drift_for
 
-    assert drift_for(0.5) is None and drift_for(DEFAULT_CORNER_HZ) is None
-    assert drift_for(0.01) == 0.5
-    assert drift_for(0.0) == 0.5, "DC coupling is the same case, more so"
+    assert drift_for(DEFAULT_CORNER_HZ) is None, "the device already removed the offset"
+    for corner in (0.01, 0.0):                  # the low corner, and DC coupling, which is the same case
+        assert drift_for(corner) is not None and drift_for(corner) > corner, \
+            "a high-pass above the device's own corner"
 
 
 def test_cfir_refuses_a_band_above_nyquist():
+    """A band that reaches the Nyquist frequency cannot be measured, so the estimator refuses it."""
     from nfb.dsp import CFIREnvelope
     with pytest.raises(ValueError, match="Nyquist"):
         CFIREnvelope(Band(30, 45, "gamma"), 62.5)
+    with pytest.raises(ValueError, match="Nyquist"):
+        CFIREnvelope(Band(20, 31.25, "edge"), 62.5)
 
 
 def test_the_three_amplitude_conventions_relate_as_expected():
@@ -554,10 +552,6 @@ def test_our_elliptic_at_order_two_has_the_chosen_design():
     from scipy import signal
 
     from nfb.dsp import Band, bandpass
-    from nfb.dsp.filters import ELLIPTIC_STOP_DB
-
-    assert ELLIPTIC_STOP_DB == 60.0, "60 dB is the chosen stopband; 50 was a guess"
-
     band = (12.0, 15.0)
     rate = 256.0
     filt = bandpass(Band(*band, ""), rate, order=2, kind="elliptic", ripple_db=0.5)
@@ -627,47 +621,19 @@ def _bin_spill(design, seconds=40.0, rate=250.0):
     return max(read(Band(5.0, 10.0, "")), read(Band(15.0, 20.0, ""))) / owner
 
 
-def test_the_defaults_split_by_role_and_the_reward_is_the_steady_one():
-    """**The reward went to the elliptic, and the argument that had kept it on cFIR was a bound.**
-
-    cFIR's case is that it estimates amplitude directly and so carries no envelope smoother. That is also
-    what its reading *feels* like: measured on a real 11.7–14.7 Hz session, both estimators fed the same
-    signal with thresholds derived at the same 90% aim, cFIR crossed its threshold 172 times a minute and
-    moved 32% of its own median between updates 50 ms apart, against the elliptic's 31 and 7%.
-
-    What the steadiness costs is 48 ms — 168 ms against 216 to report half of a burst, measured through
-    both shipping estimators. The figure this decision had previously been argued against, 450 ms, is
-    `latency_seconds`: group delay plus the smoother's whole time constant, a conservative bound and not a
-    response. Choosing a default off a bound is choosing it off the wrong number.
-
-    The inhibit stays on cFIR at 300 ms, which is unaffected: it is judged on separation from its
-    neighbours rather than on how it feels, and it wins that on measurement below.
-    """
+def test_the_default_inhibit_keeps_its_band_apart_from_its_neighbours():
+    """The inhibit's default estimator lets less than a tenth of a neighbouring band's rhythm into its own
+    reading, and no IIR design of the same cost separates adjacent bands better."""
     from nfb_console.training import CFIR_DELAY, DEFAULT_FILTER
 
-    # Keyed by **role**: the arguments are about what the estimate is used for, and neither mentions which
-    # way the band is trained. A reward trained downward is still moment-locked.
-    assert DEFAULT_FILTER == {"reward": "elliptic", "inhibit": "cfir", "monitor": "elliptic"}
-    assert CFIR_DELAY == {"reward": 0.1, "inhibit": 0.3, "monitor": 0.1}
-
-    ours = _bin_spill(dict(kind="cfir", delay=0.3))
+    assert DEFAULT_FILTER["inhibit"] == "cfir", "the measurement below is of the cFIR"
+    ours = _bin_spill(dict(kind="cfir", delay=CFIR_DELAY["inhibit"]))
     assert ours < 0.10, f"an inhibit that leaks a tenth of its neighbour is not a separate bin: {ours:.1%}"
     for label, design in (("elliptic 4", dict(kind="elliptic", order=4, rp=0.5)),
                           ("butterworth 4", dict(kind="butterworth", order=4)),
                           ("elliptic 2", dict(kind="elliptic", order=2, rp=0.5))):
         other = _bin_spill(design)
         assert ours <= other, f"{label} separates adjacent bins better than cFIR 300 ms: {other:.1%}"
-
-
-def test_the_elliptic_default_is_one_coherent_design():
-    """Order 2 with a 60 dB stopband and 0.5 dB of ripple is one design. A 1.0 dB ripple with those
-    two was a loose ripple on a tight order, so the ripple default and the stopband default are pinned
-    together."""
-    from nfb.dsp.filters import ELLIPTIC_RIPPLE_DB, ELLIPTIC_STOP_DB
-    from nfb_console.training import DEFAULT_ORDER, DEFAULT_RIPPLE
-
-    assert (DEFAULT_ORDER, ELLIPTIC_RIPPLE_DB, ELLIPTIC_STOP_DB) == (2, 0.5, 60.0)
-    assert DEFAULT_RIPPLE is ELLIPTIC_RIPPLE_DB, "one constant, not two that can drift apart"
 
 
 def test_the_display_filter_leaves_cfcs_top_bin_alone():

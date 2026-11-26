@@ -54,11 +54,12 @@ def session():
 
 
 def test_a_spindle_is_counted_and_heard_as_its_own_cue(session):
+    """Each spindle is counted and heard once, and the rate counts only the last minute."""
     rate = session.rate
     feed(session, {0: planted(120, rate), 1: plausible_eeg(120, rate, 1)})
     watch = session.spindles
     assert watch.count >= 8
-    assert watch.per_minute == pytest.approx(len(watch._times), rel=0.01)
+    assert watch.per_minute < 0.8 * watch.count, "two minutes of spindles are not one minute's rate"
     heard = [p for p in session.played if p[0] == sc.sound()]
     assert len(heard) == watch.count
     assert all(volume == session.feedback.click.volume for _, volume in heard)
@@ -201,8 +202,8 @@ def test_the_level_line_says_the_threshold_in_microvolts_from_the_first_sample(s
     rate = session.rate
     session.feed_block(Block(0, 0, counts(planted(1, rate)[:250], session.specs[0].scale), session.specs[0]))
     assert watch.usual is not None
-    assert sc.level_line(watch) == (f"threshold now {4.0 * watch.usual:.1f} µV: 4.0 × the usual "
-                                    f"{watch.usual:.1f} µV")
+    line = sc.level_line(watch)
+    assert f"{watch.level_uv:.1f} µV" in line and f"{watch.usual:.1f} µV" in line, line
 
 
 @pytest.mark.parametrize("state", ["cold", "fed", "searching", "muscle"])

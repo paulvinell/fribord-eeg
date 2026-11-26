@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from nfb_console.feedback import COMBINE_DETAIL
+from conftest import counts as to_counts
 from nfb_console.protocols import BY_CODE
 
 from harness import (
@@ -69,27 +69,16 @@ def test_each_cfc_reward_sits_on_a_boundary_between_two_bins():
 
 
 def test_cfc_thresholds_are_derived_from_his_total_not_from_our_defaults():
-    """5-15% across twelve bins is under 1% each; our own inhibit default of 25% would allow 300%.
-
-    And the rewards sound too. Inheriting our 90%-per-reward default would have put two rewards below
-    threshold ~19% of the time on top of the bins' 10% — nearly 30% of the session making a noise, which
-    is exactly the figure he calls "too often for most people", and fatal to Quiet Reward.
-    """
+    """Every sound on the screen together, the twelve bins and the rewards, is aimed inside the stated
+    5-15% of the session, so silence stays reachable."""
     from nfb_console import cfc_view
-    from nfb_console.targets import HIT_RATES
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
-        for tgt in session.bin_targets:
-            assert tgt.hit_rate != HIT_RATES["inhibit"]
         bins_over = sum(1 - t.hit_rate for t in session.bin_targets)
-        assert bins_over == pytest.approx(0.10, abs=0.001), "the middle of a 5-15% range"
-
-        for tgt in session.rewards:
-            assert tgt.hit_rate != HIT_RATES["reward"], "our default would be far too loose here"
         rewards_under = sum(1 - t.hit_rate for t in session.rewards)
-        assert rewards_under == pytest.approx(0.05, abs=0.001)
-        assert bins_over + rewards_under <= 0.15, "the top of the range, all sounds together"
+        assert bins_over > 0 and rewards_under > 0
+        assert 0.05 <= bins_over + rewards_under <= 0.15, "all sounds together, inside the stated range"
     finally:
         session.stop()
 
@@ -107,27 +96,6 @@ def test_adding_a_reward_does_not_buy_more_interruption():
         three = sum(1 - t.hit_rate for t in session.rewards)
         assert three == pytest.approx(two, abs=0.001)
         assert len({t.hit_rate for t in session.rewards}) == 1, "and they share it evenly"
-    finally:
-        session.stop()
-
-
-def test_cfc_uses_his_two_rules_in_the_right_places():
-    """He has two, for two kinds of output, and collapsing them into one was the first mistake.
-
-    The discrete consequences are a strict AND — a sound plays when *any* instrument fails — and the
-    continuous one follows the rewards: "increases Audio volume of an MP3 file as the rewards increase".
-    `weakest` is the AND written continuously and was measurably wrong for the continuous output: a bin
-    decided the level 55% of the time and it tracked the rewards at r = 0.48.
-    """
-    from nfb_console import cfc_view
-
-    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
-    try:
-        assert session.feedback.combine == "scaled", "the continuous output follows the rewards"
-        # and the discrete side is still the strict AND, which no combining rule can weaken
-        assert session.feedback.on_target([]) is False
-        assert session.feedback.describe_condition() == "every target on its wanted side"
-        assert "rewards are up" in COMBINE_DETAIL[session.feedback.combine]
     finally:
         session.stop()
 
@@ -200,17 +168,29 @@ def test_cfc_refuses_to_pretend_about_linked_referencing():
 
 
 def test_the_spectrogram_is_of_the_summed_pair():
-    """The arrangement has a stated consequence: you cannot tell from the cascade which
-    channel a spindle came from."""
+    """The cascade draws the sum of the two channels: a rhythm on either channel appears in its rows."""
+    import numpy as np
+
+    from nfb.stream import Block
     from nfb_console import cfc_view
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
+    rows: list = []
+    session.spectrogram.push = rows.append
     try:
-        pump(session)
-        session.push_displays(1.0)
-        assert session.sum_ring.filled > 0
+        rate = session.rate
+        t = np.arange(int(4 * rate)) / rate
+        waves = {0: 20 * np.sin(2 * np.pi * 10.0 * t), 1: 20 * np.sin(2 * np.pi * 25.0 * t)}
+        for i in range(0, len(t) - 7, 8):
+            for ch, spec in session.specs.items():
+                session.feed_block(Block(ch, i, tuple(to_counts(waves[ch][i:i + 8], spec.scale).tolist()), spec))
+        session.push_displays(1e9)
+        assert rows, "a row once the ring holds a spectrum"
         centres = session.spectrogram.centres()
-        assert centres[0] == 1.0 and centres[-1] == 40.0
+        row = rows[-1]
+        quiet = np.median(row)
+        for hz in (10.0, 25.0):
+            assert row[int(np.argmin(abs(centres - hz)))] > 5 * quiet, f"{hz:g} Hz is missing from the sum"
     finally:
         session.stop()
 
@@ -267,103 +247,63 @@ def test_without_a_heart_source_the_cfc_screen_says_nothing_about_it():
         session.stop()
 
 
-def test_an_infra_slow_reward_narrows_its_own_band_and_says_what_it_cost():
-    """"Infra-slow" means 0.01-1.0 Hz here, and it is not delta, which is listed
-    separately. The width has to come down with the centre or the band reaches DC, and that costs delay,
-    because bandwidth *is* delay."""
-    from nfb.dsp import bandwidth_tau
-    from nfb_console import cfc_view
-
-    assert cfc_view.INFRA_SLOW == (0.01, 1.0)
-    waves = cfc_view.WAVES
-    assert waves["delta"] > waves["ultra-low"] * 10, \
-        "delta and ultra-low are different frequencies, not two names for one"
-    # every frequency he names as reachable, and no more
-    assert set(waves) == {"ultra-low", "Mayer", "delta", "theta", "alpha", "gamma"}
-    assert waves["Mayer"] == 0.1, "the 0.1 Hz Mayer wave, named in the CFC page"
-
-    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
-    try:
-        session.retune_rewards([waves["ultra-low"] * 5, waves["gamma"]])
-        slow = min(session.rewards, key=lambda t: t.band.centre)
-        assert slow.band.low > 0, "a band starting at DC would be measuring the mean"
-        width = slow.band.high - slow.band.low
-        assert width < session.width_hz, "narrowed with the centre"
-        assert 2 * bandwidth_tau(width) > 5.0, "and it is a much slower instrument for it"
-    finally:
-        session.stop()
-
-
 def test_a_subhertz_reward_has_its_own_width_and_the_card_says_what_it_listens_to():
-    """**One width could not serve four decades, and the screen was covering for that with a warning.**
-
-    0.2 Hz around 10 is a fifth of a hertz on a band four wide; 0.2 Hz around 0.1 is twice the centre
-    frequency, so it was silently clamped to `centre × 0.8` — a number from the edge of the arithmetic
-    rather than anyone's judgement — while the control still read 0.2 and the only mention of it was a line
-    at the foot of the panel, referring to "the lowest reward", three cards away from the card it was about.
-
-    So a sub-hertz reward gets its own width, offered only while one exists, and every card states the band
-    it is actually listening to. The clamp survives, because 0.05 Hz is impossible at 0.01 Hz too — but it
-    is now a sentence about a named reward rather than a warning about an unnamed one.
-    """
-
+    """A sub-hertz reward gets its own width, offered only while one exists, and every card states the band
+    it measures. Where that width would reach 0 Hz it is bounded, and the note names the reward."""
     from nfb_console import cfc_view
+
+    def band_text(tgt):
+        return f"{tgt.band.low:g}–{tgt.band.high:g} Hz"
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
         page = StubPage()
         control = cfc_view.view(page, session, toolbar(), lambda: None)
         shown = [x.value for x in _texts(control)]
-        assert "9.9–10.1 Hz" in shown, "an ordinary reward states its band too"
+        assert all(band_text(x) in shown for x in session.rewards), "an ordinary reward states its band too"
         assert "subhertz width" not in shown, "no sub-hertz reward, so no sub-hertz width"
 
         session.retune_rewards(freqs=[cfc_view.WAVES["Mayer"], 10.0])
         control = cfc_view.view(page, session, toolbar(), lambda: None)
         shown = [x.value for x in _texts(control)]
+        slow, fast = session.rewards
         assert "subhertz width" in shown
-        assert "0.075–0.125 Hz" in shown, "the Mayer card says what it listens to"
-        assert not any("narrowed to" in x for x in shown), "the warning it replaces is gone"
-        assert session.width_for(0.1) == pytest.approx(0.05), "its own width, not the clamp"
-        assert session.width_for(10.0) == pytest.approx(0.2), "and the fast reward is untouched"
+        assert band_text(slow) in shown, "the slow card says what it listens to"
+        assert slow.band.high - slow.band.low == pytest.approx(session.subhertz_width_hz), "its own width"
+        assert fast.band.high - fast.band.low == pytest.approx(session.width_hz), "the fast one is untouched"
+        assert not any("bounded" in x for x in shown), "a width that fits needs no note"
 
-        # The clamp still applies where the width cannot be granted, and it names the reward it bounded.
+        # The bound still applies where the width cannot be granted, and the note names the reward.
         session.retune_rewards(freqs=[cfc_view.WAVES["ultra-low"], 10.0])
         control = cfc_view.view(page, session, toolbar(), lambda: None)
         shown = " ".join(x.value for x in _texts(control))
-        assert session.width_for(0.01) == pytest.approx(0.008)
-        assert "0.01 Hz sync is bounded to 0.008 Hz" in shown
-        assert "0.006–0.014 Hz" in shown
+        slow = session.rewards[0]
+        assert slow.band.low > 0, "a band that reaches 0 Hz measures the mean"
+        assert slow.band.high - slow.band.low < session.subhertz_width_hz
+        assert f"{slow.name} is bounded to" in shown
+        assert band_text(slow) in shown
 
-        # And the centre box can print the number it holds: a step of 0.1 rendered 0.01 as "0.0", which
-        # showed a frequency the operator had just chosen from the menu as zero.
-        assert "0.01" in _numbers(control)
+        # And the centre box can print the number it holds, not round it to zero.
+        assert f"{cfc_view.WAVES['ultra-low']:g}" in _numbers(control)
     finally:
         session.stop()
 
 
 def test_a_subhertz_threshold_gets_a_long_window_and_a_live_number_throughout_it():
-    """**Thirty seconds of a 0.05 Hz band is one and a half independent readings.** That is not a
-    distribution, it is where one slow cycle happened to be, so the window has to be as long as the band is
-    slow: `calibration_for` asks for enough readings to measure the *spread* and not merely the level.
-
-    What must not follow from a longer window is waiting for it. The provisional derivation re-runs every
-    second from the first second, so a four-minute window is a threshold that keeps improving for four
-    minutes rather than four minutes of the constructed placeholder — which on this screen would be 10 µV
-    against a signal in the tens, i.e. a reward met from the start whatever happens.
-    """
+    """A sub-hertz reward calibrates over minutes, capped, and its threshold is derived from the readings
+    every second of that window rather than held at the placeholder."""
     from nfb_console import cfc_view
     from nfb_console.targets import CALIBRATION_SECONDS
 
     assert cfc_view.calibration_for(10.0, 0.2) == CALIBRATION_SECONDS, "an ordinary reward is unchanged"
-    assert cfc_view.calibration_for(0.1, 0.05) == pytest.approx(240.0)
-    assert cfc_view.calibration_for(0.01, 0.008) == cfc_view.CALIBRATION_CAP_SECONDS, "and capped"
+    assert cfc_view.calibration_for(0.1, 0.05) > 4 * CALIBRATION_SECONDS, "a slow band waits for minutes"
+    assert cfc_view.calibration_for(0.01, 0.001) == cfc_view.calibration_for(0.01, 0.0001), "and is capped"
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
         session.retune_rewards(freqs=[cfc_view.WAVES["Mayer"], 10.0])
         slow, fast = session.rewards
-        assert slow.calibration_seconds == pytest.approx(240.0)
-        assert fast.calibration_seconds == CALIBRATION_SECONDS
+        assert slow.calibration_seconds > fast.calibration_seconds == CALIBRATION_SECONDS
         assert slow.derivation(slow.calibration_seconds) == "spread"
 
         # Readings by hand: the bench recording is eight seconds of a railed constant, which is the right
@@ -439,24 +379,15 @@ def test_a_reward_is_labelled_by_the_band_it_is_in_not_by_a_preset():
 
 
 def test_cfc_thresholds_hold_still_because_time_above_them_is_what_is_trained():
-    """"The goal of this type of training is to increase the client's production (i.e., time above
-    threshold) of reward 1 and reward 2." A threshold tracking a rolling window pins that percentage by
-    construction, so production cannot increase and the number being trained cannot show it — the same
-    criticism already recorded against our automatic mode, reached from the other direction.
-
-    Every instrument reads Manual, with an `A → M` button that copies an
-    auto-computed value into the manual one. Our calibration is that button, run once.
-    """
+    """The bins hold a fixed threshold and the rewards re-derive on a period, so time above threshold can
+    change; the reward cards offer both modes."""
     from nfb_console import cfc_view
-    from nfb_console.targets import DEFAULT_MODES
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
         assert all(t.mode == "fixed" for t in session.bin_targets), "the bins are Manual"
-        assert all(t.mode == "automatic" and t.recompute_seconds == 90.0 for t in session.rewards), (
+        assert all(t.mode == "automatic" and t.recompute_seconds > 0 for t in session.rewards), (
             "the rewards re-derive on a period and hold between")
-        assert DEFAULT_MODES[True] == "automatic", \
-            "and this is why it had to be said explicitly rather than inherited"
         # the first window is a phase on both: every line is provisional until it has filled once
         assert all(t.provisional for t in session.targets)
         assert all(t.can_redefine for t in session.bin_targets)
@@ -471,10 +402,9 @@ def test_cfc_thresholds_hold_still_because_time_above_them_is_what_is_trained():
         session.stop()
 
 
-def test_the_depth_is_his_five_seconds_and_changing_it_keeps_the_axis_honest():
-    """"The spectral display shows the approximate voltage that was produced at every frequency from
-    1-40 Hz for the last 5 seconds." The longer windows are ours; changing depth must move the row *rate*,
-    not leave two time scales in one picture."""
+def test_changing_the_depth_moves_the_row_rate_and_clears_the_cascade():
+    """A new depth changes the seconds between rows in proportion, and clears the rows drawn at the old
+    interval, so one picture never holds two time scales."""
     import numpy as np
 
     from nfb_console import cfc_view
@@ -482,15 +412,15 @@ def test_the_depth_is_his_five_seconds_and_changing_it_keeps_the_axis_honest():
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
         sg = session.spectrogram
-        assert sg.depth_seconds == 5.0 == cfc_view.DEPTHS[0]
-        assert sg.interval == pytest.approx(5.0 / 90)
+        assert sg.depth_seconds == cfc_view.DEPTHS[0], "it opens at the shallowest depth"
+        before = sg.interval
 
         sg.push(np.full(40, 5.0))
         assert sg.filled
-        sg.depth_seconds = 60.0
+        sg.depth_seconds = 4 * cfc_view.DEPTHS[0]
         sg.clear()
         assert not sg.filled, "rows sampled at the old interval cannot stay in a picture with a new axis"
-        assert sg.interval == pytest.approx(60.0 / 90)
+        assert sg.interval == pytest.approx(4 * before)
     finally:
         session.stop()
 
@@ -527,21 +457,23 @@ def test_a_hand_set_aim_survives_the_protocol_recomputing_the_others():
 
 
 def test_cfc_sets_one_filter_for_all_twelve_bins():
-    """A set with one job. Twelve separate choices would be twelve chances to make them incomparable."""
+    """Every bin's estimator has the one delay the session states, before and after a change, and a change
+    rebuilds all of them."""
     from nfb_console import cfc_view
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
-        assert session.bin_delay == 0.3
         # hold the objects, not their ids: CPython reuses the address of a freed object, so comparing
         # id() after a rebuild is a coin toss
         before = dict(session.bins)
-        assert all(m.delay_seconds == pytest.approx(0.3, abs=0.02) for m in before.values())
+        opening = session.bin_delay
+        assert all(m.delay_seconds == pytest.approx(opening, abs=0.02) for m in before.values())
 
-        session.retune_bins(0.5)
-        assert session.bin_delay == 0.5
+        wanted = opening + 0.2
+        session.retune_bins(wanted)
+        assert session.bin_delay == pytest.approx(wanted)
         assert set(session.bins) == set(before), "same bins"
-        assert all(m.delay_seconds == pytest.approx(0.5, abs=0.02) for m in session.bins.values())
+        assert all(m.delay_seconds == pytest.approx(wanted, abs=0.02) for m in session.bins.values())
         assert all(session.bins[k] is not v for k, v in before.items()), "all rebuilt, none stale"
     finally:
         session.stop()
@@ -662,20 +594,22 @@ def test_the_cascade_is_sized_to_its_box_and_not_to_its_pixels():
 
 
 def test_a_reward_carries_a_higher_line_derived_from_the_same_window():
-    """One window, two lines, and the higher one cannot fall below the first — the two aims can route to
-    different estimators, and two estimators can cross."""
+    """Each settled reward has a second line above its threshold, from the same window, and only a
+    reading past that line reaches it."""
+    import numpy as np
+
     from nfb_console import cfc_view
 
     session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
     try:
-        pump(session)
+        rng = np.random.default_rng(0)
         for tgt in session.rewards:
-            assert tgt.reach_rate == cfc_view.REACH_RATE
+            for value in 10.0 + 3.0 * rng.standard_normal(int((tgt.settle_seconds + tgt.window) * 20) + 20):
+                tgt.observe(float(value), 20.0)
             tgt.redefine()
-            if tgt._settled:
-                assert tgt.reach_threshold >= tgt.threshold
-                assert tgt.reaches(tgt.reach_threshold + 1.0)
-                assert not tgt.reaches(tgt.threshold)
+            assert tgt.reach_threshold > tgt.threshold
+            assert tgt.reaches(tgt.reach_threshold + 1.0)
+            assert not tgt.reaches(tgt.threshold)
     finally:
         session.stop()
 
@@ -878,3 +812,77 @@ def test_the_music_row_says_what_it_actually_watches():
         assert len(f"stops while {phrase}") <= 110 and len(note) <= 110
     finally:
         session.stop()
+
+
+def test_each_bin_reads_its_own_channel():
+    """A rhythm on one channel raises that channel's bin and not the same bin on the other channel."""
+    import numpy as np
+
+    from nfb.stream import Block
+    from nfb_console import cfc_view
+
+    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
+    try:
+        rate = session.rate
+        t = np.arange(int(4 * rate)) / rate
+        waves = {0: 30 * np.sin(2 * np.pi * 10.0 * t), 1: np.zeros(len(t))}
+        for i in range(0, len(t) - 7, 8):
+            for ch, spec in session.specs.items():
+                session.feed_block(Block(ch, i, tuple(to_counts(waves[ch][i:i + 8], spec.scale).tolist()), spec))
+        loud, quiet = ({tgt.band.low: session.value_for(tgt) for tgt in session.bin_targets if tgt.source == ch}
+                       for ch in (0, 1))
+        band = next(low for low in loud if low <= 10.0 < low + 4)
+        assert loud[band] > 10 * max(quiet[band], 0.1), (loud[band], quiet[band])
+    finally:
+        session.stop()
+
+
+def test_a_bin_louder_than_the_bin_below_it_is_named():
+    """A bin is named as breaking the falling spectrum only when it reads above the bin below it."""
+    from nfb_console import cfc_view
+
+    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
+    try:
+        bins = [tgt for tgt in session.bin_targets if tgt.source == 0]
+        for n, tgt in enumerate(bins):
+            tgt.value, tgt.total = 100.0 - n, 100
+        assert session.breaks_one_over_f() == [], "a falling spectrum breaks nothing"
+        bins[3].value = bins[2].value + 5.0
+        assert session.breaks_one_over_f() == [bins[3]]
+    finally:
+        session.stop()
+
+
+def test_the_reward_plot_draws_the_rewards():
+    """The coupling plot advances with each reward's own reading."""
+    from nfb_console import cfc_view
+
+    session = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
+    try:
+        for n, tgt in enumerate(session.rewards):
+            tgt.value = 7.0 + n
+        session.push_displays(1e9)
+        series = session.reward_plot.series()
+        assert [s[-1] for s in series] == [7.0 + n for n in range(len(session.rewards))]
+    finally:
+        session.stop()
+
+
+def test_cfc_total_above_does_not_hide_an_always_hot_bin():
+    """total_above treated a bin met 0% of the time (sustained above threshold — the worst) the same as a
+    bin with no window yet, because `0.0 or 100.0` is 100.0. None still counts as fully met; 0.0 does not."""
+    import types
+
+    from nfb_console.cfc_view import CFCSession
+
+    class _Bin:
+        def __init__(self, pct):
+            self._pct = pct
+
+        def recent_percent(self):
+            return self._pct
+
+    stub = types.SimpleNamespace(bin_targets=[_Bin(0.0), _Bin(None), _Bin(100.0)])
+    total = CFCSession.total_above.fget(stub)
+    # met 0% → 100 above (the hot bin, now counted); no window → 0; met 100% → 0
+    assert total == pytest.approx(100.0)

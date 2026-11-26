@@ -218,6 +218,12 @@ def test_the_reading_is_held_at_zero_until_every_part_of_the_slow_cycle_has_been
     assert not early.settled and metric.settled
 
 
+def test_a_flat_channel_reads_no_coupling_on_either_measure():
+    """A channel with no signal reads zero, not a full-strength coupling."""
+    metric = feed(np.zeros(int(30 * RATE)))
+    assert metric.modulation == 0.0 and metric.vector_length == 0.0
+
+
 def test_the_index_itself_is_flat_at_zero_and_one_when_everything_is_in_one_bin():
     assert modulation_index(np.ones(PHASE_BINS)) == 0.0
     one = np.zeros(PHASE_BINS)

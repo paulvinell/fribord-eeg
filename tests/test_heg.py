@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from nfb.heg import (Frame, Channel, FrameProcessor, HEG_METRICS, QUALITY_GOOD, QUALITY_MOTION,
-                     QUALITY_SETTLING, SignalProcessor, SimulatedMendi)
+                     QUALITY_SETTLING, HegState, SignalProcessor, SimulatedMendi)
 from nfb.heg import proto
 from nfb.hrv.metrics import metric_value
 
@@ -214,23 +214,20 @@ def test_motion_frames_advance_the_clock_and_not_the_statistics():
         "a motion hold must not read as a collapse in variability"
 
 
-def test_the_metrics_wait_for_their_windows():
+def test_every_metric_speaks_on_a_settled_stream_and_names_scalings_that_exist():
+    """A metric that gives nothing on good frames, or names a scaling that is gone, is a dead choice."""
+    import math
+
+    from nfb_console import normalise
+
     proc, sig = FrameProcessor(), SignalProcessor()
-    early = sig.push(proc.process(next(iter(frames(0.1)))), 0.0)
-    for metric_id in ("hbo", "oxy_index", "hbo_variability", "hbo_trend"):
-        assert metric_value(HEG_METRICS[metric_id], early) is None, metric_id
     state = None
     for f in frames(20.0):
         state = sig.push(proc.process(f), proc.gate_fraction)
     for metric_id, spec in HEG_METRICS.items():
-        assert metric_value(spec, state) is not None, metric_id
-
-
-def test_the_variability_metrics_default_to_decrease():
-    assert HEG_METRICS["hbo_variability"].invert
-    assert HEG_METRICS["oxy_variability"].invert
-    assert HEG_METRICS["hbo_variability"].default_direction == "decrease"
-    assert not HEG_METRICS["oxy_index"].invert
+        value = metric_value(spec, state)
+        assert value is not None and math.isfinite(value), metric_id
+        assert spec.strategies and set(spec.strategies) <= set(normalise.STRATEGIES), metric_id
 
 
 def test_the_simulator_reaches_good_quality_and_plausible_numbers():
@@ -242,3 +239,48 @@ def test_the_simulator_reaches_good_quality_and_plausible_numbers():
     assert state.quality == QUALITY_GOOD
     assert state.samples_seen == int(30 * RATE)
     assert abs(state.smoothed_hbo) < 5000, "the projection cancels most of the common mode"
+
+
+def test_each_named_frame_source_opens_its_own_kind_and_an_unknown_name_is_refused():
+    """The device screen names a source by word, so the headband word must give the headband's reader."""
+    from nfb.heg.source import LiveMendi, frame_source
+
+    assert isinstance(frame_source("simulator", realtime=False), SimulatedMendi)
+    assert isinstance(frame_source("headband"), LiveMendi)
+    with pytest.raises(ValueError):
+        frame_source("nothing")
+
+
+def test_a_metric_reports_nothing_rather_than_zero_before_it_can_speak():
+    """Zero is a reading and 'no reading yet' is not. A channel handed 0.0 drives itself to its floor
+    and reads as a bad result, which is the opposite of the truth — the HRV catalogue shipped without
+    these predicates and fed literal zeros into the rolling scale for a whole window."""
+    early = HegState(t=1.0, samples_seen=1)
+    for metric_id in HEG_METRICS:
+        assert metric_value(HEG_METRICS[metric_id], early) is None, f"{metric_id} spoke too early"
+    assert metric_value(HEG_METRICS["oxy_index"], None) is None
+
+    settled = HegState(t=10.0, samples_seen=200, smoothed_hbo=120.0, smoothed_hbr=-30.0,
+                       hbo_std_short=2.0, oxy_std_short=3.0, hbo_slope=0.4, windowed_ready=True)
+    for metric_id in HEG_METRICS:
+        assert metric_value(HEG_METRICS[metric_id], settled) is not None
+
+
+def test_a_windowed_metric_stays_silent_until_its_window_is_filled():
+    """After a long motion hold or a reconnect gap the stability and trend windows are trimmed to one point,
+    so the variability and slope read a false 0.0 — which, inverted, is the best-possible score. Those
+    metrics gate on the window being filled, not on the motion-held sample count."""
+    thin = HegState(t=10.0, samples_seen=200, smoothed_hbo=120.0, smoothed_hbr=-30.0,
+                    hbo_std_short=0.0, oxy_std_short=0.0, hbo_slope=0.0, windowed_ready=False)
+    for metric_id in ("hbo_variability", "oxy_variability", "hbo_trend"):
+        assert metric_value(HEG_METRICS[metric_id], thin) is None, f"{metric_id} spoke on a thin window"
+    # the level metrics do not read the windows, so they still speak
+    assert metric_value(HEG_METRICS["oxy_index"], thin) is not None
+
+
+def test_the_metrics_that_are_better_low_say_so():
+    """`invert` is not a preference: feedback that got stronger as the signal got jitterier would
+    reinforce the wrong thing, so the sensible aim ships with the metric."""
+    steadiness = {"hbo_variability", "oxy_variability"}
+    for metric_id, spec in HEG_METRICS.items():
+        assert spec.invert == (metric_id in steadiness), f"{metric_id} has the wrong good end"

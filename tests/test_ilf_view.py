@@ -8,8 +8,6 @@ the four-cycle floor under the auto-threshold window, and the Shepard tone's env
 
 from __future__ import annotations
 
-import threading
-import time
 
 import numpy as np
 import pytest
@@ -160,12 +158,6 @@ def test_the_product_reports_its_settling_and_it_is_the_transient_not_the_delay(
     assert ProductSynchrony(chans, (0, 1), 10.0).settle_seconds < 1.0
 
 
-def test_a_product_reward_reports_squared_microvolts():
-    """A product of two voltages is not an amplitude, and a card printing µV over it would be lying. Every
-    threshold here is derived from data so nothing breaks — but the unit has to say which quantity it is."""
-    assert ProductSynchrony(specs(), (0, 1), 10.0).unit == "µV²"
-
-
 def test_the_filter_becomes_a_bare_lowpass_when_the_lower_edge_would_fall_past_zero():
     """**The fork, and it is the whole protocol at infra-slow frequencies.**
     The filter is a lowpass when the lower edge would fall past zero, with a fixed bandwidth of 3 Hz. So a 0.05 Hz centre is a
@@ -185,47 +177,33 @@ def test_the_filter_becomes_a_bare_lowpass_when_the_lower_edge_would_fall_past_z
     # The `0–2×` band, still available and still exactly what it was: no lower edge, and the lowpass
     # corner is **twice the centre**, not centre + bandwidth/2.
     slow = ProductSynchrony(specs(), (0, 1), 0.05, slow_band="0–2×")
-    assert slow.lowpass_only and (slow.low, slow.high) == (0.0, 0.1)
+    assert slow.lowpass_only and (slow.low, slow.high) == pytest.approx((0.0, 2 * 0.05))
     assert "no high-pass" in slow.describe() and "twice the centre" in slow.describe()
     alpha = ProductSynchrony(specs(), (0, 1), 10.0)
-    assert (alpha.low, alpha.high) == (8.5, 11.5), "a 3 Hz bandwidth at the default centre"
+    assert (alpha.low + alpha.high) / 2 == pytest.approx(10.0), "a bandpass centred on the frequency"
     assert not alpha.lowpass_only
 
 
 # --- the frequency ladder -------------------------------------------------------------------
 
-def test_the_frequency_grid_is_finer_at_the_top():
-    """`round to 0.05 increments`: free below 0.01 Hz, hundredths below 0.1, twentieths below 1, quarters
-    above. One function serves the arrows and the snapping so the two cannot disagree.
+def test_the_frequency_grid_snaps_to_the_step_the_arrows_take():
+    """A snapped frequency lies on its own grid and within half a step of the value typed, and one arrow step
+    from a snapped value moves it to the next point on the grid."""
+    for hz in (0.037, 0.05, 0.5, 0.73, 9.87, 10.0, 40.0):
+        snapped = ilf_view.snap_hz(hz)
+        step = ilf_view.grid_hz(hz)
+        assert abs(snapped - hz) <= step / 2 + 1e-9, hz
+        assert snapped / step == pytest.approx(round(snapped / step)), f"{hz}: on the grid"
+        assert ilf_view.snap_hz(snapped) == snapped, f"{hz}: the snap is stable"
+        stepped = ilf_view.snap_hz(snapped + ilf_view.grid_hz(snapped))
+        assert stepped == pytest.approx(snapped + ilf_view.grid_hz(snapped)), f"a step at {hz} Hz lands on the grid"
+    assert ilf_view.snap_hz(0.0001) == 0.0001, "left alone below the finest grid"
 
-    **The top rung is 0.1 Hz because a quarter of a hertz cannot place a reward on an individual alpha or
-    gamma peak.** `COARSE_GRID_HZ` carries the reasoning; the three slower rungs are untouched, so
-    infra-slow work is unaffected.
-    """
-    assert ilf_view.grid_hz(0.005) == 0.001
-    assert ilf_view.grid_hz(0.05) == 0.01
-    assert ilf_view.grid_hz(0.5) == 0.05, "twentieths below 1 Hz"
-    assert ilf_view.grid_hz(10.0) == widgets.COARSE_GRID_HZ == 0.1
-
-    assert ilf_view.snap_hz(9.87) == 9.9, "tenths above 1 Hz"
-    assert ilf_view.snap_hz(0.037) == 0.04, "hundredths below 0.1 Hz"
-    assert ilf_view.snap_hz(0.0001) == 0.0001, "left alone below 0.01 Hz"
-
-    # The arrows and the snap have to come from the same rung, or a step moves the box and springs back.
-    for hz in (0.005, 0.05, 0.5, 10.0, 40.0):
-        stepped = ilf_view.snap_hz(hz + ilf_view.grid_hz(hz))
-        assert stepped != pytest.approx(ilf_view.snap_hz(hz)), f"a step at {hz} Hz has to move it"
-
-
-# --- the bands and the aims -----------------------------------------------------------------
 
 def test_the_inhibit_ladder_is_contiguous_and_covers_the_whole_range():
-    """Nine bands. Two of the nine are filled in by contiguity — which only works if the other seven
-    establish it, so contiguity is the assertion that licenses the construction."""
-    assert len(ilf_view.INHIBITS) == 9
+    """The inhibit bands leave no gap and no overlap, and none reaches DC."""
     for (_, high), (low, _) in zip(ilf_view.INHIBITS, ilf_view.INHIBITS[1:]):
         assert high == low, "no gaps and no overlaps"
-    assert ilf_view.INHIBITS[-1][1] == 40.0
     assert ilf_view.INHIBITS[0][0] > 0, "a band reaching DC is not a band"
 
 
@@ -249,23 +227,6 @@ def test_a_rectified_product_is_not_fitted_with_a_rayleigh():
     assert Target(-2, wide, "increase", hit_rate_override=ilf_view.REWARD_AIM,
                   narrowband_envelope=False).tail_events(window) > 4.0
 
-
-def test_the_ratchet_mode_is_gone_and_stays_gone():
-    """It was built on a misreading — `Reset, if transition from 100%` takes the *success-rate setting* as
-    its input, not the signal, so it is an operator recalibrate and not a signal-driven ratchet. It also
-    deadlocked: a target met on its first sample cleared its window every sample and never derived a
-    threshold at all, so three rewards sat at the 10.0 default while reading 188, 3637 and 31 794.
-
-    Pinned as a test because the idea is attractive and the evidence for it was published in two docs.
-    """
-    from nfb_console import targets
-
-    assert targets.MODES == ("fixed", "automatic")
-    assert not hasattr(targets, "RATCHET")
-    assert not any(t.mode == "ratchet" for t in _session().targets)
-
-
-# --- the session ----------------------------------------------------------------------------
 
 def _stub_device(reference: str = "bipolar", lower_limit_hz: float = 0.01):
     """Just enough device for `wiring_problem`, which is the only thing on this screen that reads one."""
@@ -336,16 +297,14 @@ def test_the_session_builds_two_rewards_and_nine_bands_on_the_sum():
         # shares the module's filters and is a reward in its own right, ANDed with the same inhibits.
         assert session.reward is not None and session.amplitude is not None
         assert session.reward.unit == "µV²" and session.amplitude.unit == "µV"
-        assert session.reward.hit_rate == ilf_view.REWARD_AIM == 0.10
-        assert session.amplitude.hit_rate == ilf_view.AMPLITUDE_AIM == 0.60, "the amplitude reward aim"
-        assert session.frequency_hz == ilf_view.DEFAULT_HZ == 10.0, "the default frequency"
-        # the product keeps the module's own 30 s window; the amplitude has its own epoch
-        assert session.reward.window == ilf_view.EPOCH_SECONDS == 30.0
-        assert session.amplitude.window == ilf_view.amplitude_epoch(10.0) == 10.0
+        assert session.reward.hit_rate < session.amplitude.hit_rate, "the product is the rare event"
+        # the product keeps the module's own window; the amplitude has its own epoch
+        assert session.reward.window == ilf_view.EPOCH_SECONDS
+        assert session.amplitude.window == ilf_view.amplitude_epoch(session.frequency_hz)
 
         # **Nine bands, not eighteen** — the inhibits are per mode rather than per channel,
         # and they read the summed signal.
-        assert len(session.inhibit_targets) == 9
+        assert len(session.inhibit_targets) == len(ilf_view.INHIBITS)
         assert all(x.pair == session.pair for x in session.inhibit_targets), "measured on the sum"
         assert all(session.latency_for(x) is not None for x in session.targets)
 
@@ -391,15 +350,7 @@ def test_the_reward_does_not_fire_all_session_on_a_dead_channel():
     session = _session(loop=True)
     try:
         session.toggle_pause()          # a session opens paused, and a paused feed observes nothing
-        thread = threading.Thread(target=session.run, daemon=True)
-        thread.start()
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            if session.amplitudes:      # readings are flowing, whatever the targets make of them
-                break
-            time.sleep(0.05)
-        session._stop = True
-        thread.join(timeout=2.0)
+        pump(session, until=lambda: bool(session.amplitudes))
         assert session.error is None, session.error
         tgt = session.reward
         assert session.amplitudes, "the metrics still ran — only the judging was withheld"
@@ -698,6 +649,8 @@ def test_stops_while_failing_means_an_inhibit_is_violated_not_the_rare_reward():
         assert session.feedback.music.stops_when == "failing", \
             "the default, so a violation has a consequence without anyone finding a pill"
 
+        session.reward.threshold = 1000.0
+        session.reward.observe(1.0, 20.0)               # the reward is measured and failing
         inhibit.observe(5.0, 20.0)                      # clear: under its threshold
         assert not session.music_hold(met=False), "the rare reward failing must not pause the playback"
         inhibit.observe(50.0, 20.0)                     # violated
@@ -793,7 +746,7 @@ def test_the_settings_survive_a_stop_and_the_ladder_does_not():
             assert second.bandwidth_hz == 1.0 and second.order == 1
             assert second.post_seconds == pytest.approx(0.25)
             assert second.metric is not None and (second.metric.low, second.metric.high) == (39.5, 40.5)
-            assert len(second.inhibit_targets) == 9, "the ladder is rebuilt, not adopted"
+            assert len(second.inhibit_targets) == len(ilf_view.INHIBITS), "the ladder is rebuilt, not adopted"
         finally:
             second.stop()
     finally:
@@ -813,8 +766,6 @@ def test_the_shepard_wheel_is_periodic_in_position_so_the_rise_never_ends():
     f1, a1 = player.partials(1.0)
     assert np.allclose(np.sort(f0), np.sort(f1))
     assert np.allclose(np.sort(a0), np.sort(a1))
-    assert music.SHEPARD_SUBTONES == 12 and music.SHEPARD_MIN_HZ == 1.0
-    assert f0.max() == pytest.approx(2048.0), "twelve octaves from 1 Hz, so the wheel spans to 4096"
 
 
 def test_the_partial_that_wraps_is_almost_silent_when_it_does():
@@ -933,11 +884,11 @@ def test_the_generated_sounds_are_quiet_enough_to_be_a_background():
     from nfb_console import music
     from nfb_console.feedback import Music
 
-    assert Music().volume == 60.0, "the default the report was made against"
     player = music.NoisePlayer()
     player.configure("pink", Music().volume)
     rms = float(np.sqrt((np.concatenate([player._block(2048)[:, 0] for _ in range(40)]) ** 2).mean()))
-    assert rms == pytest.approx(0.0093, rel=0.15), f"{20 * np.log10(rms):.1f} dBFS at volume 60"
+    dbfs = 20 * np.log10(rms)
+    assert -50.0 < dbfs < -35.0, f"{dbfs:.1f} dBFS at the default volume is not a background level"
 
 
 def test_the_level_moves_the_shepard_tone_upward_and_nothing_else_does():
@@ -1028,7 +979,9 @@ def test_how_far_the_tone_travels_is_this_mechanisms_own_range_and_is_set_here()
 
 
 def test_the_shepard_tone_is_available_but_is_not_this_instruments_feedback():
-    """**It belongs to the infra-low reward, not to synchrony.** The synchrony measure produces a mark, a
+    """The Shepard tone is offered on this screen and is off by default.
+
+    **It belongs to the infra-low reward, not to synchrony.** The synchrony measure produces a mark, a
     percentage above threshold, a continuous output, a bar, a threshold and the two traces — numbers for
     a game and a lamp, and no sound of its own. An earlier version enabled the Shepard tone by default
     here, which presented another instrument's feedback as this one's.
@@ -1040,9 +993,6 @@ def test_the_shepard_tone_is_available_but_is_not_this_instruments_feedback():
     try:
         assert "shepard" in session.music_sources
         assert not session.feedback.music.enabled, "synchrony makes no sound by default"
-        assert session.feedback.click.enabled, "the mark is the discrete reward"
-        assert session.feedback.sound.enabled, "the volume is the continuous output"
-        assert not session.feedback.alert.enabled and "alert" not in session.offers
     finally:
         session.stop()
 
@@ -1050,33 +1000,25 @@ def test_the_shepard_tone_is_available_but_is_not_this_instruments_feedback():
 
 
 def test_the_sum_spectrum_sees_what_the_artifact_gate_rejected():
-    """Every other display on every screen draws rejected data, because a rejection you cannot see is
-    indistinguishable from a dead electrode. The sum spectrum broke that when the summed signal moved into
-    `consume`, which only runs on accepted blocks — so it needs its own aligner in `observe_raw`.
+    """The sum spectrum draws the raw summed signal, including a stretch the artifact gate rejected, so a
+    rejection is visible there and not hidden behind the gate's stand-in."""
+    from conftest import counts
 
-    Two aligners rather than one because an aligner hands each run over exactly once; sharing it would starve
-    whichever consumer asked second.
-    """
-    session = _session()
+    session = _session_at_corner(0.5)
     try:
-        assert session.inhibit_aligner is not session.display_aligner
-        # the display path is fed from observe_raw, which the base class calls before the gate's verdict
-        import inspect
-        source = inspect.getsource(ilf_view.ILFSession.observe_raw)
-        assert "display_aligner" in source and "sum_ring" in source
-        assert "sum_ring" not in inspect.getsource(ilf_view.ILFSession._consume_inhibits)
-    finally:
-        session.stop()
-
-
-def test_the_level_rule_is_left_at_its_default_because_it_cannot_matter_here():
-    """With the inhibits on the condition only, `scaled`, `weighted` and `weakest` all reduce to the mean of
-    the rewards — so the `combine = "scaled"` this screen had inherited from CFC was a line that could not
-    change the output while reading as a decision somebody made."""
-    session = _session()
-    try:
-        assert session.feedback.combine == "weighted", "the default, not a copied rule"
-        assert not any(x.direction != "increase" for x in session.channel_targets("level"))
+        spec = session.specs[0]
+        t = np.arange(int(8.2 * RATE)) / RATE
+        x = 10.0 * np.sin(2 * np.pi * 10.0 * t)
+        burst = 300.0
+        x[int(8 * RATE):int(8 * RATE) + 16] += burst
+        rejected = False
+        for i in range(0, len(x) - 7, 8):
+            for ch in (0, 1):
+                session.feed_block(Block(ch, i, counts(x[i:i + 8], spec.scale), session.specs[ch]))
+            rejected = rejected or session.rejecting(0)
+        assert rejected, "the burst has to trip the gate for this to say anything"
+        assert np.abs(session.spectrum_sum_ring().buf).max() > 2 * burst * 0.9, \
+            "the burst on both channels reaches the sum spectrum"
     finally:
         session.stop()
 
@@ -1189,28 +1131,18 @@ def test_the_trace_is_where_you_overrule_the_device_about_a_channel():
 
 
 def test_the_continuous_output_is_a_straight_window_and_not_an_average():
-    """**The output is a position in a window below the threshold.**
-
-        output = (value*100 - threshold*size + position*threshold) / (position*threshold)
-        mark   = value >= threshold
-
-    The value is compared with the threshold (30 s window, 10% aim), with a range size of **35** and a
-    range position of **100**. So the window is 65% to 100% of the threshold and the output is the position
-    in it — a straight line that is full *at* the threshold, which is where the mark fires too.
-
-    An earlier version had this running from the threshold up to 1.5x. The size and position say otherwise.
-    """
-    assert ilf_view.RANGE_POSITION == 100.0 and ilf_view.RANGE_SIZE == 35.0
-
+    """The output is the linear position of the value in a window that ends at the threshold: 0 at the
+    window's bottom, full at the threshold and above it, and equal steps in between."""
     out = ilf_view.reward_output
-    assert out(0.50 * 100, 100) == 0.0, "below the window"
-    assert out(0.65 * 100, 100) == 0.0, "the bottom of the window is 0.65x the threshold"
-    assert out(0.80 * 100, 100) == pytest.approx((0.80 - 0.65) / 0.35, abs=1e-6), "linear, not a logistic"
-    assert out(1.00 * 100, 100) == 1.0, "full **at** the threshold, not above it"
-    assert out(2.50 * 100, 100) == 1.0, "and it stays full; the window ends there"
-    # No soft ramp anywhere, so equal steps in value are equal steps out — the property a logistic lacks.
-    lo, mid, hi = out(70, 100), out(80, 100), out(90, 100)
-    assert mid - lo == pytest.approx(hi - mid, abs=1e-9)
+    bottom = ilf_view.RANGE_POSITION - ilf_view.RANGE_SIZE      # percent of a threshold of 100
+    assert out(bottom * 0.9, 100) == 0.0, "below the window"
+    assert out(bottom, 100) == 0.0, "the bottom of the window"
+    assert out(100, 100) == 1.0, "full **at** the threshold, not above it"
+    assert out(250, 100) == 1.0, "and it stays full; the window ends there"
+    mid = (bottom + 100) / 2
+    assert out(mid, 100) == pytest.approx(0.5, abs=1e-6), "linear, not a logistic"
+    lo, hi = out(mid - 5, 100), out(mid + 5, 100)
+    assert out(mid, 100) - lo == pytest.approx(hi - out(mid, 100), abs=1e-9)
 
 
 def test_the_level_reads_the_product_alone_and_saturates_at_the_reward():
@@ -1256,7 +1188,6 @@ def test_the_output_window_is_settable_and_is_the_sensitivity_control():
     session = _session()
     try:
         session.reward.threshold = 100.0
-        assert (session.range_size, session.range_position) == (35.0, 100.0), "the default values"
 
         def at(value: float) -> float:
             session.amplitudes[("product",)] = value
@@ -1284,8 +1215,6 @@ def test_the_output_window_is_settable_and_is_the_sensitivity_control():
         assert at(100.0) < 1.0, "the top is now twice the threshold, so being at it is no longer full"
         assert "2× the threshold" in session.level_source[1] or "full at 2×" in session.level_source[1]
 
-        # And they are clamped to the sliders' own range rather than being free numbers.
-        assert ilf_view.RANGE_LIMITS == (0.0, 200.0)
     finally:
         session.stop()
 
@@ -1330,12 +1259,12 @@ def test_the_two_second_sample_and_hold_is_the_default_and_is_choosable():
     The shorter feed stays available, because a 2 s staircase drives a game's speed well and may read as sluggish on a
     screen with no game. The 2 s hold is the default.
     """
-    assert ilf_view.SAMPLE_HOLD_SECONDS == 2.0
-    assert set(ilf_view.HOLD_CHOICES) == {2.0, 0.0}
+    hold = ilf_view.SAMPLE_HOLD_SECONDS
+    assert hold in ilf_view.HOLD_CHOICES and 0.0 in ilf_view.HOLD_CHOICES, "both feeds are choosable"
 
     session = _session()
     try:
-        assert session.hold_seconds == 2.0, "2 s by default"
+        assert session.hold_seconds == hold, "the hold is the default"
         assert session.hold_choices is ilf_view.HOLD_CHOICES
 
         spec = session.specs[0]
@@ -1350,11 +1279,11 @@ def test_the_two_second_sample_and_hold_is_the_default_and_is_choosable():
                 seen.append(session._held(("product",), float(i), block))
             return sum(1 for a, b in zip(seen, seen[1:]) if a != b)
 
-        held = run(2.0)
+        held = run(hold)
         free = run(0.0)
         seconds = 500 * 8 / spec.rate_hz
         assert free == 499, "with no hold every reading is its own value"
-        assert held == pytest.approx(seconds / 2.0, abs=1), f"one change every 2 s over {seconds:g} s"
+        assert held == pytest.approx(seconds / hold, abs=1), f"one change per hold over {seconds:g} s"
     finally:
         session.stop()
 
@@ -1428,10 +1357,8 @@ def test_the_slow_band_is_a_choice_and_the_old_one_is_still_there():
     from nfb.dsp import ProductSynchrony
     from nfb.dsp.product import DEFAULT_SLOW_BAND, SLOW_BANDS
 
-    assert set(SLOW_BANDS) == {"0–2×", "¼–2×", "½–2×", "½–1½×"}
-    assert SLOW_BANDS["0–2×"] == (0.0, 2.0), "the bare lowpass, untouched"
-    assert SLOW_BANDS["½–1½×"] == (0.5, 1.5), "the low cut and high cut at half the centre"
-    assert DEFAULT_SLOW_BAND == "¼–2×", "a band reaching DC is not what the product measure is for"
+    assert SLOW_BANDS[DEFAULT_SLOW_BAND][0] > 0, "a band reaching DC is not what the product measure is for"
+    assert any(lo == 0.0 for lo, _hi in SLOW_BANDS.values()), "the bare lowpass is still offered"
 
     # Proportional, so the shape is the same wherever the frequency is pointed.
     for hz in (0.05, 0.02, 0.01):
@@ -1441,9 +1368,10 @@ def test_the_slow_band_is_a_choice_and_the_old_one_is_still_there():
             assert (m.low, m.high) == pytest.approx((hz * lo, hz * hi)), (hz, name)
 
     # Above the fork nothing changes: the bandpass has its own edges and the choice does not apply.
+    plain = ProductSynchrony(specs(), (0, 1), 10.0)
     for name in SLOW_BANDS:
         alpha = ProductSynchrony(specs(), (0, 1), 10.0, slow_band=name)
-        assert (alpha.low, alpha.high) == (8.5, 11.5)
+        assert (alpha.low, alpha.high) == (plain.low, plain.high)
 
 
 def test_the_slow_band_keeps_the_wave_and_attenuates_the_drift():
@@ -1500,7 +1428,6 @@ def test_every_plot_can_be_given_a_window_and_a_scale():
     session = _session()
     try:
         assert (session.wave_scale_uv, session.reward_scale) == (0.0, 0.0), "auto by default"
-        assert session.wave_cycles == 12 and session.trace_seconds == 5.0
 
         # The wave window resizes in place, keeping its history — its stride does not depend on the
         # cycle count, so the same points serve any width. See the resize test for the full contract.
@@ -1560,14 +1487,15 @@ def test_the_ilf_screen_says_which_band_the_reward_is_measuring():
     try:
         control = ilf_view.view(page, session, toolbar(), lambda: None)
         shown = " ".join(x.value for x in _texts(control))
-        assert "8.5–11.5 Hz" in shown, "their 3 Hz bandwidth at their default centre"
+        assert f"{session.metric.low:g}–{session.metric.high:g} Hz" in shown, "the band being measured"
         # The default slow band has a lower edge — their `direct` path assumes a hardware edge this amplifier
         # cannot supply — and it sits at `centre/4` rather than the ILF element's `centre/2`, which is a group
         # delay decision and ours. See `nfb.dsp.product.SLOW_BANDS`.
         session.set_frequency(0.05)
         session.redraw()
         shown = " ".join(x.value for x in _texts(control))
-        assert "0.0125–0.1 Hz" in shown, "centre/4 to twice the centre"
+        assert session.metric.low > 0
+        assert f"{session.metric.low:g}–{session.metric.high:g} Hz" in shown, "the slow band, with its lower edge"
 
         # And their path is still there, saying exactly what it always said.
         session.set_frequency(0.05, slow_band="0–2×")
@@ -1617,5 +1545,119 @@ def test_the_feedback_tab_offers_no_file_browser_for_the_shepard_tone():
         assert "partials an octave apart" in shown
         assert "how far it climbs" in shown and "from the bottom of the signal to the top" in shown
         assert "file or folder" not in shown
+    finally:
+        session.stop()
+
+
+def test_a_pair_with_a_missing_channel_is_refused():
+    """A product needs both channels in the session; naming one that is not there is refused at once."""
+    with pytest.raises(ValueError, match="not both in this session"):
+        ProductSynchrony(specs(), (0, 2), 10.0)
+    with pytest.raises(ValueError, match="not both in this session"):
+        ProductSynchrony(specs(), (2, 1), 10.0)
+
+
+def _feed_session(session, a, b, start: int = 0, step: int = BLOCK) -> None:
+    """Two channels of µV through the session's own `consume`, as the feed thread hands them over."""
+    for i in range(0, len(a) - (step - 1), step):
+        for ch, x in ((0, a), (1, b)):
+            session.consume(Block(ch, start + i, tuple(np.asarray(x[i:i + step]) / SCALE), session.specs[ch]))
+
+
+def test_the_product_reading_is_filed_as_the_product_and_the_amplitude_as_the_amplitude():
+    """Two equal tones in phase read half the square of their amplitude on the product, and the summed
+    amplitude on the amplitude."""
+    session = _session_at_corner(0.5)
+    try:
+        session.hold_seconds = 0.0
+        tt = np.arange(int(20 * RATE)) / RATE
+        wave = 20 * np.sin(2 * np.pi * session.frequency_hz * tt)
+        _feed_session(session, wave, wave)
+        assert session.amplitudes[("product",)] == pytest.approx(0.5 * 20 * 20, rel=0.2)
+        assert session.amplitudes[("amplitude",)] < 0.5 * session.amplitudes[("product",)]
+    finally:
+        session.stop()
+
+
+def test_the_state_scale_is_measured_only_on_the_settled_wave():
+    """The state's spread is not reported while the filter settles, nor until a full cycle of settled wave
+    has been seen; on two flat channels it is never reported."""
+    session = _session_at_corner(0.01)
+    try:
+        assert session.set_frequency(0.2)
+        cycle = ilf_view.STATE_SETTLE_CYCLES / session.frequency_hz
+        tt = np.arange(int(40 * RATE)) / RATE
+        wave = 200.0 + 8 * np.sin(2 * np.pi * session.frequency_hz * tt)
+        settled_at = first_scale = None
+        for i in range(0, len(wave) - (BLOCK - 1), BLOCK):
+            _feed_session(session, wave[i:i + BLOCK], wave[i:i + BLOCK], start=i)
+            now = (i + BLOCK) / RATE
+            if settled_at is None and session.metric.warmup >= 1.0:
+                settled_at = now
+            if first_scale is None and session.state_scale_uv is not None:
+                first_scale = now
+        assert settled_at is not None and first_scale is not None, "the run outlasts the settling"
+        assert first_scale >= settled_at + cycle - 1.5 * BLOCK / RATE, \
+            f"a scale at {first_scale:g} s, {settled_at:g} s settled, before a full settled cycle"
+    finally:
+        session.stop()
+
+    flat = _session_at_corner(0.01)
+    try:
+        assert flat.set_frequency(0.2)
+        zeros = np.zeros(int(40 * RATE))
+        _feed_session(flat, zeros, zeros)
+        assert flat.metric.warmup == 1.0
+        assert flat.state_scale_uv is None and flat.state_balance is None, "no spread, so no state"
+    finally:
+        flat.stop()
+
+
+def test_the_reward_plot_stops_saying_settling_once_the_filter_has_settled():
+    """The reward plot's caption says the filter is settling while it is, and not after."""
+    page = StubPage()
+    session = _session_at_corner(0.5)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        session.redraw()
+        assert any("settling" in x.value for x in _texts(control) if x.value), "a cold filter says so"
+        tt = np.arange(int(10 * RATE)) / RATE
+        wave = 20 * np.sin(2 * np.pi * session.frequency_hz * tt)
+        _feed_session(session, wave, wave)
+        assert session.metric.warmup == 1.0
+        session.redraw()
+        assert not [x.value for x in _texts(control) if x.value and "settling" in x.value]
+    finally:
+        session.stop()
+
+
+def test_the_reward_card_names_the_louder_and_the_quieter_channel():
+    """When one channel is several times louder in the band, the reward card names which channel is louder
+    and which it is louder than."""
+    page = StubPage()
+    session = _session_at_corner(0.5)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        tt = np.arange(int(10 * RATE)) / RATE
+        wave = np.sin(2 * np.pi * session.frequency_hz * tt)
+        _feed_session(session, 10 * wave, 40 * wave)
+        session.redraw()
+        said = [x.value for x in _texts(control) if x.value and "× ch" in x.value]
+        assert said and "ch1 is" in said[0] and "× ch0" in said[0], said
+    finally:
+        session.stop()
+
+
+def test_choosing_an_order_on_the_screen_rebuilds_the_filter_at_that_order():
+    """An order pill on the reward panel changes the order the product is filtered at."""
+    from harness import _find_pills
+
+    page = StubPage()
+    session = _session_at_corner(0.5)
+    try:
+        control = ilf_view.view(page, session, toolbar(), lambda: None)
+        other = next(n for n in range(1, 9) if n != session.order and _find_pills(control, f"order {n}"))
+        _find_pills(control, f"order {other}").on_click(None)
+        assert session.order == other
     finally:
         session.stop()

@@ -10,7 +10,6 @@ from __future__ import annotations
 import statistics
 
 import pytest
-from collections import deque
 
 from nfb.hrv.beats import Beat
 from nfb.hrv.ppg import PpgDecoder
@@ -61,7 +60,7 @@ def _mendi() -> MendiRunner:
 
 def test_both_runners_keep_their_beat_times_and_a_heart_rate():
     for runner in (_heart(), _mendi()):
-        assert isinstance(runner.beat_times, deque) and len(runner.beat_times) > 10
+        assert len(runner.beat_times) > 10
         assert list(runner.beat_times) == sorted(runner.beat_times)
         assert runner.heart_state is not None and 50.0 < runner.heart_state.hr_smoothed < 75.0
 
@@ -84,10 +83,43 @@ def test_a_heart_source_without_a_waveform_says_so():
     assert runner.waveform is None, "the Bluetooth heart-rate service sends beats only"
 
 
+class _Quiet:
+    """A source that gives nothing until it is closed."""
+
+    error = None
+
+    def __init__(self):
+        import threading
+
+        self.closed = threading.Event()
+
+    def beats(self):
+        self.closed.wait(5.0)
+        return iter(())
+
+    def frames(self):
+        self.closed.wait(5.0)
+        return iter(())
+
+    def close(self):
+        self.closed.set()
+
+    def describe(self):
+        return "quiet"
+
+
 def test_a_fresh_source_starts_without_the_previous_beats():
+    """A runner that opens another source holds none of the beats of the source before it."""
     for runner in (_heart(), _mendi()):
-        runner._reset()
-        assert not runner.beat_times
+        assert runner.beat_times
+        runner.source = None
+        runner.choice.problem = lambda: None
+        runner.choice.open = _Quiet
+        assert runner.attach()
+        try:
+            assert not runner.beat_times and runner.heart_state is None
+        finally:
+            runner.release()
 
 
 def test_a_waveform_can_be_read_while_the_runner_keeps_appending():

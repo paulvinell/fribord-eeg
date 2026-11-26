@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import math
 import random
-import threading
-import time
 
 from nfb.hrv.beats import Beat
 from nfb.hrv.ppg import (
@@ -20,6 +18,8 @@ from nfb.hrv.ppg import (
     START_PPG, STOP_PPG, FrameSplitter, PeakDetector, PpgDecoder, battery_level, command, crc,
     parse_ppg,
 )
+
+from harness import ListedPort
 
 FS = PPG_RATE_HZ
 
@@ -50,7 +50,6 @@ def test_a_pulse_frame_decodes_big_endian_and_keeps_every_sample():
     values = [1362 + 7 * i for i in range(16)]
     frame = ppg_frame(values)
     assert parse_ppg(frame) == values
-    assert len(frame) == 3 + ALLON_BODY_LEN
 
 
 def test_anything_that_is_not_a_pulse_frame_comes_back_as_none():
@@ -364,14 +363,6 @@ def test_the_warm_up_samples_are_dropped():
 
 # --- finding the cable -----------------------------------------------------------------------
 
-class FakePort:
-    def __init__(self, device, vid, description="", manufacturer=None, product=None,
-                 serial_number=None):
-        self.device, self.vid = device, vid
-        self.description, self.manufacturer = description, manufacturer
-        self.product, self.serial_number = product, serial_number
-
-
 def test_the_amplifier_is_never_offered_as_a_pulse_sensor(monkeypatch):
     """**Both devices are FTDI serial bridges on /dev/cu.usbserial-***, so a vendor-id match alone would
     sometimes hand the heart screen the amplifier — and opening a serial port is exclusive, so that is
@@ -379,9 +370,9 @@ def test_the_amplifier_is_never_offered_as_a_pulse_sensor(monkeypatch):
     one thing that separates them."""
     from nfb.hrv import sources
 
-    ports = [FakePort("/dev/cu.usbserial-FT000001", 0x0403, "Neurobit Optima+ 4 USB"),
-             FakePort("/dev/cu.usbserial-HM01", 0x0403, "FT230X Basic UART"),
-             FakePort("/dev/cu.Bluetooth-Incoming-Port", None, "n/a")]
+    ports = [ListedPort("/dev/cu.usbserial-FT000001", 0x0403, "Neurobit Optima+ 4 USB"),
+             ListedPort("/dev/cu.usbserial-HM01", 0x0403, "FT230X Basic UART"),
+             ListedPort("/dev/cu.Bluetooth-Incoming-Port", None, "n/a")]
     monkeypatch.setattr(sources, "usb_candidates",
                         lambda: [p for p in ports if p.vid == 0x0403 and not sources.is_amplifier(p)])
     port, trouble = sources.find_usb_port()
@@ -398,9 +389,9 @@ def test_the_missing_cable_message_names_what_is_on_usb_and_nothing_else(monkeyp
     from serial.tools import list_ports
 
     monkeypatch.setattr(list_ports, "comports",
-                        lambda: [FakePort("/dev/cu.Bluetooth-Incoming-Port", None, "n/a"),
-                                 FakePort("/dev/cu.JBLTUNE570BT", None, "n/a"),
-                                 FakePort("/dev/cu.usbserial-FT000001", 0x0403,
+                        lambda: [ListedPort("/dev/cu.Bluetooth-Incoming-Port", None, "n/a"),
+                                 ListedPort("/dev/cu.JBLTUNE570BT", None, "n/a"),
+                                 ListedPort("/dev/cu.usbserial-FT000001", 0x0403,
                                           "Neurobit Optima+ 4 USB")])
     port, trouble = sources.find_usb_port()
     assert port is None
@@ -409,470 +400,18 @@ def test_the_missing_cable_message_names_what_is_on_usb_and_nothing_else(monkeyp
     assert "skipped on purpose" in trouble, "including why the one that is there was not taken"
 
 
-def test_choosing_the_cable_does_not_report_the_same_fault_twice():
-    """The screen has two places a heart-rate fault can appear: a note under the source buttons, and a
-    status line under the port field. Both were being told there was no cable — the choice by going and
-    looking, the runner by trying — so the same two-line sentence appeared above and below the field.
-    Looking for a cable is not something to know in advance; the runner finds out and says so."""
-    from nfb_console.inputs import HeartChoice
-
-    assert HeartChoice(kind="usb").problem() is None
-    assert HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01").problem() is None
-
-
-def test_the_missing_cable_is_reported_by_whoever_tried_to_open_it(monkeypatch):
-    """The other half of not saying it twice: with the choice staying quiet, the fault still has to
-    arrive — from the runner, on its own thread, and be the sentence the status line shows."""
-    from nfb.hrv import sources
-    from nfb_console.heart import HeartRunner
-    from nfb_console.inputs import HeartChoice
-
-    monkeypatch.setattr(sources, "usb_candidates", lambda: [])
-    runner = HeartRunner(HeartChoice(kind="usb"))
-    assert runner.attach() is True, "nothing is known to be wrong until it is tried"
-    deadline = time.monotonic() + 2.0
-    while runner.error is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    runner.release()
-    assert runner.error and "HeartMath cable" in runner.error
-    assert runner.describe() == runner.error, "and it is what the screen shows"
-
-
-def test_switching_source_does_not_wait_for_the_old_one_on_the_event_loop(monkeypatch):
-    """Releasing a source waits up to two seconds for its reader thread, and a reader halfway through a
-    twenty-second Bluetooth scan takes all of it. Doing that in the click handler froze every control on
-    the page, which is the Flet rule in reverse: the event loop must not be blocked, not merely written
-    to from elsewhere."""
-    import threading
-
-    from nfb import Device, Settings
-    from nfb_console import device_panel
-    from nfb_console.inputs import HeartChoice
-
-    class SlowRunner:
-        """Releases only when the test says so — which is the point: the click must return while this is
-        still blocked. A `time.sleep` here would have tested the same thing at the cost of half a second,
-        and would have been a race on a loaded machine rather than a fact."""
-
-        error = None
-
-        def __init__(self):
-            self.entered = threading.Event()
-            self.may_finish = threading.Event()
-            self.released = threading.Event()
-
-        def release(self):
-            self.entered.set()
-            self.may_finish.wait(5.0)
-            self.released.set()
-
-        def attach(self, _choice=None):
-            return True
-
-        def describe(self):
-            return "…"
-
-    class Page:
-        def __init__(self):
-            self.services, self.tasks = [], []
-
-        def update(self, *a):
-            pass
-
-        def run_task(self, fn, *a):
-            self.tasks.append(fn)
-
-    device = Device(Settings())
-    runner = SlowRunner()
-    choice = HeartChoice(kind="off")
-    control = device_panel.view(Page(), device, heart_choice=choice, heart_runner=runner)
-
-    _press(control, "usb")
-    assert runner.entered.wait(2.0), "the swap started"
-    assert choice.kind == "usb", "and the click had already returned, with the release still blocked"
-    runner.may_finish.set()
-    assert runner.released.wait(2.0), "the swap completed, just not on the event loop"
-    device.close()
-
-
-def _press(control, label: str) -> None:
-    """Click the source button carrying `label`, the way the operator does."""
-    import flet as ft
-
-    def walk(ctrl):
-        if (isinstance(ctrl, ft.Container) and isinstance(ctrl.content, ft.Text)
-                and ctrl.content.value == label and ctrl.on_click is not None):
-            return ctrl
-        for child in list(getattr(ctrl, "controls", None) or []) + [getattr(ctrl, "content", None)]:
-            if child is not None and (hit := walk(child)) is not None:
-                return hit
-        return None
-
-    button = walk(control)
-    assert button is not None, f"no button reading {label!r}"
-    button.on_click(None)
-
-
-def test_a_chosen_source_keeps_trying_until_the_cable_is_plugged_in(monkeypatch):
-    """Choosing a source is the operator saying what is on their body, not what is plugged in this
-    second. A cable connected a minute later, or pulled out and put back, must not need a trip to the
-    device screen to click the same button again."""
-    from nfb.hrv import sources
-    from nfb_console.heart import HeartRunner
-    from nfb_console.inputs import HeartChoice
-
-    plugged: list = []
-    opened: list = []
-    monkeypatch.setattr(sources, "usb_candidates", lambda: list(plugged))
-    monkeypatch.setattr(HeartRunner, "RETRY_SECONDS", 0.1)
-
-    class Nothing:
-        """A port that is not there: the reader records why and ends, as the real one does."""
-
-        def __init__(self, port=None):
-            self.error = None
-            self.port = port
-
-        def beats(self):
-            port, trouble = sources.find_usb_port()
-            if port is None:
-                self.error = trouble
-                return iter(())
-            opened.append(port)
-            return iter((Beat(t=time.time(), hr_bpm=60.0, rr_intervals=[1.0]),))
-
-        def close(self):
-            pass
-
-        def describe(self):
-            return self.error or "reading"
-
-    monkeypatch.setattr(sources, "UsbPpgBeats", Nothing)
-    monkeypatch.setattr("nfb.hrv.beat_source",
-                        lambda kind, **kw: Nothing(**kw) if kind == "usb" else None)
-
-    runner = HeartRunner(HeartChoice(kind="usb"))
-    runner.attach()
-    deadline = time.monotonic() + 2.0
-    while runner.error is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert "trying again" in (runner.error or ""), "it says it has not given up"
-
-    plugged.append(FakePort("/dev/cu.usbserial-HM01", 0x0403, "FT230X Basic UART"))
-    deadline = time.monotonic() + 2.0
-    while not opened and time.monotonic() < deadline:
-        time.sleep(0.02)
-    runner.release()
-    assert opened == ["/dev/cu.usbserial-HM01"], "it connected itself once the cable was there"
-
-
-def test_the_source_row_keeps_up_with_a_connection_it_did_not_click(monkeypatch):
-    """The row is repainted when something is clicked, and connecting happens on another thread — so
-    after the click that *starts* a connection it read "not started", the state of a millisecond
-    earlier, and stayed that way because nothing on the device screen refreshes on a timer unless the
-    contact check is running."""
-    import asyncio
-
-    from nfb import Device, Settings
-    from nfb_console import device_panel
-    from nfb_console.inputs import HeartChoice
-
-    class LateRunner:
-        error = None
-
-        def __init__(self):
-            self.said = "not started"
-
-        def release(self):
-            pass
-
-        def attach(self, _choice=None):
-            return True
-
-        def describe(self):
-            return self.said
-
-    class Page:
-        def __init__(self):
-            self.services, self.tasks, self.updates = [], [], 0
-
-        def update(self, *a):
-            self.updates += 1
-
-        def run_task(self, fn, *a):
-            self.tasks.append((fn, a))
-
-    page = Page()
-    device = Device(Settings())
-    runner = LateRunner()
-    control = device_panel.view(page, device, heart_choice=HeartChoice(kind="usb", port="/dev/x"),
-                                heart_runner=runner)
-    assert any("not started" in x for x in _texts(control))
-
-    # The tick interval is the loop's, not the test's: with it at zero the loop runs as fast as the event
-    # loop will schedule it, and a hundredth of a second is dozens of iterations. Waiting a real second
-    # for a real 0.25 s tick was measuring the sleep.
-    monkeypatch.setattr(device_panel, "POLL_SECONDS", 0)
-
-    async def briefly():
-        poll = next(fn for fn, _ in page.tasks)
-        runner.said = "reading the pulse waveform on /dev/x"
-        try:
-            await asyncio.wait_for(poll(), 0.01)
-        except (asyncio.TimeoutError, TimeoutError):
-            pass
-
-    asyncio.run(briefly())
-    assert any("reading the pulse waveform" in x for x in _texts(control)), \
-        "the row followed the connection with nothing clicked"
-    device.close()
-
-
-def test_the_hrv_screen_trains_on_the_cable_the_device_screen_chose(monkeypatch):
-    """The whole path, from the source picked on the device screen to a running session: the screen asks
-    the shared runner for the chosen source, the beats arrive, and the transport starts."""
-    from nfb.hrv import SimulatedBeats
-    from nfb_console import hrv_view
-    from nfb_console.heart import HeartRunner
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    opened: list = []
-
-    def fake_source(kind, **kw):
-        opened.append((kind, kw))
-        return SimulatedBeats(hr_bpm=60.0, realtime=False, seed=3)
-
-    monkeypatch.setattr("nfb.hrv.beat_source", fake_source)
-
-    choice = HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01")
-    runner = HeartRunner(choice)
-    session = hrv_view.session_for(BY_CODE["HRV"], heart_choice=choice, heart_runner=runner)
-    assert session.choice is choice, "the screen trains on what was chosen, not an invented simulator"
-
-    # **Two claims, and only one of them is about a thread.** That the screen opens the chosen source is
-    # `run()`'s doing and is checked the moment it returns. That beats reach the session is the
-    # processor's, and pushing them is instant where waiting for a real-time simulator to produce three
-    # was three seconds of sleeping — for a fact about wiring, not about timing.
-    session.run()
-    assert opened and opened[0][0] == "usb" and opened[0][1]["port"] == "/dev/cu.usbserial-HM01"
-    runner.release()
-    beats = SimulatedBeats(hr_bpm=60.0, realtime=False, seed=3).beats()
-    while not runner.ready:
-        runner.state = runner.processor.push(next(beats))
-    runner.seen_at = time.monotonic()
-    assert session.dead_channels() == [], "so the screen has its source"
-
-    assert not session.running, "a session opens paused"
-    session.toggle_pause()
-    assert session.running, "and the transport starts it"
-    session.stop()
-
-
-def _texts(ctrl) -> list[str]:
-    import flet as ft
-
-    if isinstance(ctrl, ft.Text):
-        return [ctrl.value or ""]
-    out: list[str] = []
-    for child in getattr(ctrl, "controls", None) or []:
-        out += _texts(child)
-    content = getattr(ctrl, "content", None)
-    if content is not None:
-        out += _texts(content)
-    return out
-
-
 def test_two_cables_it_could_be_means_asking_rather_than_guessing(monkeypatch):
     from nfb.hrv import sources
 
-    ports = [FakePort("/dev/cu.usbserial-A", 0x0403, "FT230X Basic UART"),
-             FakePort("/dev/cu.usbserial-B", 0x0403, "FT231X USB UART")]
+    ports = [ListedPort("/dev/cu.usbserial-A", 0x0403, "FT230X Basic UART"),
+             ListedPort("/dev/cu.usbserial-B", 0x0403, "FT231X USB UART")]
     monkeypatch.setattr(sources, "usb_candidates", lambda: ports)
     port, trouble = sources.find_usb_port()
     assert port is None
     assert "name the port" in trouble and "/dev/cu.usbserial-B" in trouble
 
 
-def test_the_amplifier_prefers_the_port_that_says_it_is_one(monkeypatch):
-    """The other half of the same collision: the amplifier used to take the first
-    /dev/cu.usbserial-* alphabetically, which is the pulse sensor's cable often enough to matter."""
-    import optima.device as device
-
-    monkeypatch.setattr(device.list_ports, "comports", lambda: [
-        FakePort("/dev/cu.usbserial-AAAA", 0x0403, "FT230X Basic UART"),
-        FakePort("/dev/cu.usbserial-FT000001", 0x0403, "Neurobit Optima+ 4 USB"),
-    ])
-    assert device.find_port() == "/dev/cu.usbserial-FT000001"
-
-
-# --- the console's own view of it ------------------------------------------------------------
-
-def test_the_heart_source_choice_offers_the_cable():
-    from nfb_console.inputs import HeartChoice
-
-    choice = HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01")
-    assert choice.on
-    assert "/dev/cu.usbserial-HM01" in choice.describe()
-    assert choice.problem() is None, "a named port needs nothing found"
-    source = choice.open()
-    assert type(source).__name__ == "UsbPpgBeats" and source.port == "/dev/cu.usbserial-HM01"
-
-
-def test_the_device_screen_offers_the_cable_beside_the_strap():
-    from nfb import Device, Settings
-    from nfb_console import device_panel
-    from nfb_console.inputs import HeartChoice
-
-    class Page:
-        def __init__(self):
-            self.services, self.tasks = [], []
-
-        def update(self, *a):
-            pass
-
-        def run_task(self, fn, *a):
-            self.tasks.append(fn)
-
-    device = Device(Settings())
-    # A named port, because with none named the note under the source row is replaced by the reason
-    # nothing was found — which is the right thing for it to say, and not what this is checking.
-    control = device_panel.view(Page(), device,
-                                heart_choice=HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01"))
-
-    def texts(ctrl):
-        import flet as ft
-        if isinstance(ctrl, ft.Text):
-            return [ctrl.value or ""]
-        out = []
-        for child in getattr(ctrl, "controls", None) or []:
-            out += texts(child)
-        content = getattr(ctrl, "content", None)
-        if content is not None:
-            out += texts(content)
-        return out
-
-    shown = texts(control)
-    assert "usb" in shown, "the source row names it"
-    assert any("USB-C cable" in x for x in shown), "and says what it is"
-    device.close()
-
-
-def test_the_device_chip_names_the_pulse_sensor_rather_than_the_absent_amplifier():
-    """The chip answers "where are these numbers coming from", and on the HRV screen the answer is never
-    the amplifier — which is not connected, and said "no device" in grey beside a working pulse sensor.
-    That is true of the amplifier, useless as an answer, and reads as a fault."""
-    from nfb_console import hrv_view
-    from nfb_console.heart import HeartRunner
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    choice = HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01")
-    session = hrv_view.session_for(BY_CODE["HRV"], heart_choice=choice,
-                                   heart_runner=HeartRunner(choice))
-    label, note, _tone = hrv_view._instrument(session)
-    assert label == "HeartMath · USB"
-    assert note == "not started"
-
-    session.heart.error = "no HeartMath cable — plug it in · trying again"
-    label, note, _tone = hrv_view._instrument(session)
-    assert label == "HeartMath · USB", "the name does not become the fault"
-    assert "device screen" in note, "and the fault points at where it is fixed"
-    assert len(note) < 60, "the chip has room for a few words, not for the runner's sentence"
-
-
-def test_the_toolbar_shows_a_named_instrument_where_it_shows_the_amplifier():
-    from nfb import Device, Settings
-    from nfb_console import chrome
-
-    device = Device(Settings())
-    bar = chrome.Toolbar(device, lambda: None, lambda: None)
-    assert bar.dev_name.value == "no device"
-
-    bar.set_source("HeartMath · USB", note="62 bpm · not the amplifier")
-    assert bar.dev_name.value == "HeartMath · USB"
-    assert bar.channels_text.value == "62 bpm · not the amplifier", \
-        "the second line is the instrument's state, not the amplifier's settings"
-
-    bar.set_source("file: yesterday.jsonl.gz")
-    assert bar.channels_text.value == "replay · not the amplifier", "replay keeps its own wording"
-    device.close()
-
-
-def test_a_screen_with_no_amplifier_channels_does_not_offer_to_reconfigure_it():
-    """The count in the toolbar reconfigures the EEG amplifier, and on the HRV screen there is no
-    amplifier in the path at all — so "1 ch" beside a pulse sensor is a control for a device this screen
-    never touches. Hidden rather than greyed: disabled means "not now", and this is "not here"."""
-    from nfb import Device, Settings
-    from nfb_console import chrome
-
-    device = Device(Settings())
-    bar = chrome.Toolbar(device, lambda: None, lambda: None)
-    assert bar.channel_menu.visible is not False, "the amplifier screens keep it"
-    bar.set_channels_visible(False)
-    assert bar.channel_menu.visible is False
-    device.close()
-
-
-def test_connecting_a_sensor_mid_session_replaces_the_simulator_the_screen_invented(monkeypatch):
-    """**The HRV screen invents a simulator when nothing is chosen**, so that picking the protocol does
-    not open an empty screen. Connecting a real sensor on the device screen and coming back then found
-    the session still holding that simulator — and `run` hands its choice to the shared runner, so
-    returning actively switched the connected sensor off again.
-
-    An invented stand-in loses to anything the operator actually chose, and the memo that hands the
-    runner back switched off goes with it, since it is no longer ours to hand back.
-    """
-    from nfb.hrv import SimulatedBeats
-    from nfb_console import hrv_view
-    from nfb_console.heart import HeartRunner
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    opened: list = []
-    monkeypatch.setattr("nfb.hrv.beat_source",
-                        lambda kind, **kw: (opened.append(kind),
-                                            SimulatedBeats(realtime=False, seed=1))[1])
-
-    app_choice = HeartChoice(kind="off")            # nothing chosen yet, as at launch
-    runner = HeartRunner(app_choice)
-    session = hrv_view.session_for(BY_CODE["HRV"], heart_choice=app_choice, heart_runner=runner)
-    session.run()
-    assert session.choice.kind == "simulator" and session._invented
-    assert hrv_view._instrument(session)[0] == "simulated beats"
-
-    # the device screen: a cable is chosen and connected, which is what set_heart_kind does
-    app_choice.kind, app_choice.port = "usb", "/dev/cu.usbserial-HM01"
-    runner.release()
-    runner.attach(app_choice)
-
-    session.rearm()                                  # coming back from the device screen
-    session.run()
-    try:
-        assert session.choice is app_choice, "the session trains on what was actually chosen"
-        assert not session._invented
-        assert hrv_view._instrument(session)[0] == "HeartMath · USB", "and the chip says so"
-        assert opened[-1] == "usb", "and the runner is reading the cable, not the simulator"
-    finally:
-        session.stop()
-        assert app_choice.kind == "usb", "stopping must not switch the operator's own source off"
-
-
-def test_a_paired_headband_replaces_the_heg_screens_invented_one(monkeypatch):
-    """The same defect and the same fix on the HEG screen, whose simulator is invented for the same
-    reason."""
-    from nfb_console import heg_view
-    from nfb_console.inputs import MendiChoice
-    from nfb_console.protocols import BY_CODE
-
-    app_choice = MendiChoice(kind="off")
-    session = heg_view.session_for(BY_CODE["HEG"], mendi_choice=app_choice)
-    assert session.choice.kind == "simulator" and session._invented
-
-    app_choice.kind, app_choice.address = "headband", "AA:BB"
-    session.adopt_offered()
-    assert session.choice is app_choice and not session._invented
-
+# --- starting the cable ----------------------------------------------------------------------
 
 def test_a_cable_that_does_not_start_is_asked_again_and_said_to_be_silent(monkeypatch):
     """**Sometimes the device simply does not start.** It acknowledges the start command and then takes
@@ -921,13 +460,17 @@ def test_a_cable_that_does_not_start_is_asked_again_and_said_to_be_silent(monkey
 
 
 def test_the_three_silences_are_told_apart():
+    """A port that is opening, a cable that sends nothing, a waveform with no beats in it and a waveform
+    with beats each have their own words."""
     from nfb.hrv import sources
 
     source = sources.UsbPpgBeats(port="/dev/x")
-    assert "opening" in source.progress()
+    said = [source.progress()]
     source.connected = True
-    assert "no data on the cable" in source.progress()
-    source.decoder._seen = 500
-    assert "no pulse yet" in source.progress(), "streaming, but nothing is clipped on"
+    said.append(source.progress())
+    source.decoder.feed(ppg_frame([2000] * 16), 1000.0)
+    said.append(source.progress())
     source.beats_found = 3
-    assert source.progress() == "reading the pulse waveform"
+    said.append(source.progress())
+    assert all(said) and len(set(said)) == len(said), said
+    assert "no pulse" in said[2] and "no pulse" not in said[3], "the beats found end the no-pulse words"

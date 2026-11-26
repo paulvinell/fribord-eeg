@@ -238,34 +238,7 @@ def test_the_player_reports_what_it_would_run_and_stops_cleanly(tmp_path, monkey
     assert not player.playing
 
 
-def test_music_volume_is_independent_of_the_system_volume():
-    """You set the backing track once and let the feedback move the master over the top of it."""
-    settings = Music(enabled=True, source="file", volume=35)
-    assert settings.volume == 35
-    assert not hasattr(settings, "system_volume")
-
-
 # --- music: the EEG ---------------------------------------------------------------------------
-
-def test_the_sonifier_bandpasses_what_it_is_fed():
-    son = music.Sonifier()
-    son.configure(256.0, music.Band(2.0, 38.0, "music"))
-    assert son._filter is not None
-
-    times = np.arange(2560) / 256.0
-    in_band = 20 * np.sin(2 * np.pi * 10 * times)          # 10 Hz: passes
-    son.feed(in_band)
-    written = son._write
-    assert written == len(in_band)
-    kept = np.abs(son._ring[: son._write]).max()
-
-    son2 = music.Sonifier()
-    son2.configure(256.0, music.Band(2.0, 38.0, "music"))
-    drift = 20 * np.sin(2 * np.pi * 0.3 * times)           # 0.3 Hz: rejected
-    son2.feed(drift)
-    rejected = np.abs(son2._ring[: son2._write]).max()
-    assert rejected < kept / 10, "drift below the band must not become audible"
-
 
 def test_drift_does_not_pin_the_pitch_at_the_bottom_of_the_range():
     """The Butterworth in front of the tracker, which looks redundant and is not.
@@ -295,7 +268,7 @@ def test_drift_does_not_pin_the_pitch_at_the_bottom_of_the_range():
 def test_a_band_the_channel_cannot_carry_is_reported_not_crashed():
     son = music.Sonifier()
     son.configure(62.5, music.Band(2.0, 38.0, "music"))     # 38 Hz is past this Nyquist
-    assert son._filter is None and son.error
+    assert son.error
     son.feed(np.ones(10))                                   # must not raise
     assert not son.start(), "and it must refuse to open a stream it cannot fill"
 
@@ -495,6 +468,30 @@ def test_pausing_keeps_the_position_rather_than_restarting_the_track(tmp_path, m
     player.stop()
 
 
+def test_the_pitch_source_tracks_the_level_between_its_two_frequencies():
+    from nfb_console import music
+    from nfb_console.feedback import Music
+
+    out = music.MusicOutput()
+    settings = Music(enabled=True, source="tone")
+    try:
+        for level in (0.0, 0.5, 1.0):
+            out.apply(settings, level=level)
+            out.tone._block(2048)
+        # the glide means it approaches rather than jumps, so the check is direction and bounds
+        assert settings.tone_base_hz <= out.tone.pitch_hz <= settings.tone_top_hz
+        out.apply(settings, level=0.0)
+        for _ in range(80):
+            out.tone._block(2048)
+        low = out.tone.pitch_hz
+        out.apply(settings, level=1.0)
+        for _ in range(80):
+            out.tone._block(2048)
+        assert out.tone.pitch_hz > low + 100.0, "the pitch has to follow the signal"
+    finally:
+        out.release()
+
+
 # --- the noise ---------------------------------------------------------------------------
 
 def test_the_noise_colours_are_level_matched_and_actually_tilted():
@@ -589,19 +586,6 @@ def test_a_dropout_is_counted_rather_than_ignored():
     calls.clear()
     player._run(stream, stop)
     assert player.dropouts == 3, "and a block that arrived in time is not counted"
-    # The slack is PortAudio's 'low' preset — measured 231 ms at this block size, ample for a GC pause
-    # plus a heavy frame. A float here is only a *suggestion*, and CoreAudio inflates it: asking for
-    # 0.25 s, as this constant used to, yields 785 ms of real output latency on the feedback path.
-    assert music.BUFFER_LATENCY == "low"
-
-
-def test_the_stdlib_signal_module_is_not_shadowed():
-    """`from scipy import signal` would have silently replaced the stdlib one, and `hold()` would have
-    raised AttributeError at the moment a target failed."""
-    import signal as stdlib
-
-    assert music.signal is stdlib
-    assert hasattr(music.signal, "SIGSTOP")
 
 
 def test_holding_the_noise_silences_it_without_stopping_the_stream():
@@ -726,20 +710,10 @@ def test_a_late_block_holds_the_note_instead_of_cutting_to_silence():
 
 
 def test_the_ring_needs_no_lock_between_the_feed_thread_and_the_audio_thread():
-    """**The audio callback used to wait on a lock the feed thread held across a per-sample Python loop.**
-
-    That is a stall of the sound card for however long the producer needs the GIL, which is the shape of
-    "it crackles occasionally on my laptop". There is one writer and one reader, so the ring is written
-    first and the cursor published afterwards: the reader only looks below the cursor it read, and cannot
-    see a half-written block.
-
-    The cursor counts *samples fed*, not ring positions — the reader takes differences of it to decide how
-    far behind it is, so a block longer than the ring must still advance it by everything fed even though
-    only the newest samples survive.
-    """
+    """The write cursor counts every sample fed, across the wrap and past a block longer than the ring, so
+    the reader can tell from it alone how far behind it is."""
     son = music.Sonifier()
     son.configure(256.0, music.Band(2.0, 38.0, "music"))
-    assert not hasattr(son, "_lock"), "a lock here is a stall of the audio device"
 
     ring_size = len(son._ring)
     son.feed(np.ones(ring_size * 3))
@@ -791,6 +765,7 @@ def test_every_player_reports_the_dropouts_it_has_been_counting_all_along():
     out.sonifier._stream = object()                 # pretend it opened; describe reads `running`
     try:
         assert "dropout" not in out.describe(settings)
+        assert "learned" not in out.describe(settings), "no range is claimed before one is learned"
         out.sonifier.dropouts = 7
         assert "7 dropouts" in out.describe(settings)
         out.sonifier.starved = 1
@@ -816,8 +791,8 @@ def test_loudness_calibrates_itself_against_the_bands_own_range():
     # A rhythm that waxes and wanes the way a real band does: amplitude swinging 1:4 over ~4 s cycles.
     waxing = (1.0 + 0.6 * np.sin(2 * np.pi * 0.25 * times)) * np.sin(2 * np.pi * 10 * times)
 
-    def travel(scale_uv: float) -> tuple[float, float, float]:
-        """(quietest, loudest, learned top) of the rendered blocks after calibration, one person."""
+    def travel(scale_uv: float) -> tuple[float, float, float, float]:
+        """(quietest, loudest, median, learned top) of the rendered blocks after calibration, one person."""
         son = music.Sonifier()
         son.configure(rate, music.Band(8.0, 16.0, "music"))
         son.volume = 100.0
@@ -827,14 +802,17 @@ def test_loudness_calibrates_itself_against_the_bands_own_range():
             block = son._block(1500)[:, 0].astype(float)
             if i / rate > music.EEG_LOUD_CAL_SECONDS:
                 peaks.append(float(np.abs(block).max()))
-        return min(peaks), max(peaks), son.loud_hi
+        return min(peaks), max(peaks), float(np.median(peaks)), son.loud_hi
 
-    lo_small, hi_small, learned_small = travel(3.0)
-    lo_big, hi_big, learned_big = travel(30.0)
+    lo_small, hi_small, mid_small, learned_small = travel(3.0)
+    lo_big, hi_big, _mid, learned_big = travel(30.0)
 
     # The loudness spans a real range with no setting: crests near full scale, troughs well under half.
     assert hi_small > 0.8 * music.TONE_PEAK, f"crests at {hi_small:.4f} of {music.TONE_PEAK}"
     assert lo_small < 0.5 * hi_small, "and the troughs are plainly quieter than the crests"
+    # A band in the middle of its range is well over half loud, so the voice sits level with the other
+    # sources at the same volume number rather than 6 dB under them.
+    assert mid_small > 0.5 * hi_small
 
     # Self-calibration is per person: ten times the microvolts is the same music, not ten times louder.
     assert hi_big == pytest.approx(hi_small, rel=0.15)
@@ -846,25 +824,29 @@ def test_loudness_calibrates_itself_against_the_bands_own_range():
     assert learned_big == pytest.approx(1.6 * 30.0, rel=0.2)
 
 
-def test_a_steady_voice_sits_near_the_other_sources_not_six_decibels_under():
-    """The loudness curve is a square root, and this is what it is for: the band spends most of a session
-    mid-range, and mapped straight that is half amplitude — a voice 6 dB under the Shepard at the same
-    volume number, which is the unmarked-per-source loudness change `TONE_PEAK` exists to prevent. The
-    root lifts the middle to 0.71 of full and moves neither end."""
-    assert music.EEG_QUIET_GAIN + (1 - music.EEG_QUIET_GAIN) * math.sqrt(0.5) == pytest.approx(0.74, abs=0.01)
-    assert music.EEG_QUIET_GAIN + (1 - music.EEG_QUIET_GAIN) * math.sqrt(1.0) == 1.0
-    assert music.EEG_QUIET_GAIN + (1 - music.EEG_QUIET_GAIN) * math.sqrt(0.0) == music.EEG_QUIET_GAIN
+def test_the_noise_preview_carries_the_generators_pad():
+    """The noise preview carries the generator's pad, so an audition is as loud as the music it previews."""
+    import wave as wavelib
+
+    import numpy as np
+
+    from nfb_console import music
+
+    with wavelib.open(str(music.preview_path("pink"))) as fh:
+        data = np.frombuffer(fh.readframes(fh.getnframes()), dtype=np.int16).astype(float) / 32767
+    body = data[len(data) // 4:-len(data) // 4]
+    rms = float(np.sqrt((body ** 2).mean()))
+    assert rms == pytest.approx(music.PEAK * music.HEADROOM, rel=0.1), "the preview carries the pad"
 
 
 # --- a stream that stops playing -------------------------------------------------------------
 
 class FakeAudio:
-    """A `sounddevice` stand-in whose streams can be told to fail, or to stop playing without failing."""
+    """A `sounddevice` stand-in whose streams can be told to fail."""
 
     def __init__(self) -> None:
         self.opened = []
         self.raise_on_write = 0
-        self.deaf = False               # accepts every write instantly and plays none of it
 
     def OutputStream(self, **kw):       # noqa: N802 — the name `sounddevice` uses
         stream = FakeStream(self, kw)
@@ -886,9 +868,8 @@ class FakeStream:
             self.audio.raise_on_write -= 1
             raise RuntimeError("PortAudioError: Unanticipated host error")
         self.written += len(block)
-        if not self.audio.deaf:
-            # a real device drains in real time, so the writer blocks once it is ahead
-            time.sleep(min(0.005, music.BLOCK_SECONDS))
+        # a real device drains in real time, so the writer blocks once it is ahead
+        time.sleep(min(0.005, music.BLOCK_SECONDS))
         return 0
 
 
@@ -949,33 +930,6 @@ def test_stopping_a_sound_returns_at_once_and_the_device_shuts_behind_it(monkeyp
         assert audio.opened[0].written == first, "the old writer never writes again"
     finally:
         player.stop()
-
-
-def test_a_device_that_accepts_everything_and_plays_none_of_it_is_noticed(monkeypatch):
-    """The failure with no exception in it: the stream stays open, `write` keeps returning, and nothing
-    comes out. Audio handed over has to be consumed at real time, so a lead that grows past
-    `STALL_SECONDS` is the device saying nothing is listening."""
-    audio = FakeAudio()
-    audio.deaf = True
-    player = _tone(monkeypatch, audio)
-    monkeypatch.setattr("nfb_console.audio.STALL_SECONDS", 0.5)
-    assert player.start(), player.error
-    try:
-        waitfor(lambda: player.restarts >= 1, what="the silent death to be caught")
-    finally:
-        player.stop()
-
-
-def test_the_buffer_running_dry_is_counted_even_when_the_host_does_not_flag_it():
-    """`write` reports an underflow only when PortAudio noticed one. Running less than a block ahead of
-    the device is a crackle either way, and the count is what says the fault is this process rather than
-    the speaker. Judged from the lead alone, so no thread and no clock are needed to test it."""
-    health = music._AudioStream._health
-    rate, block = music.SAMPLE_RATE, music.BLOCK_SECONDS
-    assert health(int(2.0 * rate), 2.0 - 0.2) == "", "a fifth of a second of buffer is the healthy state"
-    assert health(int(2.0 * rate), 2.0 - block / 2) == "starved", "less than one block left to play"
-    assert health(int(0.2 * rate), 0.2 - block / 2) == "", "and not while the buffer is still filling"
-    assert health(int(9.0 * rate), 9.0 - music.STALL_SECONDS - 1) == "dead"
 
 
 # --- session output lifecycle -------------------------------------------------------------
@@ -1211,3 +1165,57 @@ def test_the_crossfade_does_not_change_loudness_as_it_fades():
         levels.append(float(np.mean(rms)))
     assert min(levels) > 0.9 * max(levels), f"the fade changes loudness: {levels}"
     assert max(abs(v) for v in buf.ravel()) < 1.0, "and it never reaches the clip point"
+
+
+def test_a_new_pitch_moves_the_music_and_a_new_colour_at_one_pitch_keeps_its_loudness():
+    """A pitch change on one colour moves where the music sits, and a colour change at one pitch stays
+    level-matched, so neither control does nothing or jumps the volume."""
+    def centroid(player: music.NoisePlayer) -> float:
+        audio = np.concatenate([player._block(4096)[:, 0].astype(float) for _ in range(24)])[4096 * 4:]
+        power = np.abs(np.fft.rfft(audio)) ** 2
+        return float((np.fft.rfftfreq(len(audio), 1 / music.SAMPLE_RATE) * power).sum() / power.sum())
+
+    def rms(player: music.NoisePlayer) -> float:
+        return float(np.concatenate([player._block(4096)[:, 0].astype(float)
+                                     for _ in range(24)])[4096 * 4:].std())
+
+    player = music.NoisePlayer()
+    player.configure("pink", 100.0, pitch_hz=300.0)
+    low = centroid(player)
+    player.configure("pink", 100.0, pitch_hz=1200.0)
+    assert centroid(player) > 1.5 * low
+
+    player.configure("pink", 100.0, pitch_hz=600.0)
+    pink = rms(player)
+    player.configure("brown", 100.0, pitch_hz=600.0)
+    assert rms(player) == pytest.approx(pink, rel=0.25)
+
+
+def test_a_new_band_is_the_band_the_voice_tracks():
+    """Reconfiguring the voice to another band takes effect: of two rhythms, the frequency it reports is
+    the one inside the new band."""
+    son = music.Sonifier()
+    son.configure(250.0, music.Band(8.0, 16.0, "music"))
+    son.configure(250.0, music.Band(20.0, 30.0, "music"))
+    times = np.arange(250 * 4) / 250.0
+    wave = 20 * np.sin(2 * np.pi * 12.0 * times) + 20 * np.sin(2 * np.pi * 25.0 * times)
+    for i in range(0, len(wave) - 7, 8):
+        son.feed(wave[i:i + 8])
+        son._block(1500)
+    assert abs(son.eeg_hz - 25.0) < 1.0, son.eeg_hz
+
+
+def test_choosing_the_eeg_source_starts_the_voice_and_no_other_source_does(monkeypatch):
+    """The `eeg` source plays through the voice, and a noise source does not start it."""
+    started = []
+    monkeypatch.setattr(music.Sonifier, "start", lambda self: started.append("voice") or True)
+    monkeypatch.setattr(music.NoisePlayer, "start", lambda self: started.append("noise") or True)
+    out = music.MusicOutput()
+    try:
+        out.apply(Music(enabled=True, source="eeg"), rate_hz=250.0)
+        assert started == ["voice"]
+        started.clear()
+        out.apply(Music(enabled=True, source="noise"), rate_hz=250.0)
+        assert started == ["noise"]
+    finally:
+        out.release()

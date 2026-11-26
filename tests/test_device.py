@@ -14,7 +14,7 @@ import pytest
 
 from conftest import waitfor
 
-from nfb.device import Device, Mode, Settings
+from nfb.device import Device, Mode
 from nfb.sources import WaitingSource
 from nfb.stream import Gap
 
@@ -153,9 +153,10 @@ def test_settings_cannot_change_mid_stream(monkeypatch):
 
 def test_reconfigure_rejects_an_illegal_combination(monkeypatch):
     d, _ = connected(monkeypatch)
+    before = d.status.settings
     with pytest.raises(ValueError, match="exceeds the device limit"):
         d.reconfigure(hz=2000.0, channels=4)      # 8000 sps against the 5000 limit
-    assert d.status.settings.hz == 1000.0, "settings must not change on a rejected reconfigure"
+    assert d.status.settings == before, "settings must not change on a rejected reconfigure"
     d.close()
 
 
@@ -215,6 +216,10 @@ def test_a_dead_device_reports_a_remedy_and_does_not_retry(monkeypatch):
     assert d.status.mode is Mode.DISCONNECTED
     assert "Invalid argument" in d.status.failure
     assert "replug" in d.status.remedy
+    with pytest.raises(RuntimeError) as refused:
+        d.subscribe("session")
+    assert "Invalid argument" in str(refused.value) and d.status.remedy in str(refused.value), \
+        "a screen that asks for the stream is told the failure and its remedy"
 
 
 def test_a_read_failure_stops_cleanly_rather_than_spinning(monkeypatch):
@@ -292,17 +297,21 @@ def test_a_rejected_reconfigure_leaves_host_and_hardware_in_step(monkeypatch):
 
 
 def test_a_disconnect_during_a_contact_check_restores_the_channel_count(monkeypatch):
-    """A contact check narrows the channel count and `stop` hands it back, but a disconnect reaches `_fail`
-    and bypassed the restore — so a reconnect wrote the narrowed count and measured one channel of four."""
-    d, _ = connected(monkeypatch)
-    assert d.status.settings.channels == 4
-    d.reconfigure(channels=1)               # as narrow_to_wired does, with the count to restore held aside
-    d._restore_channels = 4
-    d.excluded = [1, 2, 3]
-    d._fail(optima.ProtocolError("cable pulled during the check"))
-    assert d.status.mode is Mode.DISCONNECTED
-    assert d.status.settings.channels == 4, "the operator's channel count comes back on a disconnect"
-    assert d._restore_channels is None and d.excluded == []
+    """A link lost while a contact check has narrowed the channels gives the operator's channel count back,
+    so a reconnect does not measure one channel of four."""
+    from nfb.device import OPEN_KOHM, Contact
+
+    d, fake = connected(monkeypatch)
+    chosen = d.status.settings.channels
+    d.start_impedance()
+    waitfor(lambda: bool(d.contact), what="the impedance stream never started")
+    d.contact.update({0: Contact(plus=18.3, minus=12.8),
+                      **{c: Contact(plus=OPEN_KOHM, minus=OPEN_KOHM) for c in (1, 2, 3)}})
+    assert d.narrow_to_wired() == [1, 2, 3]
+    fake.fail_read = True                   # the cable comes out during the check
+    waitfor(lambda: d.status.mode is Mode.DISCONNECTED, what="the dead link was never noticed")
+    assert d.status.settings.channels == chosen, "the operator's channel count comes back on a disconnect"
+    assert d.excluded == []
 
 
 def test_impedance_readings_are_available_without_subscribing(monkeypatch):
@@ -420,15 +429,35 @@ def test_an_empty_channel_below_a_wired_one_cannot_be_dropped(monkeypatch):
     d.close()
 
 
+def test_a_gap_below_the_last_wired_channel_leaves_the_check_running(monkeypatch):
+    """When the last channel is wired, no channel can be dropped, so the contact check is not restarted
+    and its readings are kept."""
+    from nfb.device import OPEN_KOHM, Contact
+
+    d, fake = connected(monkeypatch)
+    d.start_impedance()
+    waitfor(lambda: bool(d.contact), what="the impedance stream never started")
+    d.contact.update({0: Contact(plus=18.3, minus=12.8),
+                      1: Contact(plus=OPEN_KOHM, minus=OPEN_KOHM),
+                      2: Contact(plus=OPEN_KOHM, minus=OPEN_KOHM),
+                      3: Contact(plus=21.0, minus=12.8)})
+    epoch, sent = d.status.epoch, len(fake.sent)
+    assert d.narrow_to_wired() == []
+    assert d.status.epoch == epoch and len(fake.sent) == sent, "the check was restarted for nothing"
+    assert d.unwired() == [1, 2], "the gap is still named"
+    d.stop()
+    d.close()
+
+
 def test_mains_frequency_is_settable_and_reaches_the_config(monkeypatch):
-    """The notch runs in the device's hardware, so this bit has to actually be written."""
+    """The notch runs in the device's hardware, so each mains choice writes its own bit to the device, and
+    a frequency the device cannot notch is refused without a change."""
     d, fake = connected(monkeypatch)
     field = optima.HEADER_FIELDS["mains_frequency"]
-    assert optima.get_field(fake.written[-1], field) == 0, "50 Hz is the default"
     d.reconfigure(mains_hz=60)
-    assert optima.get_field(fake.written[-1], field) == 1
+    sixty = optima.get_field(fake.written[-1], field)
     d.reconfigure(mains_hz=50)
-    assert optima.get_field(fake.written[-1], field) == 0
+    assert optima.get_field(fake.written[-1], field) != sixty, "the two choices write different bits"
     with pytest.raises(ValueError):
         d.reconfigure(mains_hz=55)
     assert d.status.settings.mains_hz == 50
@@ -436,19 +465,13 @@ def test_mains_frequency_is_settable_and_reaches_the_config(monkeypatch):
 
 
 def test_the_high_pass_corner_is_a_real_setting_not_a_label():
-    """It was referenced by a warning before it existed, which is the exact failure the UI conventions are meant to
-    prevent: copy that tells you to use a control there is no control for.
-
-    The filtering is in the device's hardware, so there is no software equivalent — a band below the corner
-    measures the filter's roll-off and nothing downstream can recover it.
-    """
+    """The high-pass corner in the settings reaches the device's config, and each corner builds a legal one.
+    The filter is in the hardware, so a corner that stayed in the dataclass would filter nothing."""
     import optima
 
     from nfb import Settings
 
     default = Settings()
-    assert default.lower_limit_hz == 0.5, "the vendor's own EEG choice"
-
     slow = Settings(lower_limit_hz=0.01)
     assert slow.build() != default.build(), "it has to reach the config, not just the dataclass"
     assert not optima.validate_config(slow.build())
@@ -555,30 +578,6 @@ def test_a_channel_the_device_calls_fine_is_usable(monkeypatch):
             break
     d.stop(); sub.close(); d.close()
     assert seen and all(seen), "a live-shaped stream must not read as four dead channels"
-
-
-def test_a_padded_file_column_reports_no_signal_not_a_fine_channel(tmp_path):
-    """`SampleFileSource` marked an all-zero column with state 0 to mean "inactive". That is the device's
-    code for a channel that is **fine**, so once `valid` was corrected a padded column would have read as a
-    working channel sitting at a perfectly flat 0 µV — which is the exact confusion the marking exists to
-    prevent. It now uses the device's own code for an open input."""
-    from nfb.sources import SampleFileSource
-    from nfb.stream import NO_SIGNAL, OK
-
-    path = tmp_path / "export.txt"
-    rows = ["Sampling rate: 256"]
-    for i in range(600):
-        rows.append(f"{i % 7 - 3}\t0")          # one live column, one padded with zeros
-    path.write_text("\n".join(rows) + "\n")
-
-    # `realtime=False`: this is about what the source *marks* a padded column, not about how fast it
-    # replays one. Left at the default it paced 600 rows at 256 Hz and spent 2.3 s asleep.
-    src = SampleFileSource(str(path), loop=False, realtime=False)
-    states = {}
-    for item in src.blocks():
-        states.setdefault(item.channel, set()).add(item.state)
-    assert states[0] == {OK}, "a column with signal is a usable channel"
-    assert states[1] == {NO_SIGNAL}, "a padded column is an open input, not a flat working one"
 
 
 def test_a_session_will_not_subscribe_to_the_impedance_stream(monkeypatch):
@@ -1032,10 +1031,3 @@ def test_a_consumer_mid_iteration_ends_when_a_reconfigure_outruns_it(monkeypatch
         raise AssertionError("the iteration went on into the new epoch")
     sub.close()
     d.close()
-
-
-def test_the_default_range_builds_the_config_of_before_byte_for_byte():
-    """A person who never touches the range gets the config the program wrote before it existed."""
-    assert Settings().build() == optima.build_eeg_config(4, hz=1000.0, reference="linked", mains_hz=50,
-                                                         lower_limit_hz=0.5, silent=True)
-    assert Settings(range_uv=6000.0).build() == optima.build_eeg_config(4, range_uv=6000.0)

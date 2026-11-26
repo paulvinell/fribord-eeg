@@ -3,6 +3,7 @@ deviations of the minute before each trial. Readings are pushed in as states; no
 
 from __future__ import annotations
 
+import math
 import random
 
 import pytest
@@ -200,14 +201,80 @@ def test_a_heg_trial_with_no_level_spread_says_so():
     assert "spread" in lines and "rejected" not in lines, lines
 
 
-def test_the_trial_length_starts_at_the_published_length_and_the_run_follows_it():
-    from nfb_console.heg_view import TIMING
-
+def test_the_trial_length_is_the_run_s_baseline_and_feedback_and_the_run_follows_it():
+    """The trial length shown is the run's baseline and feedback window together, and a new length moves
+    the feedback window of the run."""
     session = _session()
     try:
-        assert session.trial_length == TIMING.baseline_s + TIMING.active_s
-        assert session.trials.active_s == TIMING.active_s
+        run = session.trials
+        assert session.trial_length == pytest.approx(run.baseline_s + run.active_s)
+        before = run.active_s
         session.set_trial_length(session.trial_length + 10.0)
-        assert session.trials.active_s == TIMING.active_s + 10.0
+        assert session.trials.active_s == pytest.approx(before + 10.0)
+        assert session.trial_length == pytest.approx(session.trials.baseline_s + session.trials.active_s)
+    finally:
+        session.stop()
+
+
+def test_passive_mode_has_no_note_about_the_effort_window():
+    """The note that the level runs only in the effort is for active mode; passive mode has no effort."""
+    session = _session(trial_direction="increase", n_trials=1)
+    try:
+        session.set_mode("passive")
+        assert session.no_level_note() is None
+        session.set_mode("active")
+        session.restart_trials()
+        assert session.no_level_note() is not None, "active mode, no level yet"
+    finally:
+        session.stop()
+
+
+def test_a_stall_whose_frames_arrive_later_loses_no_reading():
+    from nfb.heg import HegState
+    from nfb.heg.processor import QUALITY_GOOD
+
+    session = _session(n_trials=1)
+    try:
+        frame = 0
+        while not session.trials.results:
+            made = frame / 30.0
+            phase = made % 2.0
+            arrival = made if phase < 1.6 else made - phase + 1.998 + 0.0025 * (phase - 1.6)
+            state = HegState(t=arrival, smoothed_hbo=10.0 + 0.3 * math.sin(made), smoothed_hbr=0.0,
+                             quality=QUALITY_GOOD, samples_seen=1000, windowed_ready=True)
+            session.heg.state = state
+            session.heg.readings.append(state)
+            if frame % 3 == 0:
+                session.observe()
+            frame += 1
+            assert made < 400.0, "no trial came"
+        trial = session.trials.results[0]
+        assert trial.valid, trial
+        assert trial.invalid_share == pytest.approx(0.0), f"{trial.invalid_share:.0%} of the readings lost"
+    finally:
+        session.stop()
+
+
+def test_frames_that_never_arrive_are_still_lost_readings():
+    """The control: a stall whose frames never come is a hole, and its readings count as lost."""
+    from nfb.heg import HegState
+    from nfb.heg.processor import QUALITY_GOOD
+
+    session = _session(n_trials=1)
+    try:
+        frame = 0
+        while not session.trials.results:
+            made = frame / 30.0
+            frame += 1
+            if made % 2.0 >= 1.6:
+                continue                                # this frame is lost on the way
+            state = HegState(t=made, smoothed_hbo=10.0 + 0.3 * math.sin(made), smoothed_hbr=0.0,
+                             quality=QUALITY_GOOD, samples_seen=1000, windowed_ready=True)
+            session.heg.state = state
+            session.heg.readings.append(state)
+            if frame % 3 == 0:
+                session.observe()
+            assert made < 400.0, "no trial came"
+        assert session.trials.results[0].invalid_share > 0.1
     finally:
         session.stop()

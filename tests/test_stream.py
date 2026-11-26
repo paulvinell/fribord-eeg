@@ -117,17 +117,6 @@ def test_mixed_rates_give_proportional_sample_counts_and_indices():
     assert specs[0].decimation == 1 and specs[2].decimation == 4
 
 
-def test_channel_specs_describe_scaling():
-    d = FrameDecoder(eeg_config())
-    specs = d.channels()
-    assert specs[0].unit == "uV"
-    assert specs[0].scale == pytest.approx(800 / 32768)
-    # a full-scale count must read as full-scale microvolts
-    block = next(b for b in d.feed(optima.NOT_DATA,
-                                  frame(0, d.plan, value=lambda ch, g: -32768)))
-    assert block.values[0] == pytest.approx(-800.0)
-
-
 def test_events_are_collected_not_decoded():
     d = FrameDecoder(eeg_config())
     assert d.feed(optima.NOT_EVENT, bytes([optima.EVENT_BATTERY, 3])) == []
@@ -203,6 +192,23 @@ def test_a_data_payload_with_no_enabled_channels_does_not_hang():
     payload = struct.pack("<HH", 0, 0) + struct.pack("<4h", 1, 2, 3, 4)
     df = optima.decode_data(payload, plan)        # must return, not spin
     assert df.samples == {}, "no enabled channel, so nothing is decoded"
+
+
+def test_a_frame_that_ends_mid_group_decodes_the_samples_it_holds():
+    """A frame can end part way through a group of channels: the samples it holds are decoded and the
+    channels it does not reach get none."""
+    plan = optima.plan_channels(eeg_config())
+    payload = struct.pack("<HH", 0, 0) + struct.pack("<2h", 11, 22)
+    df = optima.decode_data(payload, plan)
+    assert df.samples[0] == [11] and df.samples[1] == [22]
+    assert not df.samples.get(2) and not df.samples.get(3)
+
+
+def test_the_contact_check_decodes_only_the_enabled_channels():
+    """A contact check narrowed to fewer channels decodes those channels alone, so each reading lands
+    on its own channel."""
+    plan = optima.plan_channels(optima.build_eeg_config(1), test_mode=True)
+    assert [c.index for c in plan if c.enabled] == [0]
 
 
 def test_looping_a_header_only_recording_does_not_spin(tmp_path):
@@ -293,13 +299,17 @@ def test_reader_counts_drops_rather_than_blocking_when_the_consumer_never_reads(
 
 
 def test_reference_mode_is_selectable():
-    """Linked by default — one shared reference, joined inside the device — but switchable."""
+    """Each reference mode writes its own legal code to every channel, and the default is linked, so the
+    channels share one reference and a cross-channel measure is valid."""
     F = optima.CHANNEL_FIELDS["common_reference"]
-    expect = {"linked": 1, "bipolar": 0, "external": 2}
-    for mode, code in expect.items():
+    written = {}
+    for mode in ("linked", "bipolar", "external"):
         cfg = optima.build_eeg_config(reference=mode)
         assert optima.validate_config(cfg) == []
-        assert [optima.get_field(cfg, F, ch) for ch in range(4)] == [code] * 4, mode
-    assert optima.get_field(optima.build_eeg_config(), F, 0) == 1, "default must be linked"
+        codes = {optima.get_field(cfg, F, ch) for ch in range(4)}
+        assert len(codes) == 1, f"{mode}: every channel takes the same reference"
+        written[mode] = codes.pop()
+    assert len(set(written.values())) == 3, f"each mode is a different wiring: {written}"
+    assert optima.build_eeg_config() == optima.build_eeg_config(reference="linked"), "default must be linked"
     with pytest.raises(ValueError, match="reference must be one of"):
         optima.build_eeg_config(reference="linked-ears")

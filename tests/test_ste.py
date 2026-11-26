@@ -180,6 +180,14 @@ def test_screen_text_is_simplified_technical_english(module, code, channels, fed
     assert not found, "\n".join(found)
 
 
+@pytest.mark.parametrize("module,code,channels", screen_params(OTHER_SCREENS))
+def test_other_screen_text_is_simplified_technical_english(module, code, channels):
+    """The screens that read another device, as they open."""
+    _page, control = built_screen(module, code, channels, False)
+    found = [fault for text in dict.fromkeys(_texts(control)) for fault in faults(text)]
+    assert not found, "\n".join(found)
+
+
 def test_launcher_text_is_simplified_technical_english():
     from nfb_console import splash
 

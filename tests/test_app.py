@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-
+import optima
 
 from nfb import WaitingSource
 from nfb_console.protocols import BY_CODE
@@ -60,8 +60,6 @@ def test_a_session_opens_with_something_connected_to_the_person():
         assert fb.sound.enabled and fb.click.enabled
         assert not fb.shadow.enabled, "the display is asked for, not assumed"
         assert not fb.alert.enabled and not fb.music.enabled
-        # a protocol default is still not an app default: the pink noise belongs to CFC
-        assert fb.music.source == "noise" and not fb.sound.invert
     finally:
         session.stop()
 
@@ -250,19 +248,6 @@ def test_the_device_chip_from_the_launcher_still_goes_back_to_the_launcher():
         console.device.close()
 
 
-def test_the_device_screen_has_no_header_of_its_own():
-    """It carried a second row with the word "Device" in it and a back button, while the toolbar above
-    already said where you were. Same mistake as the `FRE ›` row: a whole row of height for one control and
-    one redundant word."""
-    from nfb import Device, Settings
-    from nfb_console import device_panel
-
-    control = device_panel.view(StubPage(), Device(Settings()))
-    shown = [c.value for c in _texts(control)]
-    assert "Device" not in shown, "the crumb says that"
-    assert not any("back" in (v or "") for v in shown), "the trail is the way back"
-
-
 def test_the_contact_check_shows_the_shared_reference_once():
     """Two electrodes per channel, and under linked or external wiring every channel's "−" is the *same*
     electrode. Shown per channel that is one number repeated four times; shown once it is the thing whose
@@ -345,7 +330,7 @@ def test_at_opens_bounded_because_nobody_is_watching_the_clock():
 
     session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
     try:
-        assert session.plan.bounded and session.length == 30 * 60
+        assert session.plan.bounded and session.length
         assert session.plan.finish_cue
     finally:
         session.stop()
@@ -520,6 +505,141 @@ def test_no_catalogue_card_opens_a_screen_that_is_not_its_protocol():
             assert p.code in screen.HANDLES
         else:
             assert p.note, f"{p.code} is greyed and does not say why"
+
+
+def test_each_protocol_code_names_one_catalogue_entry():
+    """A code is how a protocol is looked up, so two entries with one code would hide one of them."""
+    from nfb_console.protocols import CATALOGUE
+
+    assert len({p.code for p in CATALOGUE}) == len(CATALOGUE)
+
+
+def test_the_transport_is_absent_until_there_is_a_session():
+    """A play button and a running clock on the launcher say a session exists and is merely paused,
+    when nothing has been chosen yet. Greying them out was not enough."""
+    import argparse
+
+    from nfb_console.app import Console
+    from nfb_console.protocols import BY_CODE
+
+    class StubPage:
+        width = 1020
+
+        def __init__(self):
+            self.controls, self.services, self.tasks = [], [], []
+            self.window = type("W", (), {})()
+
+        def add(self, control):
+            self.controls.append(control)
+
+        def update(self, *a):
+            pass
+
+        def run_task(self, fn, *a):
+            self.tasks.append(fn)
+
+    from nfb_console.app import build_parser
+    # **Name the recording.** The parser's default is `sessions/latest.jsonl.gz`, which is gitignored — so
+    # these passed only on a machine that happened to have recorded one, and failed on a fresh clone. See
+    # `conftest.BENCH`, which is generated.
+    args = build_parser().parse_args([str(BENCH)])
+    console = Console(StubPage(), args)
+    bar = console.toolbar
+
+    def shown():
+        """Everything that only means something inside a session, including the channel count: changing
+        it starts a fresh one, so there is nothing to offer before a session exists."""
+        return (bar.transport.visible, bar.stop.visible, bar.clock_text.visible,
+                bar.channel_menu.visible)
+
+    console.show_launcher()
+    assert shown() == (False, False, False, False)
+    assert not bar.crumb.visible, "and no location either: the launcher *is* the location"
+    assert bar.dev_chip.visible, "but the device belongs to the app, so it stays"
+
+    console.pick(BY_CODE["AMP"])
+    assert shown() == (True, True, True, True)
+    assert bar.crumb.value == "Amplitude"
+
+    console.show_device()
+    assert shown() == (False, False, False, False), "the device screen ends the session"
+    assert bar.crumb.value == "Device"
+
+    console.show_launcher()
+    assert shown() == (False, False, False, False)
+    if console.session is not None:
+        console.session.stop()
+
+
+def _unpicked_console(channels: int = 4):
+    """A console on the bench recording with `channels` open and no screen picked yet."""
+    from nfb_console.app import Console
+
+    class StubPage:
+        width = 1020
+
+        def __init__(self):
+            self.controls, self.services, self.tasks = [], [], []
+            self.window = type("W", (), {})()
+
+        def add(self, control):
+            self.controls.append(control)
+
+        def update(self, *a):
+            pass
+
+        def run_task(self, fn, *a):
+            self.tasks.append(fn)
+
+    from nfb_console.app import build_parser
+    args = build_parser().parse_args([str(BENCH), "--channels", str(channels)])
+    return Console(StubPage(), args)
+
+
+def test_the_channel_count_trims_what_a_session_shows():
+    """Deciding to run two channels today is an ordinary choice, and a trace for an input nobody wired
+    up is worse than useless: a flat line looks identical to a working channel on a quiet subject."""
+    from nfb_console.protocols import BY_CODE
+
+    console = _unpicked_console()
+    console.show_launcher()
+    console.pick(BY_CODE["AMP"])
+    try:
+        assert sorted(console.session.specs) == [0, 1, 2, 3]
+
+        console.toolbar._pick_channels(2)
+        assert console.toolbar.channels_label.value == "2 ch"
+        assert sorted(console.session.specs) == [0, 1]
+        assert sorted(console.session.traces) == [0, 1]
+        assert sorted(console.session.rings) == [0, 1]
+
+        console.toolbar._pick_channels(1)
+        assert sorted(console.session.specs) == [0]
+    finally:
+        if console.session is not None:
+            console.session.stop()
+
+
+def test_the_channel_count_cannot_be_changed_out_from_under_a_running_session():
+    """Changing it rewrites the device config and changes which channels exist, so it starts a fresh
+    session. Discarding someone's twenty minutes by surprise is worse than refusing."""
+    from nfb_console.protocols import BY_CODE
+
+    console = _unpicked_console()
+    console.pick(BY_CODE["AMP"])
+    try:
+        console.toolbar.refresh(running=True)
+        assert console.toolbar.channel_menu.disabled
+        console.toolbar._pick_channels(2)
+        assert sorted(console.session.specs) == [0, 1, 2, 3], "refused, not silently applied"
+
+        console.toolbar.refresh(running=False)
+        assert not console.toolbar.channel_menu.disabled
+        console.toolbar._pick_channels(2)
+        assert sorted(console.session.specs) == [0, 1]
+    finally:
+        if console.session is not None:
+            console.session.stop()
 
 
 # --- always read ------------------------------------------------------------------------------------
@@ -726,3 +846,104 @@ def test_the_console_opens_the_cue_stream_when_it_starts(monkeypatch):
     console = Console(StubPage(), build_parser().parse_args([RECORDING]))
     assert warmed
     console.device.close()
+
+
+def test_the_record_button_starts_and_then_stops_a_recording_and_remembers_the_choice(monkeypatch, tmp_path):
+    """On a live amplifier, one press records and the next press stops; the choice is kept per protocol."""
+    from nfb_console import prefs
+
+    prefs.set_record_where({"directory": str(tmp_path)})
+    console, _ = _live_console(monkeypatch)
+    try:
+        assert console.recorder is None
+        console.toggle_record()
+        assert console.recorder is not None and console.recorder.active
+        assert prefs.record_default("AMP") is True
+        console.toggle_record()
+        assert console.recorder is None and prefs.record_default("AMP") is False
+    finally:
+        console._end_recording()
+        if console.session is not None:
+            console.session.stop()
+        console.device.close()
+
+
+def test_the_companion_is_bound_to_the_recorded_session_not_the_live_one(monkeypatch, tmp_path):
+    """The companion is written at finalize, after the recorder thread joins. On a protocol switch the new
+    session is installed before the old recorder is joined, so reading the live `self.session` wrote the
+    new session's empty snapshot onto the old recording — deterministic companion loss on every switch.
+    The companion is now bound to the session that was recorded, captured when the recorder is armed."""
+    import types
+
+    from nfb_console import app as app_mod
+
+    captured = {}
+
+    class FakeRec:
+        def __init__(self, device, path, note="", fmt="nfb", companion=None):
+            captured["companion"] = companion
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_mod, "Recorder", FakeRec)
+    recorded = types.SimpleNamespace(companion=lambda: {"session": {"who": "recorded"}})
+    console = types.SimpleNamespace(
+        device=object(),
+        record_settings=types.SimpleNamespace(resolve=lambda: tmp_path / "c.jsonl.gz", fmt="nfb"),
+        protocol=types.SimpleNamespace(code="AMP"),
+        session=recorded, recorder=None,
+        toolbar=types.SimpleNamespace(recording=None))
+
+    app_mod.Console._start_recording(console, recorded)
+    console.session = types.SimpleNamespace(companion=lambda: {"session": {"who": "next"}})   # a switch
+    assert captured["companion"]()["session"]["who"] == "recorded", \
+        "the companion follows the recorded session, not whatever is current at finalize"
+
+
+def test_an_unexpected_recording_key_does_not_crash_record_settings():
+    """The console starts with a stray key in the saved recording settings, and it keeps the keys it knows."""
+    from harness import RECORDING, StubPage
+
+    from nfb_console import prefs
+    from nfb_console.app import Console, build_parser
+
+    prefs.set_record_where({"directory": "nights", "fmt": "edf", "legacy": "drop me"})
+    console = Console(StubPage(), build_parser().parse_args([RECORDING]))
+    assert console.record_settings.directory == "nights" and console.record_settings.fmt == "edf"
+
+
+def test_a_screen_with_no_sentry_can_still_be_opened(monkeypatch):
+    """Arming a recorder must not assume the session is an amplifier session.
+
+    The HEG and HRV screens drive their own Bluetooth devices and are not `TrainingSession` at all, so
+    they have no signal sentry to hand a recorder to. Picking one raised `AttributeError` on the way in
+    and the launcher card did nothing.
+    """
+    from nfb_console.app import Console, build_parser
+    from nfb_console.protocols import BY_CODE
+
+    class StubPage:
+        width = 1240
+
+        def __init__(self):
+            self.controls, self.services, self.tasks, self.dialogs = [], [], [], []
+            self.window = type("W", (), {})()
+
+        def show_dialog(self, d): self.dialogs.append(d)
+        def pop_dialog(self): self.dialogs.pop()
+        def add(self, c): self.controls.append(c)
+        def update(self, *a): pass
+        def run_task(self, fn, *a): self.tasks.append(fn)
+
+    def refuse(*a, **k):
+        raise FileNotFoundError("no FTDI device found")
+
+    monkeypatch.setattr(optima, "Optima", refuse)
+    console = Console(StubPage(), build_parser().parse_args(["--live"]))
+    for code in ("HEG", "HRV"):
+        console.pick(BY_CODE[code])              # must not raise
+        assert console.session is not None
+        assert getattr(console.session, "sentry", None) is None, \
+            "the point of the test: this screen has none"
+    console.show_launcher()

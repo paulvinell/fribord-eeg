@@ -188,15 +188,16 @@ def test_sleep_collects_band_history_while_paused():
 
 
 def test_the_first_cascade_row_does_not_wait_a_whole_interval():
-    """push_display stamped the interval before checking a row existed, so an empty first tick burned the
-    180 s interval and the first row landed that late. The stamp advances only on a real row now."""
+    """A draw tick with no spectrum yet does not use up the interval: the first row lands on the next tick
+    that has one."""
     session = sleep_session()
+    rows: list = []
+    session.spectrogram.push = rows.append
     try:
-        assert session._spectrogram_at == 0.0
         session.push_display(1e9)                   # far past the interval, but the ring has no spectrum yet
-        assert session._spectrogram_at == 0.0, "an empty tick must not consume the interval"
+        assert not rows
         pump(session)                               # now the ring holds a spectrum
-        session.push_display(2e9)
-        assert session._spectrogram_at == 2e9, "a real row advances the clock"
+        session.push_display(1e9 + 1.0)             # well inside one interval of the empty tick
+        assert rows, "an empty tick must not consume the interval"
     finally:
         session.stop()

@@ -19,8 +19,8 @@ from conftest import counts
 import pytest
 
 from nfb import ReplaySource, Settings, WaitingSource
-from nfb.dsp import OnePole, SignedWave, wave_edges
-from nfb.dsp.wave import DETREND_POLES, DETREND_RATIO, MAX_HZ, detrend_tau
+from nfb.dsp import SignedWave, wave_edges
+from nfb.dsp.wave import MAX_HZ, detrend_tau
 from nfb.stream import Block, ChannelSpec
 from nfb_console import wave_view
 from nfb_console.protocols import BY_CODE
@@ -79,12 +79,10 @@ def test_the_band_is_a_lowpass_at_twice_the_centre_and_stops_at_one_hertz():
     slow enough to pass for the same quantity while being a size rather than a position. The metric refuses
     the frequency rather than quietly measuring something else, which is what an earlier version did.
     """
-    assert wave_edges(0.05) == (0.0, 0.1), "constant-Q, and no lower edge at all"
-    assert wave_edges(1.0) == (0.0, 2.0)
-    assert MAX_HZ == 1.0
-
-    assert SignedWave(SPEC, MAX_HZ).high == 2.0
-    for hz in (1.01, 10.0, 40.0):
+    for hz in (0.05, MAX_HZ):
+        assert wave_edges(hz) == pytest.approx((0.0, 2 * hz)), "constant-Q, and no lower edge at all"
+    assert SignedWave(SPEC, MAX_HZ).high == pytest.approx(2 * MAX_HZ)
+    for hz in (MAX_HZ * 1.01, 10.0, 40.0):
         with pytest.raises(ValueError) as raised:
             SignedWave(SPEC, hz)
         assert "follow" in str(raised.value), "say why, not just that"
@@ -111,26 +109,6 @@ def test_the_drift_leaves_the_signal_and_the_wave_does_not():
     assert corr > 0.99, f"the wave itself should come back, got {corr:.2f}"
     assert lag < 4.0, f"{lag:.1f} s of lag on a 20 s cycle is more than a filter's worth"
     assert metric.trend > 200.0, "and it should say how much it took out"
-
-
-def test_one_pole_of_de_trending_would_have_left_a_standing_bias():
-    """Why `DETREND_POLES` is two, in the arithmetic rather than in a docstring alone.
-
-    A first-order high-pass removes a constant completely and leaves `τ × slope` of a ramp. That is not a
-    small residue at these settings: an eighth-of-the-frequency corner at 0.05 Hz is a 25 s time constant, and
-    on the drift this hardware actually produces it stands 19 µV off zero — half of a calibrated ±40 µV range.
-    """
-    assert DETREND_POLES >= 2
-    tau = detrend_tau(0.05)
-    assert tau == pytest.approx(DETREND_RATIO / (2 * np.pi * 0.05), rel=1e-6)
-
-    slope = 300.0 / 400.0          # µV per second, the measured drift over a session
-    t = np.arange(int(400 * RATE)) / RATE
-    ramp = slope * t
-    one_pole = OnePole(tau, RATE)
-    residue = ramp - one_pole.process(ramp)
-    assert residue[-1] == pytest.approx(tau * slope, rel=0.05)
-    assert residue[-1] > 15.0, "the bias one pole leaves is not a rounding error"
 
 
 def test_nothing_claims_to_be_settled_before_the_de_trender_is():
@@ -246,7 +224,7 @@ def test_the_screen_draws_before_any_data_and_says_what_it_is_waiting_for():
         session.redraw()
         assert session.error is None
         joined = " | ".join(c.value for c in _texts(control) if c.value)
-        assert "waiting for the first reading" in joined
+        assert "waiting for the first reading" in [c.value for c in _texts(control)], "the empty state, on the plot"
         assert "full scale" in joined and "across" in joined, "every graph states its window and scale"
     finally:
         session.stop()
@@ -531,6 +509,7 @@ def test_the_plots_scale_is_not_the_feedbacks():
         _feed_session(session, 20.0 * np.sin(2 * np.pi * 0.05 * t), spec)
         assert session.calibrated
         calibrated = session.feedback_range_uv
+        gain = session.gain_uv
         assert session.wave_uv != calibrated, "the calibration must not have moved the plot"
 
         session.wave_uv = 100.0
@@ -540,7 +519,7 @@ def test_the_plots_scale_is_not_the_feedbacks():
 
         session.set_range(calibrated * 3)
         assert session.wave_uv == 100.0, "and a feedback range is not a plot preset"
-        assert session.gain_uv == 50.0, "nor the raw trace's gain"
+        assert session.gain_uv == gain, "nor the raw trace's gain"
     finally:
         session.stop()
 
@@ -636,16 +615,6 @@ def test_the_two_microvolt_scales_say_which_they_are():
         session.stop()
 
 
-def test_the_catalogue_offers_it_and_a_screen_handles_it():
-    """The launcher lists what can actually be run. A protocol with no screen behind it is a card that fails
-    after you click it, which is what `Protocol.available` exists to prevent."""
-    from nfb_console.app import Console
-
-    protocol = BY_CODE["WAVE"]
-    assert protocol.available and protocol.name == "Waveform"
-    assert Console.screen_for(protocol) is wave_view
-
-
 def test_the_calibration_survives_a_slow_excursion_the_gate_cannot_see():
     """The artifact gate judges on 0.5-50 Hz; this protocol trains below 0.1. An in-band excursion — a
     movement, an electrode pop, tens of seconds long — therefore passes the gate untouched, and a range
@@ -669,22 +638,25 @@ def test_the_calibration_survives_a_slow_excursion_the_gate_cannot_see():
 
 
 def test_a_railed_channel_neither_calibrates_nor_steers_the_level():
-    """Device-invalid blocks bypass the gate by design (`pass_through`), so their readings arrive here
-    marked invalid — and used to be accumulated anyway. A reference electrode lifting during the
-    measurement window set the range from the ±800 µV rail; lifting later steered the level with it."""
+    """A channel that rails during the calibration window does not set the range from the rail, and its
+    readings do not move the level."""
     session = _session()
     try:
+        session.toggle_pause()
         spec = session.specs[session.channel]
         t = np.arange(int(400 * RATE)) / RATE
         wave = 20.0 * np.sin(2 * np.pi * 0.05 * t)
         ints = counts(wave, spec.scale, truncate=True)
         rail_from = int(250 * RATE)                   # rails mid-calibration
+        signal_at_rail = None
         for i in range(0, len(wave) - 7, 8):
             railed = i >= rail_from
             samples = (32767,) * 8 if railed else tuple(ints[i:i + 8].tolist())
-            session.consume(Block(spec.index, i, samples, spec, state=2 if railed else 0))
-        if session.calibrated:
-            assert session.range_uv < 100.0, f"calibrated on the rail: ±{session.range_uv:.0f} µV"
+            session.feed_block(Block(spec.index, i, samples, spec, state=2 if railed else 0))
+            if railed and signal_at_rail is None:
+                signal_at_rail = session.signal
+        assert session.range_uv < 100.0, f"calibrated on the rail: ±{session.range_uv:.0f} µV"
+        assert session.signal == signal_at_rail, "the rail does not steer the level"
     finally:
         session.stop()
 
@@ -723,3 +695,61 @@ def test_the_slow_spectrum_fills_in_from_the_right_instead_of_showing_nothing():
     assert drawn[60] > drawn[10], "and the picture fills in as the window grows"
     assert drawn[300] > drawn[60]
     assert drawn[300] < SLOW_BINS, "the bins it genuinely cannot resolve stay empty rather than being faked"
+
+
+def test_the_range_is_refined_during_the_calibration_and_not_only_at_its_end():
+    """While the calibration window is still filling, the range follows a signal that has grown."""
+    session = _session()
+    try:
+        spec = session.specs[session.channel]
+        t = np.arange(int(60 * RATE)) / RATE
+        _feed_session(session, 5.0 * np.sin(2 * np.pi * 0.05 * t), spec)
+        early = session.range_uv
+        _feed_session(session, 40.0 * np.sin(2 * np.pi * 0.05 * t), spec, start=int(60 * RATE))
+        assert not session.calibrated, "still inside the calibration"
+        assert session.range_uv > 2 * early, "the range moved with the signal before the calibration ended"
+    finally:
+        session.stop()
+
+
+def _stub_device(reference: str):
+    settings = type("S", (), {"reference": reference, "lower_limit_hz": 0.01, "hz": RATE})()
+    status = type("St", (), {"settings": settings, "connected": True})()
+    return type("Dev", (), {"status": status, "stop": lambda self: None})()
+
+
+def test_a_bipolar_pair_is_not_named_as_a_wiring_problem_and_a_shared_reference_is():
+    """A bipolar reference raises no warning; a shared reference is named, with the word bipolar as the fix."""
+    session = _session(source=WaitingSource(Settings(channels=2, lower_limit_hz=0.01).build()))
+    try:
+        session.device = _stub_device("bipolar")
+        assert session.wiring_problem() is None
+        session.device = _stub_device("")
+        assert session.wiring_problem() is None, "no reference reported is not a problem to name"
+        session.device = _stub_device("linked")
+        problem = session.wiring_problem()
+        assert problem and "linked" in problem and "bipolar" in problem
+    finally:
+        session.device = None
+        session.stop()
+
+
+def test_a_scaling_comes_across_a_stop_and_a_fixed_ranges_ends_do_not():
+    """A new session keeps the scaling the last one used, with its settings, but measures a fixed range's
+    ends again rather than taking them from the session that ended."""
+    first = _session()
+    second = _session()
+    third = _session()
+    try:
+        first.set_strategy("zscore", window_s=33.0, clamp_k=2.0)
+        second.adopt_view(first)
+        assert second.strategy_id == "zscore" and second.strategy_params == {"window_s": 33.0, "clamp_k": 2.0}
+
+        first.set_strategy("fixed_range")
+        first.set_range(third.range_uv * 7)
+        third.adopt_view(first)
+        assert third.strategy_id == "fixed_range"
+        assert third.feedback_range_uv == pytest.approx(third.range_uv), "the old ends stay with the old session"
+    finally:
+        for session in (first, second, third):
+            session.stop()

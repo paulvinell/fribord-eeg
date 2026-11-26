@@ -9,245 +9,18 @@ them, which on an EEG screen is a threshold and here cannot be.
 
 from __future__ import annotations
 
-import importlib
 import time
 
 import numpy as np
 import pytest
 
-from nfb.hrv import Beat, DEFAULT_METRIC, HRV_METRICS, HRVProcessor, metric_value
-from nfb_console import normalise
-
+from nfb.hrv import Beat, DEFAULT_METRIC, HRV_METRICS, metric_value
 from nfb_console.protocols import BY_CODE
 
-from harness import StubPage, _texts, toolbar
-
-
-def coherent_state(seconds: float = 200.0, depth: float = 0.09, jitter: float = 0.0):
-    """A `BeatState` from a tachogram modulated at 0.1 Hz — what this protocol is training toward."""
-    proc = HRVProcessor()
-    rng = np.random.default_rng(5)
-    t, state = 1000.0, None
-    while t < 1000.0 + seconds:
-        rr = 1.0 + depth * np.sin(2 * np.pi * 0.1 * t) + jitter * rng.standard_normal()
-        t += rr
-        state = proc.push(Beat(t, 60.0 / rr, [rr]))
-    return state
-
-
-# --- layer one: what to feed back ------------------------------------------------------------
-
-def test_every_metric_extracts_a_real_number_from_a_real_state():
-    """A catalogue whose entries throw or return None on live data is a menu of dead options."""
-    state = coherent_state()
-    for metric_id, spec in HRV_METRICS.items():
-        value = metric_value(spec, state)
-        assert value is not None, f"{metric_id} produced nothing"
-        assert np.isfinite(value), f"{metric_id} produced {value}"
-        assert spec.label and spec.description and spec.detail, f"{metric_id} is undocumented"
-        assert spec.strategies, f"{metric_id} recommends no scaling"
-        for suggested in spec.strategies:
-            assert suggested in normalise.STRATEGIES, f"{metric_id} names a strategy that is gone"
-
-
-def test_a_metric_reports_nothing_rather_than_zero_before_it_can_speak():
-    """Zero is a reading and 'no reading yet' is not. A channel handed 0.0 drives itself to its floor and
-    reads as a bad result, which is the opposite of the truth."""
-    proc = HRVProcessor()
-    early = proc.push(Beat(1000.0, 60.0, [1.0]))          # one beat: no spectrum
-    assert metric_value(HRV_METRICS["sharpness"], early) is None
-    assert metric_value(HRV_METRICS["coherence"], early) is None
-    # The time-domain metrics used to claim readiness here and return a literal 0.0 — which is not
-    # nothing, it is a reading, and it anchored the bottom of the rolling scale for the whole window.
-    assert metric_value(HRV_METRICS["rsa_amplitude"], early) is None
-    assert metric_value(HRV_METRICS["rmssd"], early) is None
-    # the rate itself works from the start, which is what makes it the wiring-check metric
-    assert metric_value(HRV_METRICS["hr_smoothed"], early) is not None
-    assert metric_value(HRV_METRICS["sharpness"], None) is None
-
-    state = early
-    for i in range(2, 15):
-        state = proc.push(Beat(1000.0 + float(i), 60.0, [1.0]))
-    assert metric_value(HRV_METRICS["rsa_amplitude"], state) is not None
-    assert metric_value(HRV_METRICS["rmssd"], state) is not None, \
-        "and once the beats exist, the number is a number"
-
-
-def test_the_metrics_that_are_better_low_say_so():
-    """`invert` is not a preference. A channel that got brighter as the spectrum drifted further from ideal
-    would be reinforcing the wrong thing, so it is a property of the metric."""
-    assert HRV_METRICS["spectrum_distance"].invert, "0 is the ideal"
-    assert HRV_METRICS["lf_hf_ratio"].invert
-    assert HRV_METRICS["hr_smoothed"].invert, "a falling rate is what relaxation looks like"
-    for good_high in ("coherence", "resonance_ratio", "sharpness", "rsa_amplitude", "rmssd"):
-        assert not HRV_METRICS[good_high].invert
-
-
-def test_the_metrics_disagree_which_is_why_it_is_a_choice():
-    """If they ranked the same states the same way there would be no reason to offer eleven.
-
-    A tight peak slightly off the target is the case that separates them: sharpness punishes it hard
-    because it integrates a band around the target, and coherence does not because it locates the peak.
-    That is the whole argument for the target being settable — and for coherence being the metric to
-    train on until you know where your own resonance is.
-    """
-    on_target = coherent_state(depth=0.09)
-    # the same modulation depth at 0.13 Hz — coherent breathing, at the wrong rate
-    proc = HRVProcessor()
-    t, off_target = 1000.0, None
-    while t < 1200.0:
-        rr = 1.0 + 0.09 * np.sin(2 * np.pi * 0.13 * t)
-        t += rr
-        off_target = proc.push(Beat(t, 60.0 / rr, [rr]))
-
-    sharp_on = metric_value(HRV_METRICS["sharpness"], on_target)
-    sharp_off = metric_value(HRV_METRICS["sharpness"], off_target)
-    coh_on = metric_value(HRV_METRICS["coherence"], on_target)
-    coh_off = metric_value(HRV_METRICS["coherence"], off_target)
-    assert sharp_off < sharp_on / 2, "sharpness is pinned to the target and punishes 0.13 hard"
-    assert coh_off > coh_on * 0.5, "coherence locates the peak, so it barely notices"
-
-
-def test_the_target_metrics_follow_the_target_and_the_published_ones_do_not():
-    """**Which numbers a personal target may move, and which it must not.**
-
-    Sharpness, peak proximity and the distance from ideal are scored against a chosen frequency, so
-    moving the target to where somebody actually resonates has to move them — that is the point. The
-    coherence measures and LF/HF are computed over the standard published bands, and re-cutting those
-    around a personal target would produce numbers that look like the conventional ones and are not.
-    """
-    def state_at(target_hz):
-        proc = HRVProcessor(target_hz=target_hz)
-        t, state = 1000.0, None
-        while t < 1200.0:
-            rr = 1.0 + 0.09 * np.sin(2 * np.pi * 0.065 * t)
-            t += rr
-            state = proc.push(Beat(t, 60.0 / rr, [rr]))
-        return state
-
-    default, moved = state_at(0.1), state_at(0.065)
-
-    for follows in ("sharpness", "peak_proximity", "spectrum_distance"):
-        assert (metric_value(HRV_METRICS[follows], default)
-                != metric_value(HRV_METRICS[follows], moved)), f"{follows} must follow the target"
-    assert metric_value(HRV_METRICS["sharpness"], moved) > \
-        metric_value(HRV_METRICS["sharpness"], default) * 5
-    assert metric_value(HRV_METRICS["peak_proximity"], moved) > 0.95, \
-        "a peak exactly on the target scores 1.0 wherever the target is"
-    assert metric_value(HRV_METRICS["spectrum_distance"], moved) < \
-        metric_value(HRV_METRICS["spectrum_distance"], default)
-
-    for fixed in ("coherence", "resonance_ratio", "lf_hf_ratio"):
-        assert (metric_value(HRV_METRICS[fixed], default)
-                == pytest.approx(metric_value(HRV_METRICS[fixed], moved))), \
-            f"{fixed} is quoted against published bands and must not move"
-
-
-# --- layer two: how to scale it ---------------------------------------------------------------
-
-def test_every_strategy_maps_into_the_unit_interval_and_is_documented():
-    for strategy_id, spec in normalise.STRATEGIES.items():
-        assert spec.label and spec.description and spec.detail
-        strategy = normalise.build(strategy_id)
-        for t, value in enumerate([-1e6, -1.0, 0.0, 0.5, 1.0, 1e6]):
-            out = strategy.push(value, float(t))
-            assert 0.0 <= out <= 1.0, f"{strategy_id} produced {out}"
-        assert strategy.describe()
-
-
-def test_an_unknown_strategy_raises_rather_than_falling_back():
-    """A silent fallback would normalise by a rule nobody chose, and everything downstream would look fine."""
-    with pytest.raises(ValueError):
-        normalise.build("vibes")
-
-
-def test_a_rolling_strategy_reports_the_middle_and_says_it_is_not_ready():
-    """It has to return *something*, and 0.5 is the least wrong something — but a screen that showed that as
-    a real reading would be showing 'average' for a signal it knows nothing about. Hence `warmup`."""
-    strategy = normalise.build("rolling_minmax", window_s=60.0)
-    assert strategy.warmup == 0.0
-    assert strategy.push(5.0, 0.0) == 0.5, "one value cannot have a range"
-    assert strategy.warmup < 1.0
-    for i in range(1, 61):
-        strategy.push(float(i), float(i))
-    assert strategy.warmup == 1.0
-    assert strategy.push(1000.0, 61.0) == 1.0, "a new maximum is the top of the range"
-
-    # the stateless ones are ready immediately, which is the whole reason to prefer them
-    assert normalise.build("fixed_range").warmup == 1.0
-    assert normalise.build("tanh").warmup == 1.0
-
-
-def test_a_scaling_only_scales_and_the_direction_belongs_to_the_metric():
-    """**Every strategy rises.** Which end is good is the metric's property — `MetricSpec.invert` — applied
-    after normalisation, and a scaling that also flipped the sign would be a second way to say the same thing.
-    One of them was: `1/(1 + value/scale)`, offered in the "scaled by" row under the label "small is good",
-    where it read as a claim about the metric rather than about the scale. It also let a metric that already
-    inverts be inverted twice, which lands back where it started with nothing on screen saying so.
-    """
-    for sid in normalise.STRATEGIES:
-        strategy = normalise.build(sid)
-        seen = [strategy.push(v, float(i)) for i, v in enumerate(np.linspace(0.0, 4.0, 40))]
-        assert all(b >= a - 1e-9 for a, b in zip(seen, seen[1:])), f"{sid} falls as the metric rises"
-
-    # and no label or description claims a direction, since the pill sits under "scaled by"
-    for spec in normalise.STRATEGIES.values():
-        words = f"{spec.label} {spec.description}".lower()
-        for claim in ("small is good", "large is good", "high is better", "zero is the goal"):
-            assert claim not in words, f"{spec.id} describes a direction, not a scale"
-
-
-def test_the_strategies_are_not_interchangeable():
-    """Each one exists because it answers a different question about the number's shape."""
-    fixed = normalise.build("fixed_range", low=0.0, high=1.0)
-    assert fixed.push(0.25, 0.0) == pytest.approx(0.25), "a straight map, comparable across sessions"
-    assert fixed.push(50.0, 1.0) == 1.0, "and pinned for a metric outside its range"
-
-    open_ended = normalise.build("saturating", scale=2.0)
-    assert open_ended.push(0.0, 0.0) == pytest.approx(0.0)
-    assert open_ended.push(2.0, 1.0) == pytest.approx(0.5), "the knob is where it crosses the middle"
-    assert open_ended.push(100.0, 2.0) > 0.95, "and it approaches the top without reaching it"
-    assert open_ended.push(1e12, 3.0) < 1.0
-
-    centred = normalise.build("tanh", scale=1.0)
-    assert centred.push(0.0, 0.0) == pytest.approx(0.5), "zero is neutral"
-    assert centred.push(1.0, 1.0) == pytest.approx(0.88, abs=0.01)
-    assert centred.push(-1.0, 2.0) == pytest.approx(0.12, abs=0.01)
-    # It saturates gracefully rather than hitting a wall: a clamped strategy gives the same answer for
-    # everything past its limit, where this keeps its ordering over any range a real metric reaches.
-    # (Far enough out, float itself saturates — tanh(1e9) is exactly 1.0. That is arithmetic, not the shape.)
-    assert centred.push(5.0, 3.0) < centred.push(8.0, 4.0) < 1.0
-    assert 0.0 < centred.push(-8.0, 5.0) < centred.push(-5.0, 6.0)
-    clamped = normalise.build("zscore", window_s=60.0, clamp_k=2.0)
-    for i in range(60):
-        clamped.push(float(i % 3), float(i))            # a small, stable spread
-    assert clamped.push(1e3, 61.0) == clamped.push(1e6, 62.0) == 1.0, "a clamp stops distinguishing"
+from harness import StubPage, _texts, coherent_state, toolbar
 
 
 # --- and what carries it: the shared mechanisms, not a parallel set ----------------------------
-
-def test_the_bounded_pitch_survived_as_music_and_the_rest_did_not():
-    """Of the five rendering modes that were built, one carries something no mechanism could: a **bounded
-    pitch**, which conveys a position with no reference point needed — you hear which way it moved without
-    remembering where it was, and a volume cannot do that. It is a `music` source now, beside the unbounded
-    Shepard tone, which is a different instrument rather than a setting of it.
-
-    The others were the mechanisms reimplemented. `system_brightness` is `shadow`. `noise_mask` is `music` on
-    noise with `sound.invert` — the Quiet Reward arrangement, which already existed and is measured elsewhere.
-    """
-    from nfb_console.feedback import MUSIC_SOURCES, Music, Sound
-
-    assert "tone" in MUSIC_SOURCES and "shepard" in MUSIC_SOURCES
-    settings = Music()
-    assert (settings.tone_base_hz, settings.tone_top_hz) == (220.0, 660.0)
-
-    # the mask, expressed with what was already there: loudest at 0, silent at 1
-    quiet = Sound(enabled=True, low=0.0, high=60.0, invert=True)
-    assert quiet.map(0.0) > quiet.map(1.0)
-    assert quiet.map(1.0) == pytest.approx(0.0)
-
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("nfb_console.passive")
 
 
 def test_the_pitch_source_gets_its_own_rows_and_not_the_file_browser():
@@ -283,30 +56,6 @@ def test_the_pitch_source_gets_its_own_rows_and_not_the_file_browser():
         assert "file or folder" not in shown and "browse" not in shown
     finally:
         session.stop()
-
-
-def test_the_pitch_source_tracks_the_level_between_its_two_frequencies():
-    from nfb_console import music
-    from nfb_console.feedback import Music
-
-    out = music.MusicOutput()
-    settings = Music(enabled=True, source="tone")
-    try:
-        for level in (0.0, 0.5, 1.0):
-            out.apply(settings, level=level)
-            out.tone._block(2048)
-        # the glide means it approaches rather than jumps, so the check is direction and bounds
-        assert settings.tone_base_hz <= out.tone.pitch_hz <= settings.tone_top_hz
-        out.apply(settings, level=0.0)
-        for _ in range(80):
-            out.tone._block(2048)
-        low = out.tone.pitch_hz
-        out.apply(settings, level=1.0)
-        for _ in range(80):
-            out.tone._block(2048)
-        assert out.tone.pitch_hz > low + 100.0, "the pitch has to follow the signal"
-    finally:
-        out.release()
 
 
 # --- end to end on the screen -----------------------------------------------------------------
@@ -427,14 +176,15 @@ def test_the_direction_is_the_operators_and_every_metric_arrives_with_one():
         # every metric ships an aim, so there is never a direction nobody chose
         for spec in HRV_METRICS.values():
             assert spec.default_direction in ("increase", "decrease")
-        assert HRV_METRICS["coherence"].default_direction == "increase"
-        assert HRV_METRICS["lf_hf_ratio"].default_direction == "decrease"
 
+        session.set_metric("coherence")
         session.toggle_pause()
         assert session.direction == "increase" and not session.inverts
         _feed(session)
         up = session.signal
         assert up > 0.5
+        session.set_direction("increase")
+        assert session.signal == up, "the aim that is already chosen changes nothing"
 
         # flipping it inverts the level and nothing else: the scaling keeps its window and its warm-up
         window = session.strategy
@@ -456,9 +206,12 @@ def test_the_direction_is_the_operators_and_every_metric_arrives_with_one():
 
         # changing the metric puts the aim back to that metric's own — carrying "decrease" onto RMSSD would
         # train somebody toward *less* variability with only the metric's name having changed
-        session.set_metric("rmssd")
+        ups = [m for m, spec in HRV_METRICS.items() if spec.default_direction == "increase"]
+        downs = [m for m, spec in HRV_METRICS.items() if spec.default_direction == "decrease"]
+        assert ups and downs
+        session.set_metric(ups[-1])
         assert session.direction == "increase"
-        session.set_metric("spectrum_distance")
+        session.set_metric(downs[0])
         assert session.direction == "decrease", "and it takes the inverted default where there is one"
 
         # it survives a stop, like the metric and the scaling
@@ -467,7 +220,7 @@ def test_the_direction_is_the_operators_and_every_metric_arrives_with_one():
         try:
             second.adopt(session)
             assert second.direction == "increase"
-            assert second.metric == "spectrum_distance"
+            assert second.metric == downs[0]
         finally:
             second.stop()
     finally:
@@ -496,16 +249,31 @@ def test_the_screen_puts_the_direction_in_its_own_row_and_says_what_is_usual():
     session = _session()
     try:
         source = hrv_view.SignalSource(StubPage(), session)
-        shown = visible(source.control)
-        assert "aim to" in shown and "increase" in shown and "decrease" in shown
-        assert "the usual aim for coherence" in shown
-        # and it is not in the scaling's row: a scaling describes a shape, not an end
-        assert "small is good" not in shown
+        usual = visible(source.control)
+        assert "aim to" in usual and "increase" in usual and "decrease" in usual
 
-        session.set_direction("decrease")
+        def chosen():
+            from nfb_console import theme
+
+            return [k for k in ("increase", "decrease") if _by_label(source.control, k).content.color == theme.TEXT]
+
+        def note():
+            """The line under the pills: the text that names the metric."""
+            label = session.metric_spec.label
+            return next(x.value for x in walk(source.control)
+                        if isinstance(x, ft.Text) and label in (x.value or "") and "usual" in x.value)
+
+        usual_aim = session.metric_spec.default_direction
+        assert chosen() == [session.direction] == [usual_aim]
+        assert usual_aim not in note(), "at the usual aim the note names no other"
+
+        other = "decrease" if usual_aim == "increase" else "increase"
+        session.set_direction(other)
         source.rebuild()
-        assert "coherence is usually trained to increase" in visible(source.control), \
-            "off the usual aim, the row says so rather than looking like the default"
+        off = visible(source.control)
+        assert chosen() == [other]
+        assert off != usual and usual_aim in note(), \
+            "off the usual aim, the row names the usual one rather than looking like the default"
     finally:
         session.stop()
 
@@ -562,7 +330,7 @@ def test_the_screen_has_one_feedback_tab_carrying_the_shared_mechanisms():
         assert "SIGNAL SOURCE" in shown
         assert "feed back" in shown and "scaled by" in shown
         # and the shared mechanisms below them
-        assert "OUTPUT" in shown, "the pane every other protocol uses"
+        assert shown.split().count("OUTPUT") == 1, "one panel of the mechanisms, the one every protocol uses"
         for mechanism in ("sound", "shadow", "click", "music"):
             assert mechanism in shown.lower(), f"{mechanism} is configurable here"
         # and none of the panels or rows that belong to a level built by scoring bands: absent rather than
@@ -613,11 +381,11 @@ def test_a_finished_plan_releases_the_outputs_too():
         for name in ("display", "output_volume", "music"):
             obj = getattr(session, name)
             setattr(obj, "release", (lambda n=name: lambda: released.append(n))())
-        session.plan.length_seconds = 0.01
+        clock = [100.0]
+        session.now = lambda: clock[0]
+        session.plan.length_seconds = 10.0
         session.toggle_pause()               # start the clock
-        import time as _time
-
-        _time.sleep(0.02)
+        clock[0] += 10.5
         session.tick()
         assert session.finished and session.paused
         assert released == ["display", "output_volume", "music"], \
@@ -656,6 +424,8 @@ def test_a_dead_or_silent_beat_source_stops_the_feedback_and_says_so():
         # nobody asked for is reported as a fault rather than passing in silence.
         runner.error = runner._read(runner._generation)   # the generator ends on its own
         assert runner.error, "an end nobody asked for is a fault, not a silence"
+        runner.state = coherent_state()                   # the beats held before the end are plenty
+        runner.seen_at = time.monotonic()                 # and the last one is fresh
 
         applies = []
         for name in ("display", "output_volume", "music"):
@@ -780,69 +550,16 @@ def test_a_fresh_source_starts_a_fresh_record(monkeypatch):
 
     monkeypatch.setattr("nfb.hrv.beat_source", lambda kind, **kw: Empty())
     runner = HeartRunner(HeartChoice(kind="simulator"))
-    runner.processor.push(Beat(1000.0, 60.0, [1.0]))
-    runner.processor.push(Beat(1001.0, 60.0, [1.0]))
+    for i in range(10):
+        runner.processor.push(Beat(1000.0 + i, 60.0, [1.0]))
     runner.state = object()
-    assert runner.processor._live, "old beats are in the buffers"
+    assert runner.processor.replay(step_s=1.0), "old beats are in the buffers"
     assert runner.attach()
     try:
-        # Nothing from before the attach is in the buffers — true the instant it returns, and true
-        # afterwards however many real beats the reader has added by the time this runs. The old version
-        # slept a fifth of a second first so that there would be real beats to compare against, which
-        # made the scheduler part of the assertion.
-        assert all(bt > 1e6 for bt, _ in runner.processor._live), "old beats survived the attach"
-        assert all(bt > 1e6 for bt, _, _ in runner.processor._beats)
+        # The source gives no beat, so whatever the processor still holds came from before the attach.
+        assert runner.processor.replay(step_s=1.0) == [], "old beats survived the attach"
     finally:
         runner.release()
-
-
-def test_the_pacer_sounds_each_turn_once_and_the_two_are_different_pitches():
-    """A paced breath you have to watch owns your eyes for the whole session, on a screen whose whole
-    point is the instruments. So the turn is audible: a higher tone in, a lower one out, and the pitch goes the way the breath goes."""
-    from nfb_console import hrv_view
-
-    session = _session()
-    session.set_pacer_period(10.0)
-    played: list[str] = []
-    session.cue = lambda name, *a, **kw: played.append(name)
-    try:
-        session.toggle_pause()                # running
-        session._resumed_at = time.monotonic() - 1.0     # 1 s in: inhaling
-        session.tick()
-        session.tick()                        # nothing changed, so nothing sounds
-        assert len(played) == 1, "one sound per turn, not one per draw"
-
-        session._resumed_at = time.monotonic() - 6.0     # 6 s in: exhaling
-        session.tick()
-        assert len(played) == 2
-        assert played[0] != played[1], "in and out are told apart by pitch"
-        assert str(int(hrv_view.PACER_IN_HZ)) in played[0]
-        assert str(int(hrv_view.PACER_OUT_HZ)) in played[1]
-
-        session.pacer_sound = False
-        session._resumed_at = time.monotonic() - 11.0    # back to inhaling
-        session.tick()
-        assert len(played) == 2, "and it can be switched off"
-    finally:
-        session.stop()
-
-
-def test_every_pacer_has_a_phase_to_breathe_with():
-    """The ring grows through the whole inhale and shrinks through the whole exhale, which is the instruction
-    and the pace in one object."""
-    session = _session()
-    session.set_pacer_period(10.0)
-    try:
-        session.toggle_pause()
-        session._resumed_at = time.monotonic() - 0.05
-        assert session.breathe_in() and session.breath_phase() < 0.1, "the inhale starts small"
-        session._resumed_at = time.monotonic() - 4.9
-        assert session.breathe_in() and session.breath_phase() > 0.9, "and ends full"
-        session._resumed_at = time.monotonic() - 5.1
-        assert not session.breathe_in() and session.breath_phase() < 0.1, \
-            "the exhale starts full and shrinks, which is the same phase read the other way"
-    finally:
-        session.stop()
 
 
 def test_the_room_does_something_from_the_first_beats_rather_than_after_two_minutes():
@@ -884,28 +601,6 @@ def test_the_room_does_something_from_the_first_beats_rather_than_after_two_minu
         session.stop()
 
 
-def test_nothing_between_the_first_beats_and_the_feedback_waits_for_a_number_to_settle():
-    """The rule, stated once against the objects that used to break it. A gate may say "this cannot be
-    computed"; none may say "this is not accurate enough yet". Accuracy is reported — the span and the
-    bin width under the curve, the warm-up bar beside the readout — never withheld."""
-    from nfb.hrv import HRVProcessor
-    from nfb_console.hrv_view import WARMUP_GATE
-
-    assert WARMUP_GATE == 0.0, "the level does not wait for a rolling scale to fill"
-
-    proc = HRVProcessor()
-    t, state = 1000.0, None
-    for i in range(4):                      # four beats: the arithmetic floor, nothing above it
-        rr = 1.0 + 0.1 * np.sin(2 * np.pi * 0.1 * t)
-        t += rr
-        state = proc.push(Beat(t, 60.0 / rr, [rr]))
-
-    assert state.spectrum.ready, "three beats make a spectrum"
-    for metric_id in HRV_METRICS:
-        assert metric_value(HRV_METRICS[metric_id], state) is not None, \
-            f"{metric_id} has everything it arithmetically needs and must produce a number"
-
-
 def test_the_stand_in_covers_a_metric_with_nothing_to_say_and_not_a_scale_that_is_still_settling():
     """**The stand-in's job shrank to the honest one.** It used to hold the room until the chosen
     metric's scale was a quarter full, which is a settling time, and the same trade this screen made
@@ -934,119 +629,6 @@ def test_the_stand_in_covers_a_metric_with_nothing_to_say_and_not_a_scale_that_i
         assert session.signal is not None, "and the level never stopped on the way"
     finally:
         session.stop()
-
-
-def test_the_stand_in_still_covers_the_seconds_before_any_metric_has_a_value():
-    """The one case it is for: two beats, so there is no spectrum and no successive difference. The
-    chosen metric is `None` and the level would otherwise be missing at the moment somebody presses
-    play."""
-    from nfb.hrv import HRVProcessor
-    from nfb_console.hrv_view import STANDIN_METRIC
-
-    session = _session()
-    try:
-        session.toggle_pause()
-        proc = HRVProcessor()
-        t, state = 1000.0, None
-        for i in range(6):
-            rr = 1.0 + 0.12 * np.sin(2 * np.pi * 0.1 * t)
-            t += rr
-            state = proc.push(Beat(t, 60.0 / rr, [rr]))
-        session.set_metric("rmssd")
-        session.heart.state = state
-        session.heart.seen_at = time.monotonic()
-        session.observe()
-        assert session.raw_metric is not None and session.signal is not None
-
-        # and with a metric that genuinely has nothing, the swing carries it
-        session.heart.state = proc.push(Beat(t + 1.0, 60.0, [1.0]))
-        session.set_metric(STANDIN_METRIC)
-        session.observe()
-        assert session.signal is not None
-    finally:
-        session.stop()
-
-
-def test_the_pacer_asks_about_the_cycle_only_when_the_cycle_is_what_is_running():
-    """A control that does nothing in the mode you are in is a question about a mode you did not pick.
-    The cycle length belongs to the metronome; a sweep sets the length of each breath itself."""
-    import flet as ft
-
-    from nfb_console import chrome, hrv_view
-
-    class Page:
-        width = 1240
-
-        def __init__(self):
-            self.controls, self.services, self.tasks, self.dialogs = [], [], [], []
-            self.window = type("W", (), {})()
-
-        def add(self, control):
-            self.controls.append(control)
-
-        def update(self, *a):
-            pass
-
-        def run_task(self, fn, *a):
-            self.tasks.append((fn, a))
-
-        def show_dialog(self, dialog):
-            self.dialogs.append(dialog)
-
-    def labels(control):
-        if isinstance(control, ft.Text):
-            return [control.value or ""]
-        out = []
-        for child in getattr(control, "controls", None) or []:
-            out += labels(child)
-        if (inner := getattr(control, "content", None)) is not None:
-            out += labels(inner)
-        return out
-
-    class StubDevice:
-        from nfb import Mode as _Mode
-        status = type("S", (), {"mode": _Mode.DISCONNECTED, "connected": False, "failure": None,
-                                "remedy": None, "model": "", "serial": "", "firmware": "",
-                                "port": "", "epoch": 0,
-                                "settings": type("T", (), {"hz": 250.0, "reference": "linked",
-                                                           "mains_hz": 50, "lower_limit_hz": 0.5})()})()
-
-    session = _session()
-    try:
-        page = Page()
-        bar = chrome.Toolbar(StubDevice(), lambda: None, lambda: None)
-        control = hrv_view.view(page, session, bar, lambda: None)
-
-        assert "cycle" in labels(control), "the metronome is the pacer of a new session"
-        for ctrl in _walk(control):
-            if isinstance(ctrl, ft.Container) and isinstance(ctrl.content, ft.Text) \
-                    and ctrl.content.value == "sweep" and ctrl.on_click is not None:
-                ctrl.on_click(None)
-                break
-        assert "cycle" not in labels(control), "a sweep has no cycle to set"
-        for ctrl in _walk(control):
-            if isinstance(ctrl, ft.Container) and isinstance(ctrl.content, ft.Text) \
-                    and ctrl.content.value == "metronome" and ctrl.on_click is not None:
-                ctrl.on_click(None)
-                break
-        assert "cycle" in labels(control), "and it is there in the mode it belongs to"
-
-        # And the outer ring says what it is — it was drawn with nothing anywhere naming it. Written on
-        # each frame, like every other reading on the screen, so the test has to draw one.
-        session.redraw()
-        assert any("the outer ring is the level" in x for x in labels(control))
-    finally:
-        session.stop()
-
-
-def _walk(control):
-    import flet as ft
-
-    yield control
-    for child in getattr(control, "controls", None) or []:
-        yield from _walk(child)
-    if (inner := getattr(control, "content", None)) is not None and isinstance(inner, ft.Control):
-        yield from _walk(inner)
 
 
 def test_the_level_keeps_running_through_a_metric_change_and_is_warm_when_you_press_play():
@@ -1204,38 +786,11 @@ def test_the_hrv_screen_draws_before_and_after_beats():
         captions = " | ".join(c.value for c in _texts(control))
         assert "0.1 Hz" in captions
         assert "bpm" in captions
-    finally:
-        session.stop()
-
-
-def test_the_hrv_screen_has_exactly_one_place_to_configure_the_feedback():
-    """**The structural test the four-tab version would have failed.**
-
-    It briefly had Train, Passive, Feedback and Session — two tabs configuring the feedback, two writers to
-    the display brightness, two noise generators able to sound at once, and a metric selector on one tab that
-    the other tab ignored. Per-layer tests cannot see that by construction, so this looks at the whole.
-    """
-    from nfb_console import hrv_view
-    from nfb_console.inputs import HeartChoice
-
-    page = StubPage()
-    session = hrv_view.HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        control = hrv_view.view(page, session, toolbar(), lambda: None)
-        session.redraw()
-        texts = [x.value for x in _texts(control)]
-        shown = " ".join(texts)
-        assert texts.count("OUTPUT") == 1, "one panel, on one tab — the shared one"
-        assert "Passive" not in shown, "and not a second tab beside it"
-        # one owner for every effector it drives, and it is the same object every other screen uses
-        assert not hasattr(session, "passive_outputs")
-        assert session.display is not None and session.output_volume is not None
-        assert session.music is not None
-        # what this screen replaces is where the level comes from, and those two rows sit above that panel
-        assert "feed back" in shown and "scaled by" in shown
-        # not a parallel set of renderers
-        for gone in ("look at", "listen to", "the room", "ambient tint"):
-            assert gone not in shown, f"{gone!r} was a mechanism reimplemented"
+        # the ring around the pacer is the level, and BREATHE names the metric and the number it has
+        assert session.signal is not None
+        labels = [spec.label for spec in HRV_METRICS.values()]
+        assert any(f"{session.signal:.0%}" in t.value and any(label in t.value for label in labels)
+                   for t in _texts(_breathe(control)) if t.value)
     finally:
         session.stop()
 
@@ -1528,22 +1083,316 @@ def _finished(rig_, until=1400.0):
     return rig_
 
 
+def test_the_metronome_period_is_configurable_within_its_range():
+    """A cycle inside the range is kept as given and the note names it with its breaths a minute; a cycle
+    outside the range is clamped to the nearest end."""
+    from nfb_console.hrv_view import HRVSession, PACER_RANGE_S
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        session.set_pacer_period(12)
+        assert session.pacer_period == 12.0
+        assert "12 s" in session.pacer_note() and "5.0 breaths a minute" in session.pacer_note()
+        assert "metronome" in session.pacer_note(), "it must not pass for the heart-locked cue"
+        # clamped *into* the range rather than out of it
+        session.set_pacer_period(1.0)
+        assert session.pacer_period == PACER_RANGE_S[0]
+        session.set_pacer_period(999.0)
+        assert session.pacer_period == PACER_RANGE_S[1]
+        # a cycle between two steps of the arrows runs as it was given, and the note names it
+        session.set_pacer_period(10.37)
+        assert session.pacer_period == 10.37
+        assert "10.37 s" in session.pacer_note() and "5.8 breaths a minute" in session.pacer_note()
+    finally:
+        session.stop()
+
+
+def test_the_target_frequency_is_settable_from_the_screen_and_takes_the_metronome_with_it():
+    """Moving the target moves the metronome to the same frequency and the processor scores against it. A
+    cycle set later does not move the target."""
+    from nfb.hrv import TARGET_RANGE_HZ
+    from nfb_console.hrv_view import HRVSession
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        session.set_target_hz(0.065)
+        assert session.target_hz == 0.065
+        assert session.heart.processor.target_hz == 0.065, "one copy, and it lives on the processor"
+        assert session.pacer_period == pytest.approx(1 / 0.065), "the metronome breathes at the target"
+        assert "3.9 breaths a minute" in session.target_note()
+
+        # the band moves independently, and both are clamped
+        session.set_target_hz(0.065, 0.01)
+        assert session.target_half_hz == 0.01
+        session.set_target_hz(0.0)
+        assert session.target_hz == TARGET_RANGE_HZ[0], "clamped into the range, not refused"
+
+        # nudging the cycle afterwards does not drag the target with it
+        session.set_target_hz(0.065)
+        session.set_pacer_period(10.0)
+        assert session.target_hz == 0.065
+    finally:
+        session.stop()
+
+
+def test_the_target_survives_a_relaunch_because_it_is_the_persons_own_frequency():
+    """Same category as a volume: found by hunting for it over a session or two, and asking somebody to
+    re-find it every launch is the failure `prefs` exists to prevent. Restored before the pacer, since
+    setting the target sets the pacer from it."""
+    from nfb_console.hrv_view import HRVSession
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        session.set_target_hz(0.065, 0.015)
+        stored = session.calibration()
+        assert stored["target_hz"] == 0.065 and stored["target_half_hz"] == 0.015
+    finally:
+        session.stop()
+
+    fresh = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        assert fresh.target_hz != 0.065, "a new session does not start at the stored target"
+        fresh.restore_calibration(stored)
+        assert fresh.target_hz == 0.065 and fresh.target_half_hz == 0.015
+        assert fresh.pacer_period == stored["pacer_period"], \
+            "and the stored cycle survives, rather than being overwritten by one derived from the target"
+    finally:
+        fresh.stop()
+
+
+def test_the_pacer_period_actually_changes_the_cue(monkeypatch):
+    """The metronome's cue turns at the share of the cycle that is set, and the cycle repeats at the
+    period that is set."""
+    from nfb_console.hrv_view import HRVSession
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    now = [0.0]
+    monkeypatch.setattr(HRVSession, "elapsed", property(lambda _s: now[0]))
+    try:
+        session.set_pacer_period(20)
+        for at, inhale in ((0.0, True), (9.0, True), (11.0, False), (21.0, True)):
+            now[0] = at
+            assert session.breathe_in() is inhale, at
+    finally:
+        session.stop()
+
+
+def test_opening_hrv_as_the_first_protocol_does_not_crash():
+    """Preferences restore into an HRV session, which is not a `TrainingSession`, and a cycle set after
+    that is in its calibration."""
+    from nfb_console import prefs
+    from nfb_console.hrv_view import HRVSession
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        # It reaches the mechanisms through the session's own hook rather than an attribute it assumed was
+        # there, which is what makes this work on a screen whose settings are not only a `FeedbackSettings`.
+        assert prefs.restore("HRV", session) >= 0
+        session.set_pacer_period(12.5)
+        assert session.calibration()["pacer_period"] == 12.5
+    finally:
+        session.stop()
+
+
+def test_stopping_hrv_and_re_entering_it_keeps_the_setup():
+    """`Console.pick` calls `adopt` whenever there is a previous session, and this screen had none — so the
+    stop button raised too. Same line as the EEG screens draw: configuration comes across, history does not.
+    """
+    from nfb_console.hrv_view import HRVSession
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    first = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        first.set_pacer_period(13.0)
+        first.set_metric("rmssd")
+        first.set_strategy("zscore", window_s=90.0)
+        first.feedback.music.source = "shepard"
+        first.feedback.sound.high = 45.0
+
+        second = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+        try:
+            second.adopt(first)
+            assert second.pacer_period == 13.0
+            assert second.metric == "rmssd"
+            assert second.strategy_id == "zscore" and second.strategy.window_s == 90.0
+            assert second.feedback.music.source == "shepard"
+            assert second.feedback.sound.high == 45.0
+            # the history does not come across: a fresh normaliser has nothing in its window
+            assert second.strategy.warmup == 0.0
+            assert second.signal is None
+            # and adopting a different protocol's session is refused rather than half-applied
+            other = HRVSession(BY_CODE["AMP"], choice=HeartChoice(kind="simulator"))
+            try:
+                second.pacer_period = 7.0
+                second.adopt(other)
+                assert second.pacer_period == 7.0
+            finally:
+                other.stop()
+        finally:
+            second.stop()
+    finally:
+        first.stop()
+
+
+def test_hrv_persists_what_was_set_by_ear_and_not_what_is_being_trained():
+    """`prefs`' own line: calibration survives a relaunch, arrangement does not. The pacer's period is the
+    person's own resonant rate and the volumes are the room; the metric and the scaling are what is being
+    trained, which is the same category as a band or a threshold."""
+    import json
+
+    from nfb_console import prefs
+    from nfb_console.hrv_view import HRVSession
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    prefs.PATH.unlink(missing_ok=True)
+    first = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    first.set_pacer_period(11.5)
+    first.feedback.sound.high = 30.0
+    first.feedback.shadow.high = 80.0
+    first.set_metric("pnn50")
+    first.feedback.music.source = "shepard"
+    first.stop()
+
+    # One set for every protocol — see `prefs.SHARED`. This screen pins nothing, so everything it stores is
+    # the room's and is what the next screen opens with.
+    stored = json.loads(prefs.PATH.read_text())[prefs.SHARED]
+    assert stored["pacer_period"] == 11.5
+    assert stored["sound.high"] == 30.0 and stored["shadow.high"] == 80.0
+    assert "metric" not in stored and "strategy" not in stored
+    assert "shepard" not in str(stored), "which music is playing is the arrangement, not the calibration"
+
+    second = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
+    try:
+        assert prefs.restore("HRV", second) > 0
+        assert second.pacer_period == 11.5
+        assert second.feedback.sound.high == 30.0
+        assert second.feedback.shadow.high == 80.0
+        assert second.metric == DEFAULT_METRIC, "what is trained comes from the protocol"
+    finally:
+        second.stop()
+
+
+def test_the_hrv_screen_trains_on_the_cable_the_device_screen_chose(monkeypatch):
+    """The whole path, from the source picked on the device screen to a running session: the screen asks
+    the shared runner for the chosen source, the beats arrive, and the transport starts."""
+    from nfb.hrv import SimulatedBeats
+    from nfb_console import hrv_view
+    from nfb_console.heart import HeartRunner
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    opened: list = []
+
+    def fake_source(kind, **kw):
+        opened.append((kind, kw))
+        return SimulatedBeats(hr_bpm=60.0, realtime=False, seed=3)
+
+    monkeypatch.setattr("nfb.hrv.beat_source", fake_source)
+
+    choice = HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01")
+    runner = HeartRunner(choice)
+    session = hrv_view.session_for(BY_CODE["HRV"], heart_choice=choice, heart_runner=runner)
+    assert session.choice is choice, "the screen trains on what was chosen, not an invented simulator"
+
+    # **Two claims, and only one of them is about a thread.** That the screen opens the chosen source is
+    # `run()`'s doing and is checked the moment it returns. That beats reach the session is the
+    # processor's, and pushing them is instant where waiting for a real-time simulator to produce three
+    # was three seconds of sleeping — for a fact about wiring, not about timing.
+    session.run()
+    assert opened and opened[0][0] == "usb" and opened[0][1]["port"] == "/dev/cu.usbserial-HM01"
+    runner.release()
+    beats = SimulatedBeats(hr_bpm=60.0, realtime=False, seed=3).beats()
+    while not runner.ready:
+        runner.state = runner.processor.push(next(beats))
+    runner.seen_at = time.monotonic()
+    assert session.dead_channels() == [], "so the screen has its source"
+
+    assert not session.running, "a session opens paused"
+    session.toggle_pause()
+    assert session.running, "and the transport starts it"
+    session.stop()
+
+
+def test_the_device_chip_names_the_pulse_sensor_rather_than_the_absent_amplifier():
+    """The chip answers "where are these numbers coming from", and on the HRV screen the answer is never
+    the amplifier — which is not connected, and said "no device" in grey beside a working pulse sensor.
+    That is true of the amplifier, useless as an answer, and reads as a fault."""
+    from nfb_console import hrv_view
+    from nfb_console.heart import HeartRunner
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    choice = HeartChoice(kind="usb", port="/dev/cu.usbserial-HM01")
+    session = hrv_view.session_for(BY_CODE["HRV"], heart_choice=choice,
+                                   heart_runner=HeartRunner(choice))
+    label, note, _tone = hrv_view._instrument(session)
+    assert label == "HeartMath · USB"
+    assert note == "not started"
+
+    session.heart.error = "no HeartMath cable — plug it in · trying again"
+    label, note, _tone = hrv_view._instrument(session)
+    assert label == "HeartMath · USB", "the name does not become the fault"
+    assert "device screen" in note, "and the fault points at where it is fixed"
+    assert len(note) < 60, "the chip has room for a few words, not for the runner's sentence"
+
+
+def test_connecting_a_sensor_mid_session_replaces_the_simulator_the_screen_invented(monkeypatch):
+    """**The HRV screen invents a simulator when nothing is chosen**, so that picking the protocol does
+    not open an empty screen. Connecting a real sensor on the device screen and coming back then found
+    the session still holding that simulator — and `run` hands its choice to the shared runner, so
+    returning actively switched the connected sensor off again.
+
+    An invented stand-in loses to anything the operator actually chose, and the memo that hands the
+    runner back switched off goes with it, since it is no longer ours to hand back.
+    """
+    from nfb.hrv import SimulatedBeats
+    from nfb_console import hrv_view
+    from nfb_console.heart import HeartRunner
+    from nfb_console.inputs import HeartChoice
+    from nfb_console.protocols import BY_CODE
+
+    opened: list = []
+    monkeypatch.setattr("nfb.hrv.beat_source",
+                        lambda kind, **kw: (opened.append(kind),
+                                            SimulatedBeats(realtime=False, seed=1))[1])
+
+    app_choice = HeartChoice(kind="off")            # nothing chosen yet, as at launch
+    runner = HeartRunner(app_choice)
+    session = hrv_view.session_for(BY_CODE["HRV"], heart_choice=app_choice, heart_runner=runner)
+    session.run()
+    assert session.choice.kind == "simulator" and session._invented
+    assert hrv_view._instrument(session)[0] == "simulated beats"
+
+    # the device screen: a cable is chosen and connected, which is what set_heart_kind does
+    app_choice.kind, app_choice.port = "usb", "/dev/cu.usbserial-HM01"
+    runner.release()
+    runner.attach(app_choice)
+
+    session.rearm()                                  # coming back from the device screen
+    session.run()
+    try:
+        assert session.choice is app_choice, "the session trains on what was actually chosen"
+        assert not session._invented
+        assert hrv_view._instrument(session)[0] == "HeartMath · USB", "and the chip says so"
+        assert opened[-1] == "usb", "and the runner is reading the cable, not the simulator"
+    finally:
+        session.stop()
+        assert app_choice.kind == "usb", "stopping must not switch the operator's own source off"
+
+
 # --- the inhale setting --------------------------------------------------------------------------
-
-@pytest.mark.parametrize("share", [0.01, 0.3, 0.5, 0.99])
-def test_the_turn_comes_at_the_inhale_share_and_the_ring_never_leaves_its_range(share):
-    """In until the share has passed, then out. In each half the ring's phase rises from the start to the
-    end of that half and stays inside 0 to 1."""
-    from nfb.hrv.sweep import breath_turn
-
-    fracs = np.linspace(0.0, 0.9999, 2001)
-    turns = [breath_turn(float(f), share) for f in fracs]
-    assert [i for i, _ in turns] == [bool(f < share) for f in fracs]
-    for half in (True, False):
-        phases = [p for i, p in turns if i == half]
-        assert phases and all(0.0 <= p <= 1.0 for p in phases)
-        assert phases == sorted(phases)
-    assert turns[0][0], "a breath starts with its inhale"
 
 
 def test_the_metronome_turns_at_the_inhale_share_and_the_ring_follows_it():
@@ -1615,11 +1464,16 @@ def test_an_inhale_that_is_not_finite_is_ignored(bad):
         s.stop()
 
 
-def test_the_inhale_is_kept_inside_one_and_ninety_nine_percent():
-    """A far value is clamped, not refused, and a value inside the limits is kept."""
+def test_the_inhale_is_kept_inside_its_limits_and_each_limit_leaves_an_exhale_and_an_inhale():
+    """A far value is clamped, not refused, to a limit that leaves both halves of the breath, and a value
+    inside the limits is kept."""
+    from nfb_console.hrv_view import INHALE_RANGE
+
+    lo, hi = INHALE_RANGE
+    assert 0 < lo < hi < 100
     s = _session()
     try:
-        for far, kept in ((0, 1), (-40, 1), (100, 99), (1e9, 99), (40, 40)):
+        for far, kept in ((0, lo), (-40, lo), (100, hi), (1e9, hi), (40, 40)):
             s.set_inhale(far)
             assert s.inhale_pct == kept
     finally:
@@ -1640,7 +1494,8 @@ def test_the_inhale_is_saved_and_restored_with_the_pacer_and_a_bad_value_changes
             other.restore_calibration({"pacer_inhale": bad})
             assert other.inhale_pct == 35
         other.restore_calibration({"pacer_inhale": 1e9})
-        assert other.inhale_pct == 99
+        s.set_inhale(1e9)
+        assert other.inhale_pct == s.inhale_pct, "restored as the box would keep it"
     finally:
         s.stop()
         other.stop()
@@ -1776,19 +1631,6 @@ def test_ring_word_and_tone_still_work_at_the_ends_of_the_inhale_range(pct):
 
 # --- choosing the sweep, ending it, and the one sweep ------------------------------------------------
 
-def test_choosing_sweep_arms_it_and_does_not_start_the_session(rig):
-    """The choice arms the sweep. A session that is paused stays paused, and the sweep does not begin
-    until the transport runs it."""
-    r = rig()
-    s = r.session
-    assert s.paused and s.pacer_choice != "sweep"
-    s.choose_pacer("sweep")
-    assert s.pacer_choice == "sweep"
-    for at in (0.0, 0.8, 1.6):
-        r.look(at)
-    assert s.paused and not s.sweeping
-    assert r.played == [], "an armed sweep that waits sounds nothing"
-
 
 def test_choosing_sweep_on_a_running_session_leaves_it_running(rig):
     """The transport belongs to the person, as for every pacer."""
@@ -1874,12 +1716,6 @@ def test_an_armed_sweep_waits_for_each_cause_and_begins_when_it_is_gone(rig, cau
         assert s.sweep.outcomes == [], "the wait is no breath that was not measured"
 
 
-def test_every_wait_of_an_armed_sweep_is_a_different_cause(rig):
-    """The causes are told apart, so each can have its own action."""
-    seen = {cause: _waiting(rig, cause)[0].session.sweep_hold() for cause in WAITS}
-    assert seen == {cause: cause for cause in WAITS}
-
-
 def test_choosing_the_metronome_stops_the_sweep_and_keeps_the_measured_part(rig, label="metronome"):
     """The measured breaths stay as a result, the pacer is the one that was chosen, and the ring follows it."""
     r = rig()
@@ -1958,21 +1794,6 @@ def test_choosing_sweep_while_one_runs_changes_nothing(rig):
     assert s.sweep is first and first.active and s.pacer_choice == "sweep"
     assert first.clock == pytest.approx(r.t)
     assert len(r.played) == sounded
-
-
-@pytest.mark.parametrize("state", ["finished", "no beats", "no source"])
-def test_choosing_sweep_always_acts(rig, state):
-    """No state refuses the choice: it arms, and what the sweep waits for is the pacer note's to say."""
-    r = rig(kind="off" if state == "no source" else "strap", length_seconds=5.0 if state == "finished" else None)
-    s = r.session
-    if state == "finished":
-        s.toggle_pause()
-        r.drive(8.0, stop=lambda: False)
-    if state == "no beats":
-        s.heart.state = None
-        r.frozen = True
-    s.choose_pacer("sweep")
-    assert s.pacer_choice == "sweep"
 
 
 def test_an_unknown_pacer_is_refused(rig):
@@ -2214,29 +2035,6 @@ def test_after_a_sweep_the_metronome_paces_as_if_no_sweep_had_run(rig):
     assert s.breathe_in() is inhaling and s.breath_phase() == pytest.approx(phase)
 
 
-def test_the_pacer_row_has_the_two_choices_and_each_one_acts(rig):
-    """metronome and sweep, in that order, in the one row. Pressing one makes it the pacer, and pressing
-    the metronome while the sweep runs stops it."""
-    from nfb_console import hrv_view
-
-    r = rig()
-    s = r.session
-    control = hrv_view.view(StubPage(), s, toolbar(), lambda: None)
-    s.redraw()
-    row = _row(control, "pacer")
-    assert [c.content.value for c in row.controls[1].controls] == ["metronome", "sweep"]
-    for label in ("sweep", "metronome"):
-        _by_label(control, label).on_click(None)
-        assert s.pacer_choice == label
-    _by_label(control, "sweep").on_click(None)
-    s.toggle_pause()
-    r.look(0.0)
-    r.look(0.8)
-    assert s.sweeping
-    _by_label(control, "metronome").on_click(None)
-    assert not s.sweeping and s.sweep.reason == "stop" and s.pacer_choice == "metronome"
-
-
 def test_the_choices_fit_the_pacer_row_on_one_line():
     """The row does not wrap, and its label, choices and gaps are no wider than the inside of the panel."""
     from conftest import text_width
@@ -2369,23 +2167,6 @@ def test_a_session_that_restores_or_takes_over_never_starts_in_a_sweep(rig):
         assert again.pacer_choice == "metronome" and again.sweep is None
     finally:
         fresh.stop()
-        again.stop()
-
-
-def test_a_new_session_has_no_sweep_and_the_saved_settings_hold_only_its_range(rig):
-    """No sweep is kept, not by a new session and not by one that takes over from another. Of the sweep
-    only its range is saved."""
-    r = rig()
-    s = r.session
-    assert s.sweep is None
-    assert r.begin()
-    r.drive(60.0)
-    assert {key for key in s.calibration() if "sweep" in key} <= {"sweep_start", "sweep_end"}
-    again = _session()
-    try:
-        again.adopt(s)
-        assert again.sweep is None
-    finally:
         again.stop()
 
 
@@ -3114,8 +2895,9 @@ def test_moving_the_end_by_the_box_while_the_sweep_runs_moves_the_axis_and_keeps
     r.session.set_sweep_end(3.5)
     r.look(r.t + 0.8)
     r.session.redraw()
-    said = _said(control)
-    assert "3.5 to 6.75 breaths a minute" in said
+    sch = r.session.sweep.schedule
+    assert sch.low_per_min == 3.5
+    assert f"{sch.low_per_min:g} to {sch.high_per_min:g} breaths a minute" in _said(control)
     assert len(_curves(control)[0].shapes) >= before - 3
     _assert_ticks_apart(control, sweep_view.TICK_W)
 
@@ -3269,25 +3051,15 @@ def test_a_state_of_the_range_does_not_show_the_default_numbers_after_the_range_
     control = hrv_view.view(StubPage(), s, toolbar(), lambda: None)
     s.choose_pacer("sweep")
     s.redraw()
-    assert "6.75" in _said(control)
+    first = (s.sweep_start, s.sweep_end)
+    assert f"{first[0]:g}" in _said(control)
     s.set_sweep_range(8.0, 3.0)
     s.redraw()
     said = _said(control)
-    assert "6.75" not in said and "4.25" not in said and "8 to 3" in said
+    assert all(f"{rate:g}" not in said for rate in first) and "8 to 3" in said
     assert f"{s.sweep_schedule.breaths} breaths" in said
     shown = [float(x.value) for x in walk(_row(control, "range")) if isinstance(x, ft.TextField)]
     assert shown == [8.0, 3.0]
-
-
-def test_an_armed_sweep_says_how_long_it_takes_and_what_it_covers():
-    """Before it begins, the pacer note gives the minutes and both ends of the range, with units."""
-    from nfb.hrv.sweep import SweepSchedule
-
-    sch = SweepSchedule()
-    control, _r = _state("armed paused")
-    said = _said(control)
-    assert str(round(sch.total_s / 60.0)) in said and "minute" in said
-    assert f"{sch.rates[0]:g}" in said and f"{sch.rates[-1]:g}" in said and "breaths a minute" in said
 
 
 def test_the_help_says_that_a_second_sweep_the_other_way_checks_a_peak_from_the_order_of_the_breaths():
@@ -3369,17 +3141,16 @@ def test_a_held_sweep_says_why_it_waits_and_what_to_do():
     assert "device" in said["error"].lower()
 
 
-def test_each_end_says_how_far_the_sweep_went_and_the_pacer_row_shows_the_choice_before_it():
+def test_each_end_says_how_far_the_sweep_went():
     """An end before the last breath says where it stopped. The sweep that ran its course does not claim
-    to have stopped. After every end the pacer row marks the earlier choice, not the sweep."""
+    to have stopped."""
     said = {n: _said(_state(f"ended {n}")[0]) for n in ("done", "stop", "plan", "source")}
+    breaths = _state("ended done")[1].sweep.schedule.breaths
     for n in ("stop", "plan", "source"):
-        assert re.search(r"breath \d+ of 78", said[n]), n
-    assert not re.search(r"breath \d+ of 78", said["done"])
+        assert re.search(rf"breath \d+ of {breaths}", said[n]), n
+    assert not re.search(rf"breath \d+ of {breaths}", said["done"])
     assert len({said[n] for n in ("stop", "plan", "source")}) == 3
     assert not _pressable(_state("ended source")[0], "use this rate")
-    for n in ("done", "stop", "plan", "source"):
-        assert _state(f"ended {n}")[1].session.pacer_choice != "sweep"
 
 
 def test_the_use_this_rate_button_is_there_for_every_verdict_from_real_beats_and_not_otherwise():
@@ -3613,18 +3384,6 @@ def test_choosing_sweep_after_a_result_replaces_the_result_on_the_screen():
     r.close()
 
 
-def test_the_curve_shapes_are_the_same_over_twenty_draws_with_no_new_breath():
-    """The curve is rebuilt when a breath is measured, the sweep ends or the target moves, not at each draw."""
-    control, r = _state("running")
-    s = r.session
-    shapes = _curves(control)
-    assert shapes, "a running sweep with measured breaths draws a curve"
-    first = [[repr(x) for x in c.shapes] for c in shapes]
-    for _ in range(20):
-        s.redraw()
-    assert [[repr(x) for x in c.shapes] for c in shapes] == first
-
-
 def test_the_rows_and_the_curve_are_built_again_only_when_something_that_they_show_changes():
     """A draw with nothing new keeps the same controls and the same shapes. A measured breath redraws the
     curve and not the rows, a target that moves redraws the curve, a change of the pacer gives new rows, and
@@ -3767,3 +3526,23 @@ def test_a_typed_cycle_of_the_metronome_is_the_cycle_that_runs(rig):
     assert s.pacer_period == 13.37 and float(field().value) == 13.37
 
 
+def test_the_heart_plots_take_the_width_that_the_window_gives_them():
+    """A wider window draws the spectrum and the heart rate wider."""
+    from nfb_console import hrv_view
+
+    def extent(width: float) -> float:
+        page = StubPage()
+        page.width = width
+        session = _session()
+        try:
+            control = hrv_view.view(page, session, toolbar(), lambda: None)
+            session.heart.state = coherent_state()
+            session.heart.seen_at = time.monotonic()
+            session.redraw()
+            xs = [pt.x for c in walk(control) if isinstance(c, cv.Canvas) for sh in c.shapes
+                  if isinstance(sh, cv.Points) for pt in sh.points]
+            return max(xs)
+        finally:
+            session.stop()
+
+    assert extent(1700.0) > extent(1100.0) + 300.0

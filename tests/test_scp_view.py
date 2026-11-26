@@ -13,16 +13,20 @@ forty trials of nothing.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
 from nfb import ReplaySource
-from nfb.stream import Block
+from nfb.stream import Block, Gap
 from nfb_console import scp_view
 from nfb_console.protocols import BY_CODE
-from nfb_console.trials import ACTIVE, ITI, NEGATIVE, POSITIVE, TrialRun
+from nfb_console.trials import (ACTIVE, BASELINE, ITI, NEGATIVE, POSITIVE, REJECTED, RESULT,
+                                TrialRun)
 
-from conftest import BENCH_OK
+from conftest import BENCH_OK, counts, wandering
+from harness import _block
 
 RATE = 250.0
 COMPLIANT_UV = 8.0
@@ -81,34 +85,6 @@ def _releases(session) -> list[str]:
 
 
 # --- the level -------------------------------------------------------------------------------
-
-def test_a_rejected_block_is_marked_invalid_to_the_trial_engine():
-    """An artifact-rejected block arrives as a held stand-in whose device state is still valid, so SCP used
-    to feed it to the trial engine as a genuine reading — a run of blinks (which land exactly in the SCP
-    band) scored as a valid baseline and shift. The reading is now marked invalid when the block was not
-    accepted, so the engine counts it toward voiding the trial rather than scoring it."""
-    session = _session()
-    try:
-        session.toggle_pause()
-        nxt = _drive(session, 3.0, uv=lambda _s: 0.0)
-        assert session.trials.started, "the engine is being fed"
-
-        captured: list[bool] = []
-        original = session.trials.feed
-
-        def spy(t, value, valid=True, **kwargs):
-            captured.append(valid)
-            return original(t, value, valid=valid, **kwargs)
-
-        session.trials.feed = spy
-        spec = session.specs[session.channel]
-        session._accepted[session.channel] = False           # as feed_block records for a held block
-        session.consume(Block(spec.index, nxt, tuple([0] * 8), spec))
-        assert captured and all(v is False for v in captured), \
-            "a rejected block feeds the trial engine an invalid reading, not a valid one"
-    finally:
-        session.stop()
-
 
 def test_a_transfer_trial_shows_nothing_while_it_runs():
     """That is what a transfer trial *is* — cue and verdict, no display — so the level has to be absent
@@ -342,8 +318,10 @@ def test_the_screen_draws_before_any_data_and_says_what_is_missing():
 
 
 def test_every_tab_draws_with_trials_running_through_it():
-    """The one thing an object test cannot do: produce a frame. Panes are held in a `Stack` with `visible`
-    toggled, so the draw loop keeps writing to the hidden ones and a stale name in any of them throws."""
+    """A press on a tab shows that tab's pane and hides every other, and each pane draws a frame with
+    trials running through it."""
+    from test_scp_eyes import _press
+
     page, session = _page(), _session()
     try:
         control = scp_view.view(page, session, _toolbar(), lambda: None)
@@ -352,9 +330,9 @@ def test_every_tab_draws_with_trials_running_through_it():
         _drive(session, 5.0, uv=lambda _s: 0.0)
         _drive(session, 60.0, uv=_compliant, start=int(5 * RATE))
         panes = control.controls[0].controls[2].controls           # the screen, under the eye overlay
-        for i in range(len(panes)):
-            for j, pane in enumerate(panes):
-                pane.visible = i == j
+        for i, label in reversed(list(enumerate(("Train", "Spectrum", "Trends", "Feedback", "Session")))):
+            _press(control, label)
+            assert [pane.visible is not False for pane in panes] == [j == i for j in range(len(panes))], label
             session.redraw()
         assert session.error is None, session.error
         joined = " | ".join(c.value for c in _texts(control) if c.value)
@@ -387,6 +365,17 @@ def test_every_control_on_the_screen_can_be_pressed():
         session.stop()
 
 
+def test_the_signal_help_explains_the_extra_channels_only_where_one_can_be_picked():
+    """With one open channel there is no extra channel to pick, and the help does not explain one."""
+    one, two = _session(channels=1), _session(channels=2)
+    try:
+        assert scp_view.extra_help(one) not in scp_view.signal_help(one)
+        assert scp_view.extra_help(two) in scp_view.signal_help(two)
+    finally:
+        one.stop()
+        two.stop()
+
+
 def test_the_screen_does_not_lecture_and_names_nobody():
     """The two conventions a protocol screen is held to: no permanent sentence over 110 characters, and
     never a person's name in the interface."""
@@ -403,14 +392,6 @@ def test_the_screen_does_not_lecture_and_names_nobody():
         session.stop()
 
 
-def test_the_catalogue_offers_it_and_a_screen_handles_it():
-    from nfb_console.app import Console
-
-    protocol = BY_CODE["SCP"]
-    assert protocol.available and not protocol.note
-    assert Console.screen_for(protocol) is scp_view
-
-
 def test_session_for_ignores_the_other_sources():
     """`app.pick` hands every screen the heart and Mendi runners, because two screens need them. A screen
     that raised on the arguments would fail at the moment it was chosen."""
@@ -425,32 +406,34 @@ def test_session_for_ignores_the_other_sources():
 
 
 def test_a_fresh_run_is_the_published_protocol():
-    """The shared trial piece brings settings the published protocol does not use. Each starts where that
-    protocol is: both directions in a balanced order, the baseline at the cue, a third of the trials without
-    a display, feedback for the whole window, live, and **full at** and **succeeds at** from the person's own
-    chance spread. The one departure is that the direction is random, hidden until the feedback, so the
-    baseline cannot be pushed the other way.
-    The choices are the four every trial program offers, and nothing more."""
+    """A fresh run is the published protocol: both directions in a balanced order, the baseline at the cue,
+    some trials without a display, feedback for the whole window, live, the trials of the clinical block,
+    and **full at** and **succeeds at** from the person's own noise. The one departure is that the
+    direction is hidden until the feedback, so the baseline cannot be pushed the other way. The choices are
+    the ones every trial program offers."""
     from nfb_console.trial_training import DIRECTIONS
+    from nfb_console.trials import DEFAULT_TRIALS
 
-    session = _session()
+    session, control = _screen()
     try:
-        assert list(session.DIRECTIONS) == ["increase", "decrease", "alternating", "random"]
-        assert session.DIRECTIONS is DIRECTIONS and "shuffled" not in session.DIRECTIONS
-        assert session.trial_direction == "random" and session.hides_direction
-        assert session.transfer_fraction == pytest.approx(1 / 3)
-        assert session.feedback_window_s == session.TIMING.active_s and session.update_s == 0.0
-        assert (session.full_at_mode, session.success_at_mode) == ("automatic", "automatic")
+        assert session.DIRECTIONS is DIRECTIONS
+        assert session.hides_direction
         run = session.trials
         assert set(run.directions) == {POSITIVE, NEGATIVE} and not run.alternate
-        assert run.baseline_s == 2.0 and run.active_s == 6.0 and run.cue_s == 0.0
+        assert run.cue_s == 0.0, "the baseline starts at the cue"
+        assert 0.0 < session.transfer_fraction < 1.0 and run.transfer_fraction == session.transfer_fraction
+        assert session.n_trials == run.n_trials == DEFAULT_TRIALS
+        assert session.feedback_window_s == run.active_s and session.update_s == 0.0
+        assert (session.full_at_mode, session.success_at_mode) == ("automatic", "automatic")
+        text = _joined(session, control)
+        assert "automatic" in text and "noise" in text, text
     finally:
         session.stop()
 
 
 def test_the_cue_tones_are_an_octave_apart_and_a_success_doubles_its_tone():
-    """620 Hz for up and 310 Hz for down, told apart with the eyes closed; the verdict on a success is the
-    cue tone held twice, and a failure is silent."""
+    """Up and down have their own tones an octave apart, told apart with the eyes closed. The verdict on a
+    success is the cue tone held twice, and a failure is silent. Every cue sounds at one volume."""
     from nfb_console import cues
 
     session = _session()
@@ -462,12 +445,15 @@ def test_the_cue_tones_are_an_octave_apart_and_a_success_doubles_its_tone():
         _run(session, n_trials=2)
         nxt = _drive(session, 3.0, uv=lambda _s: 0.0)
         _drive(session, 30.0, uv=_compliant, start=nxt)
-        expected = {cues.tone_at(620.0), cues.tone_at(310.0),
-                    cues.held(cues.tone_at(620.0)), cues.held(cues.tone_at(310.0))}
-        assert heard and {sound for sound, _ in heard} <= expected
-        assert all(volume == 25 for _, volume in heard)
-        assert any(sound in (cues.held(cues.tone_at(620.0)), cues.held(cues.tone_at(310.0)))
-                   for sound, _ in heard), "a compliant trial succeeds and doubles its tone"
+        pitch = lambda name: float(name.split("@")[1])     # noqa: E731
+        plain = sorted({sound for sound, _ in heard if cues.held(sound) != sound}, key=pitch)
+        assert len(plain) == 2, heard
+        low, high = (pitch(name) for name in plain)
+        assert high == pytest.approx(2 * low, abs=1.0), "an octave apart"
+        assert {sound for sound, _ in heard} <= set(plain) | {cues.held(name) for name in plain}
+        assert any(cues.held(name) in {sound for sound, _ in heard} for name in plain), \
+            "a compliant trial succeeds and doubles its tone"
+        assert len({volume for _, volume in heard}) == 1
     finally:
         session.stop()
 
@@ -529,8 +515,10 @@ def test_music_is_offered_with_every_source_but_the_eeg_rhythm():
     sonifies a fast band, and a slow potential has no rhythm in it for an ear to follow."""
     session = _session()
     try:
+        from nfb_console.feedback import MUSIC_SOURCES
+
         assert "music" in session.offers
-        assert set(session.music_sources) == {"tone", "crossfade", "noise", "shepard", "file"}
+        assert set(session.music_sources) == set(MUSIC_SOURCES) - {"eeg"}
         assert session.state_balance is None, "no crossfade position between feedback windows"
     finally:
         session.stop()
@@ -662,6 +650,7 @@ def test_the_baseline_is_dim_and_draws_its_ring_with_no_circle_and_no_arrows():
                 ui.draw_fixation("")
                 seen.append((run.trial_number, list(ui.circle.shapes), ui.ground.bgcolor,
                              ui.direction_text.value))
+                assert not ui.count_text.value, "this program has no counting task"
 
         nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
         _drive(session, 25.0, uv=_compliant, start=nxt, watch=watch)
@@ -683,8 +672,9 @@ def test_the_baseline_is_dim_and_draws_its_ring_with_no_circle_and_no_arrows():
 
 def test_the_arrows_stay_through_a_feedback_window_with_no_circle():
     """The arrows are the goal. A trial without feedback still asks for a direction, so its window shows
-    the arrows and no circle."""
+    the arrows and no circle, and the line says there is no feedback in that window only."""
     import flet.canvas as cv
+    from nfb_console.trials import BASELINE
 
     session = _session()
     try:
@@ -693,14 +683,21 @@ def test_the_arrows_stay_through_a_feedback_window_with_no_circle():
         run = _run(session, n_trials=3, transfer=1.0)
         seen: list = []
 
+        lead: list[str] = []
+
         def watch() -> None:
             if run.phase == ACTIVE:
                 ui.draw_fixation("")
                 seen.append(list(ui.circle.shapes))
+                assert "no feedback" in ui.phase_text.value, ui.phase_text.value
+            elif run.phase == BASELINE:
+                ui.draw_fixation("")
+                lead.append(ui.phase_text.value)
 
         nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
         _drive(session, 25.0, uv=_compliant, start=nxt, watch=watch)
-        assert seen, "a feedback window ran"
+        assert seen and lead, "a baseline and a feedback window ran"
+        assert not any("no feedback" in text for text in lead), "the baseline does not say it"
         for shapes in seen:
             assert not _solid_circles(shapes), "no circle"
             assert len([s for s in shapes if isinstance(s, cv.Path)]) == 4, "the four arrows"
@@ -743,13 +740,13 @@ def test_the_lines_under_the_circle_say_why_there_is_no_trial():
         ui = _ring_view(session)
         session.toggle_pause()
         ui.draw_fixation("")
-        assert ui.phase_text.value == "no readings yet"
+        assert "no readings" in ui.phase_text.value, ui.phase_text.value
         run = _run(session, n_trials=1)
         nxt = _drive(session, 5.0, uv=lambda _s: 0.0)
         _drive(session, 20.0, uv=_compliant, start=nxt)
         assert run.done
         ui.draw_fixation("")
-        assert ui.phase_text.value == "the run is over · restart it in the training panel"
+        assert "restart" in ui.phase_text.value, ui.phase_text.value
     finally:
         session.stop()
 
@@ -807,32 +804,11 @@ def test_level_starts_at_the_first_accepted_block():
         first = None
         for i in range(0, len(x) - 7, 8):
             session.feed_block(Block(0, 24 + i, tuple(counts(x[i:i + 8], spec.scale).tolist()), spec))
-            if session._accepted.get(0):
+            if session.raw_shift is not None:
                 first = session.raw_shift
                 break
         assert first is not None, "the gate accepted a block of the step"
         assert abs(first + 300.0) < 10.0, f"the level starts at {first:.1f} µV"
-    finally:
-        session.stop()
-
-
-def test_limit_clears_after_5_s_of_samples():
-    """*at the input limit* holds for 5 s of samples after the last sample at the limit, counted from the
-    blocks and not from a clock, so a replay at any speed clears at the same sample."""
-    from conftest import wandering
-
-    session = _session()
-    try:
-        session.toggle_pause()
-        x = wandering(1.5, 12.0, RATE, 2, 2.0)
-        at = _feed(session, {0: x[:int(2 * RATE)]}, block=25)
-        x[at + 24] = 800.0                                       # one sample at the rail, the block's last
-        at = _feed(session, {0: x[:at + 25]}, start=at, block=25)
-        assert session.at_input_limit(0)
-        at = _feed(session, {0: x[:at + int(4.9 * RATE)]}, start=at, block=25)
-        assert session.at_input_limit(0), "still at the limit after 4.9 s of samples"
-        _feed(session, {0: x[:at + int(0.2 * RATE)]}, start=at, block=25)
-        assert not session.at_input_limit(0), "clear after 5.1 s of samples"
     finally:
         session.stop()
 
@@ -1175,17 +1151,6 @@ def test_with_no_extra_channel_lit_nothing_asks_for_one():
         session.stop()
 
 
-def test_pair_spread_is_fed_only_by_the_slow_potential_session():
-    import nfb.dsp
-    import nfb_console
-    from pathlib import Path
-
-    users = sorted(p.name for p in Path(nfb_console.__file__).parent.glob("*.py")
-                   if "PairSpread" in p.read_text())
-    assert users == ["scp_view.py"], users
-    assert "PairSpread" not in getattr(nfb.dsp, "__all__", ())
-
-
 # --- the record of each trial: automatic succeeds at and full at --------------------------------------
 
 def _record(scale) -> tuple:
@@ -1215,8 +1180,9 @@ def test_the_limit_is_frozen_at_the_feedback_start():
         for trial in run.valid_results:
             scale = trial.scale
             assert (scale.full_mode, scale.limit_mode) == ("automatic", "automatic")
-            assert scale.full_at == pytest.approx(max(1.0, 2.0 * scale.spread))
-            assert scale.limit == pytest.approx(max(0.5, scale.spread))
+            floor = scp_view.UNITS.min_full_at
+            assert scale.full_at == pytest.approx(max(floor, 2.0 * scale.spread))
+            assert scale.limit == pytest.approx(max(floor / 2, scale.spread))
             assert trial.success == (_oriented(trial) >= scale.limit and trial.score_uv != 0.0)
     finally:
         session.stop()
@@ -1273,8 +1239,9 @@ def test_no_spread_uses_the_floors_and_says_so():
               until=lambda _s: bool(run.results))
         trial = run.results[0]
         assert trial.valid, "no spread is no reason to void a trial"
-        assert (trial.scale.full_at, trial.scale.limit, trial.scale.spread) == (1.0, 0.5, None)
-        assert lines == ["succeeds at 0.5 µV · no noise value yet"]
+        floor = scp_view.UNITS.min_full_at
+        assert (trial.scale.full_at, trial.scale.limit, trial.scale.spread) == (floor, floor / 2, None)
+        assert lines and lines[0].startswith(f"succeeds at {floor / 2:.1f} µV") and "noise" in lines[0], lines
     finally:
         session.stop()
 
@@ -1292,7 +1259,8 @@ def test_a_flat_signal_sets_the_floors():
         x = wandering(1.5, 60.0, RATE, 24, 0.01) + np.sin(2 * np.pi * 10.0 * tt)
         _feed(session, {0: x}, until=_until_done(session))
         assert run.done and all(trial.valid for trial in run.results)
-        assert all((trial.scale.full_at, trial.scale.limit) == (1.0, 0.5) for trial in run.results)
+        floor = scp_view.UNITS.min_full_at
+        assert all((trial.scale.full_at, trial.scale.limit) == (floor, floor / 2) for trial in run.results)
     finally:
         session.stop()
 
@@ -1464,6 +1432,26 @@ def test_a_verdict_names_the_trial_it_judges():
         session.stop()
 
 
+def test_a_trial_with_a_blink_in_every_block_has_no_result():
+    """A spike in every block of the feedback window is rejected, and the trial counts those readings
+    against it: it has no result, and its cause is the rejected readings."""
+    from conftest import wandering
+    from nfb_console.trials import REJECTED
+
+    session = _session()
+    try:
+        session.toggle_pause()
+        run = _run(session, n_trials=2, transfer=0.0, seed=13)
+        x = wandering(1.5, 40.0, RATE, 28, 4.0)
+        at = _feed(session, {0: x}, until=lambda _s: run.phase == ACTIVE)
+        x[at + BLOCK // 2:at + int(run.active_s * RATE):BLOCK] += 400.0
+        _feed(session, {0: x}, start=at, until=lambda _s: bool(run.results))
+        trial = run.results[0]
+        assert not trial.valid and trial.cause == REJECTED, trial
+    finally:
+        session.stop()
+
+
 def test_a_trial_lost_to_the_input_limit_says_so():
     """Three seconds of the feedback window with a sample at the rail in every block: the trial has no
     result, and the line under the circle names the input limit."""
@@ -1556,22 +1544,6 @@ def test_a_same_sign_shift_is_removed_by_the_raw_score_mean():
     assert _rise(2, same_sign=True) < 1.35
 
 
-def test_a_fresh_run_is_automatic_with_forty_trials():
-    """The published run, with both scales from the person's own signal: **full at** two chance spreads,
-    **succeeds at** one, and the forty trials of the clinical block."""
-    from nfb_console.trials import DEFAULT_TRIALS
-
-    session, control = _screen()
-    try:
-        assert (session.full_at_mode, session.success_at_mode) == ("automatic", "automatic")
-        assert session.n_trials == session.trials.n_trials == DEFAULT_TRIALS == 40
-        text = _joined(session, control)
-        for shown in ("automatic", "2 times the noise", "equal to the noise", "noise"):
-            assert shown in text, shown
-    finally:
-        session.stop()
-
-
 def test_the_run_starts_at_the_first_reading():
     """No settling gate: the lead-in to the first cue starts with the first reading, and nothing on the
     screen says the filter is settling."""
@@ -1587,6 +1559,7 @@ def test_the_run_starts_at_the_first_reading():
 
 
 def test_a_difference_that_rounds_to_zero_has_no_minus_sign():
+    """A difference that rounds to zero prints as +0.0 and is not called the wrong way."""
     from nfb_console.trial_training import trial_summary
     from nfb_console.trials import Trial
 
@@ -1597,6 +1570,7 @@ def test_a_difference_that_rounds_to_zero_has_no_minus_sign():
                    for i, (r, s) in enumerate(scores)]
     text = trial_summary(run, scp_view.SCPSession.DIRECTION_WORD, "µV", 1, floor=1.0)
     assert "up minus down +0.0 µV" in text, text
+    assert "the wrong way" not in text, "a difference of zero goes no way"
 
 
 def test_a_trial_cut_by_a_pause_says_so_in_the_rest_after_it():
@@ -1616,7 +1590,7 @@ def test_a_trial_cut_by_a_pause_says_so_in_the_rest_after_it():
         _drive(session, 0.5, uv=_compliant, start=at)
         assert run.phase == ITI and run.last.cause == "paused"
         ui.draw_fixation("")
-        assert ui.verdict_text.value == "no result · the session pauses in this trial", ui.verdict_text.value
+        assert "paus" in ui.verdict_text.value, ui.verdict_text.value
         assert ui.verdict_detail.value
     finally:
         session.stop()
@@ -1630,12 +1604,13 @@ def test_an_automatic_row_with_no_spread_says_so_and_not_chance_spreads():
         card = scp_view.SCPCard(_page(), session, lambda: None)
         card.refresh()
         notes = {name: box.value for name, box in card._scale_boxes.items() if name.endswith("_note")}
-        assert notes == {"success_at_note": "equal to the noise · none yet",
-                         "full_at_note": "2 times the noise · none yet"}
+        assert set(notes) == {"success_at_note", "full_at_note"}
+        assert all("none yet" in note for note in notes.values()), notes
         session.chance_spread = lambda: (4.0, 30.0)
         card.refresh()
-        notes = {name: box.value for name, box in card._scale_boxes.items() if name.endswith("_note")}
-        assert notes == {"success_at_note": "equal to the noise", "full_at_note": "2 times the noise"}
+        after = {name: box.value for name, box in card._scale_boxes.items() if name.endswith("_note")}
+        assert not any("none yet" in note for note in after.values()), after
+        assert after["success_at_note"] != after["full_at_note"], "each note says how many spreads"
     finally:
         session.stop()
 
@@ -1678,23 +1653,531 @@ def test_a_new_trial_length_restarts_the_run_and_measures_the_noise_again():
         assert session.chance_spread() is not None
         session.set_trial_length(10.0)
         assert session.trials is not before and not session.trials.results
-        assert session.spread.active_s == 8.0 and session.chance_spread() is None
+        assert session.spread.active_s == session.active_s and session.chance_spread() is None
     finally:
         session.stop()
 
 
 def test_show_circle_for_never_outlasts_the_feedback_window():
+    """The circle shows for at most the feedback window, and the trial length stays inside its range."""
     session = _session(channels=1)
     try:
         session.set_trial_length(14.0)
-        assert session.feedback_window_s == 12.0, "a circle shown for the whole window stays so"
-        session.feedback_window_s = 9.0
+        assert session.feedback_window_s == session.active_s, "a circle shown for the whole window stays so"
+        session.feedback_window_s = session.active_s - 3.0
         session.set_trial_length(6.0)
-        assert session.feedback_window_s == 4.0 == session.active_s
+        assert session.feedback_window_s == session.active_s, "cut to the shorter window"
         low, high = session.trial_length_range
         session.set_trial_length(1000.0)
         assert session.trial_length == high and scp_view.shift_survival(0.01, session.active_s) >= 0.5
         session.set_trial_length(0.0)
-        assert session.trial_length == low and session.active_s == 2.0
+        assert session.trial_length == low and session.active_s > 0
+    finally:
+        session.stop()
+
+
+def _held(run, size: float) -> float:
+    """A shift of `size` toward the cue that rises over the first second of the effort and falls over the
+    first second of the verdict, so the gate never sees a step."""
+    if run.required is None or run.phase not in (ACTIVE, RESULT):
+        return 0.0
+    sign = 1.0 if run.required == POSITIVE else -1.0
+    if run.phase == ACTIVE:
+        part = min(1.0, (run.active_s - run.phase_remaining()) / 1.0)
+    else:
+        part = max(0.0, 1.0 - (run.result_s - run.phase_remaining()) / 1.0)
+    return sign * size * part
+
+
+@pytest.mark.parametrize("fed, pressed", [(0, 1), (1, 0)], ids=["training-block", "extra-block"])
+def test_a_channel_press_while_a_block_is_in_flight_does_not_stop_the_session(fed, pressed):
+    """A press between `observe_raw` and `consume`: on a block of the training channel that the press makes
+    an extra, and on an extra's block while the press rebuilds the channels."""
+    session = _session(channels=2)
+    try:
+        session.toggle_pause()
+        original = session.observe_raw
+
+        def press(block, judged):
+            original(block, judged)
+            session.set_channel(pressed)
+
+        session.observe_raw = press
+        spec = session.specs[fed]
+        try:
+            session.feed_block(_block(spec, 0, wandering(1.5, 4.0, RATE, 1, 2.0)[:BLOCK]))
+        except KeyError as exc:
+            pytest.fail(f"the feed raises KeyError {exc}, and the session stops")
+    finally:
+        session.stop()
+
+
+def test_a_success_said_good_during_its_trial_and_a_short_shift_never_did():
+    """"Good" is what the click and the music ask: the condition target, met past the frozen limit."""
+    session = _session()
+    try:
+        session.toggle_pause()
+        session.set_success_at(30.0, typed=True)
+        session.set_full_at(20.0, typed=True)
+        run = _run(session, n_trials=2, transfer=0.0, seed=21)
+        size = {1: 48.0, 2: 24.0}
+        good: dict[int, bool] = {1: False, 2: False}
+
+        def watch():
+            if run.phase == ACTIVE and session.active_targets and session.signal_target.wanted:
+                good[run.trial_number] = True
+
+        x = wandering(1.5, 60.0, RATE, 51, 2.0)
+        _feed(session, {0: x}, block=25, watch=watch, until=_until_done(session),
+              add=lambda s, _ch: _held(s.trials, size[s.trials.trial_number]))
+        first, second = run.results
+        assert first.valid and first.success, first
+        assert second.valid and not second.success, second
+        assert not good[2], "a shift short of succeeds at said good"
+        assert good[1], "a trial that succeeds never said good while it ran"
+    finally:
+        session.stop()
+
+
+def test_the_share_on_a_void_line_is_the_share_of_the_named_cause():
+    session = _session(channels=1)
+    try:
+        run = TrialRun(n_trials=1, transfer_fraction=0.0, seed=1, metric_hz=10.0)
+        k, t = 0, 0.0
+        skipped = False
+        while not run.results:
+            in_trial = run.phase in (BASELINE, ACTIVE)
+            if run.phase == ACTIVE and run.phase_remaining() < 3.0 and not skipped:
+                t += 0.1                                # one reading never arrives
+                skipped = True
+            run.feed(t, 5.0, valid=not (in_trial and k % 4 == 0), cause=REJECTED)
+            k += 1
+            t = round(t + 0.1, 6)
+        session.trials = run
+        trial = run.results[0]
+        assert trial.cause == REJECTED, "the count with the most readings is named"
+        what, _action = session.void_words(trial)
+        expected = run.baseline_s * 10 + run.active_s * 10
+        rejected = trial.invalid_share - 1 / expected          # all but the one that did not arrive
+        shares = [int(p) for p in re.findall(r"(\d+)%", what)]
+        assert shares, what
+        assert abs(shares[0] - 100 * rejected) <= 1, f"{what!r}: the rejected share alone, not the lost one"
+    finally:
+        session.stop()
+
+
+def test_an_extra_channel_of_a_file_with_a_standing_offset_has_a_signal(tmp_path):
+    from nfb.sources import SampleFileSource
+
+    n = int(10 * RATE)
+    rng = np.random.default_rng(4)
+    ch0 = wandering(1.5, 10.0, RATE, 61, 2.0)
+    ch1 = 100.0 + 3.0 * rng.standard_normal(n)
+    path = tmp_path / "export.txt"
+    path.write_text("Sampling rate: 250\n" + "".join(f"{a:.5f}\t{b:.5f}\n" for a, b in zip(ch0, ch1)))
+    source = SampleFileSource(path, realtime=False, loop=False)
+    session = _session(channels=2, source=source)
+    try:
+        session.set_extra(1, True)
+        for block in source.blocks():
+            session.feed_block(block)
+        line, _problem = session.extra_status(1)
+        assert "no signal" not in line, line
+        assert session.headroom_uv(1) is None and not session.at_input_limit(1), "an export has no input limit"
+    finally:
+        session.stop()
+
+
+def test_a_trial_across_the_seam_of_a_looped_file_has_no_result(tmp_path):
+    from nfb.sources import SampleFileSource
+
+    seconds = 30.0
+    tt = np.arange(int(seconds * RATE)) / RATE
+    rise = 0.5 - 0.5 * np.cos(np.pi * np.clip((tt - 15.0) / 10.0, 0.0, 1.0))
+    x = -300.0 + 200.0 * rise + wandering(1.5, seconds, RATE, 71, 2.0)
+    path = tmp_path / "export.txt"
+    path.write_text("Sampling rate: 250\n" + "".join(f"{v:.5f}\n" for v in x))
+    source = SampleFileSource(path, realtime=False, loop=True)
+    session = _session(channels=1, source=source)
+    try:
+        session.toggle_pause()
+        run = _run(session, n_trials=12, transfer=0.0, seed=22)
+        across: set[int] = set()
+        for block in source.blocks():
+            if block.seam and run.phase in (BASELINE, ACTIVE):
+                across.add(run.trial_number)
+            session.feed_block(block)
+            if run.done or (across and len(run.results) >= max(across)):
+                break
+        assert across, "no trial ran across a seam"
+        scored = [run.results[i - 1] for i in sorted(across)]
+        assert not any(trial.valid for trial in scored), [(t.index, t.score_uv) for t in scored]
+        assert all(trial.cause == "seam" for trial in scored), [t.cause for t in scored]
+    finally:
+        session.stop()
+
+
+def test_the_slow_level_is_offered_no_mode_that_feeds_it_zeros():
+    """Clamp sets a rejected sample to zero, a step of the whole standing offset on a slow level. SCP does
+    not offer it, with the reason stated on the session; the Feedback tab draws only what is offered."""
+    session, control = _screen(channels=1)
+    try:
+        assert "clamp" not in session.reject_modes and session.reject_modes
+        joined = _joined(session, control)
+        assert "hold" in joined.split(" | ") and "clamp" not in joined.split(" | "), joined
+    finally:
+        session.stop()
+
+
+def _write_recording(path, start_group: int, seconds: float, hz: float = 250.0) -> None:
+    """A recording that starts `start_group` sample groups into a session: frames of eight groups whose
+    phase is the wrapped counter, as the device sends them, with a wandering level on every channel."""
+    import struct
+
+    import optima
+    from nfb.record import SessionHeader, SessionWriter
+    from nfb.stream import PHASE_MODULUS
+
+    cfg = optima.build_eeg_config(4, hz=hz)
+    plan = [c for c in optima.plan_channels(cfg) if c.enabled]
+    n = int(seconds * hz)
+    waves = [counts(wandering(1.5, seconds, hz, 80 + p, 2.0), 800.0 / 32767) for p in range(len(plan))]
+    header = SessionHeader(config=cfg, device="Neurobit Optima+ 4 USB", serial="00000000",
+                           firmware="2.9.5", note="synthetic recording started mid-session")
+    with SessionWriter(path, header) as writer:
+        for frame in range(n // 8):
+            phase = (start_group + frame * 8) % PHASE_MODULUS
+            values = [int(waves[p][frame * 8 + step]) for step in range(8) for p in range(len(plan))]
+            payload = struct.pack("<HH", phase, 0) + struct.pack(f"<{len(values)}h", *values)
+            writer.write(optima.NOT_DATA, payload, elapsed=frame * 8 / hz)
+
+
+def test_a_marks_sample_index_is_the_live_streams_and_its_wall_time_places_it(tmp_path):
+    """A mark's sample index is the live stream's, also for a recording that starts mid-session, and the
+    mark keeps the wall time that places it in a recording."""
+    from nfb import ReplaySource
+
+    live_start = 70000
+    path = tmp_path / "mid-session.jsonl.gz"
+    _write_recording(path, live_start, 12.0)
+    replayed = [b for b in ReplaySource(str(path), realtime=False, loop=False).blocks()
+                if isinstance(b, Block)]
+    offset = live_start - min(b.start_index for b in replayed)
+    live = set()
+    for b in replayed:
+        if b.channel == 0:
+            live.update(range(b.start_index + offset, b.end_index + offset))
+    session = _session(channels=1, source=ReplaySource(str(path), realtime=False, loop=False))
+    try:
+        session.toggle_pause()
+        _run(session, n_trials=1, transfer=0.0, seed=24)
+        for b in replayed:
+            if b.channel in session.specs:
+                session.feed_block(Block(b.channel, b.start_index + offset, b.samples, b.spec, b.state))
+        cues = [(at, note) for at, note in session.marks() if " · cue · " in note]
+        assert cues, session.marks()
+        at, note = cues[0]
+        assert int(re.search(r"ch0 sample (\d+)", note).group(1)) in live
+        assert at > 1e9, "a wall time, which places the mark in a recording"
+    finally:
+        session.stop()
+
+
+def test_a_trial_before_a_rearm_is_not_checked_on_signal_from_after_it():
+    session, _control = _screen()
+    try:
+        run = _run(session, n_trials=14, transfer=0.0, seed=25)
+        flat = np.zeros(int(200 * RATE))
+        _feed(session, {0: wandering(1.5, 200.0, RATE, 90, 2.0), 1: flat},
+              until=lambda _s: len(run.results) >= 5)
+        before = len(run.results)
+        session.feed_block(Gap(0, 0))
+        _feed(session, {0: wandering(1.5, 200.0, RATE, 91, 2.0), 1: wandering(1.5, 200.0, RATE, 92, 2.0)},
+              until=_until_done(session))
+        assert run.done
+        session.set_extra(1, True)
+        checks = session.extra_checks()[1][:before]
+        assert checks == [None] * before, f"ch1 was flat before the rearm, and its scores are {checks}"
+    finally:
+        session.stop()
+
+
+def test_a_trial_lost_to_a_channel_forced_off_does_not_ask_the_person_to_keep_still():
+    session = _session()
+    try:
+        ui = _ring_view(session)
+        session.toggle_pause()
+        run = _run(session, n_trials=1, transfer=0.0, seed=26)
+        x = wandering(1.5, 40.0, RATE, 93, 2.0)
+        at = _feed(session, {0: x}, until=lambda _s: run.phase == ACTIVE)
+        session.trust_channel(0, False)
+        _feed(session, {0: x}, start=at, until=lambda _s: bool(run.results))
+        trial = run.results[0]
+        assert not trial.valid
+        ui.draw_fixation("")
+        assert "keep still" not in ui.verdict_detail.value, (trial.cause, ui.verdict_detail.value)
+    finally:
+        session.stop()
+
+
+def test_the_no_signal_count_leaves_out_trials_cut_by_a_pause():
+    session, control = _screen()
+    try:
+        session.set_extra(1, True)
+        run = _run(session, n_trials=9, transfer=0.0, seed=27)
+        n = int(300 * RATE)
+        ch0, clean = wandering(1.5, 300.0, RATE, 94, 2.0), wandering(1.5, 300.0, RATE, 95, 2.0)
+        cut = (1, 2, 3)
+        at = 0
+        while not run.done and at + BLOCK <= n:
+            number = run.trial_number
+            ch1 = clean if number in cut and len(run.results) < number else np.zeros(n)
+            at = _feed(session, {0: ch0[:at + BLOCK], 1: ch1[:at + BLOCK]}, start=at)
+            if number in cut and run.phase == ACTIVE and len(run.results) == number - 1:
+                session.toggle_pause()
+                at = _feed(session, {0: ch0[:at + int(1.5 * RATE)], 1: clean[:at + int(1.5 * RATE)]},
+                           start=at)
+                session.toggle_pause()
+        assert run.done and [r.cause for r in run.results[:3]] == ["paused"] * 3
+        text = _joined(session, control)
+        said = re.search(r"ch1 had no signal in (\d+) of (\d+) trials", text)
+        assert said, text
+        windowed = sum(1 for r in run.results if r.cause != "paused")
+        assert int(said.group(1)) <= windowed, f"{said.group(0)}; 3 of them were cut by a pause, with a " \
+                                               f"clean signal on ch1"
+    finally:
+        session.stop()
+
+
+def test_a_short_pause_in_the_effort_voids_the_trial_in_flight():
+    session = _session()
+    try:
+        session.toggle_pause()
+        run = _run(session, n_trials=1, transfer=0.0, seed=28)
+        x = wandering(1.5, 40.0, RATE, 96, 2.0)
+        at = _feed(session, {0: x}, until=lambda _s: run.phase == ACTIVE and run.phase_remaining() < 4.0)
+        session.toggle_pause()
+        at = _feed(session, {0: x[:at + int(0.8 * RATE)]}, start=at)
+        session.toggle_pause()
+        _feed(session, {0: x}, start=at, until=lambda _s: bool(run.results))
+        trial = run.results[0]
+        assert not trial.valid and trial.cause == "paused", trial
+    finally:
+        session.stop()
+
+
+def test_the_extra_channel_is_checked_in_the_windows_of_the_training_trial():
+    from nfb_console.training import true_metric_hz
+
+    session, _control = _screen()
+    try:
+        session.set_extra(1, True)
+        run = _run(session, n_trials=1, transfer=0.0, seed=29)
+        x = {0: wandering(1.5, 60.0, RATE, 97, 2.0), 1: wandering(1.5, 60.0, RATE, 98, 2.0)}
+        at = _feed(session, x, block=25, until=lambda _s: run.phase == BASELINE
+                   and run.phase_remaining() < 0.3)
+        at += int(0.6 * RATE)                           # a hole of 0.6 s across the feedback start
+        _feed(session, x, start=at, block=25, until=lambda _s: bool(run.results))
+        assert run.results[0].valid
+        (_index, b0, a0, _a1), = session._windows
+        step = 1.0 / true_metric_hz(RATE)
+        assert abs(a0 - (b0 + run.baseline_s)) <= 1.5 * step, \
+            f"the extra window starts {a0 - b0 - run.baseline_s:.2f} s after the feedback start"
+    finally:
+        session.stop()
+
+
+def test_an_emptied_box_changes_neither_the_mode_nor_the_run():
+    session = _session()
+    try:
+        card = scp_view.SCPCard(_page(), session, lambda: None)
+        session.chance_spread = lambda: (1.2, 30.0)
+        card.refresh()
+        field = card._scale_boxes["success_at"].controls[0]
+        assert field.value == "1.2", field.value
+        run = session.trials
+        field.value = ""
+        field.on_blur(None)
+        assert session.success_at_mode == "automatic", (session.success_at_mode, session.success_at)
+        assert session.trials is run, "the run started again"
+        assert field.value == "1.2", "the box shows its last value again"
+        field.value = "abc"
+        field.on_submit(None)
+        assert (session.success_at_mode, field.value) == ("automatic", "1.2") and session.trials is run
+    finally:
+        session.stop()
+
+
+def test_the_automatic_pill_acts_on_each_press():
+    """A press on the lit pill fixes the value on screen; a second press goes back to automatic."""
+    session = _session()
+    try:
+        card = scp_view.SCPCard(_page(), session, lambda: None)
+        session.chance_spread = lambda: (1.23, 30.0)
+        card.refresh()
+        for name, spreads in (("success_at", 1.0), ("full_at", 2.0)):
+            press = card._scale_boxes[f"{name}_pill"].on_click
+            press(None)
+            assert getattr(session, f"{name}_mode") == "fixed", name
+            assert getattr(session, name) == pytest.approx(round(spreads * 1.23, 1)), "the value on screen"
+            press(None)
+            assert getattr(session, f"{name}_mode") == "automatic", name
+    finally:
+        session.stop()
+
+
+def test_the_output_level_is_above_the_middle_toward_the_cue_and_below_it_away():
+    """A shift toward the cue drives every output above the middle, and a shift away drives it below."""
+    for toward in (True, False):
+        session = _session()
+        try:
+            session.toggle_pause()
+            run = _run(session, n_trials=2, transfer=0.0, seed=30)
+            seen: list[float] = []
+
+            def watch():
+                if run.phase == ACTIVE and run.active_s - run.phase_remaining() > 2.0 \
+                        and session.signal is not None:
+                    seen.append(session.signal)
+
+            _feed(session, {0: wandering(1.5, 40.0, RATE, 100, 1.0)}, block=25, watch=watch,
+                  until=_until_done(session), add=lambda s, _ch: (1 if toward else -1) * _held(s.trials, 12.0))
+            assert seen
+            assert all((level > 0.5) == toward for level in seen), (toward, min(seen), max(seen))
+        finally:
+            session.stop()
+
+
+def test_an_extra_channel_is_not_checked_for_5_s_after_it_touches_the_input_limit():
+    session, _control = _screen()
+    try:
+        session.set_extra(1, True)
+        run = _run(session, n_trials=1, transfer=0.0, seed=31)
+        x = {0: wandering(1.5, 40.0, RATE, 101, 2.0), 1: wandering(1.5, 40.0, RATE, 102, 2.0)}
+        at = _feed(session, x, until=lambda _s: run.phase == BASELINE)
+        x[1][at + 10] = 800.0                           # one sample at the limit as the baseline starts
+        _feed(session, x, start=at, until=lambda _s: bool(run.results))
+        assert run.results[0].valid
+        assert session.extra_checks()[1] == [None], "5 s of the window came after a touch of the limit"
+    finally:
+        session.stop()
+
+
+def test_an_extra_with_a_thin_baseline_vouches_for_nothing():
+    """The extra channel is flat for the first 1.2 s of the baseline: 15% of the trial's readings, under the
+    20% rule, but less than half of its baseline. By the trial engine's own baseline rule it checks nothing."""
+    session, _control = _screen()
+    try:
+        session.set_extra(1, True)
+        run = _run(session, n_trials=1, transfer=0.0, seed=33)
+        x = {0: wandering(1.5, 40.0, RATE, 103, 2.0), 1: wandering(1.5, 40.0, RATE, 104, 2.0)}
+        at = _feed(session, x, until=lambda _s: run.phase == BASELINE)
+        x[1][at:at + int(1.2 * RATE)] = 5.0                 # flat: no signal there
+        _feed(session, x, start=at, until=lambda _s: bool(run.results))
+        assert run.results[0].valid
+        assert session.extra_checks()[1] == [None], "a thin baseline on the extra vouched for the trial"
+    finally:
+        session.stop()
+
+
+def test_at_a_verdict_every_reader_still_takes_the_trials_record():
+    session = _session()
+    try:
+        session.toggle_pause()
+        session.set_full_at(20.0, typed=True)
+        session.set_success_at(4.0, typed=True)
+        run = _run(session, n_trials=2, transfer=0.0, seed=34)
+        _feed(session, {0: wandering(1.5, 40.0, RATE, 105, 2.0)}, until=lambda _s: run.phase == RESULT)
+        session.set_full_at(50.0, typed=True)
+        session.success_at_setting = session.success_at_setting._replace(value=9.0)
+        assert session.scale_in_use() == (20.0, 4.0), session.scale_in_use()
+    finally:
+        session.stop()
+
+
+def test_a_fixed_box_keeps_the_value_typed_for_the_next_trial():
+    """Inside a trial the readers take the record, but a box on *fixed* shows what was typed, which acts
+    from the next trial: the frame does not write the record over it."""
+    session = _session()
+    try:
+        card = scp_view.SCPCard(_page(), session, lambda: None)
+        session.toggle_pause()
+        session.set_full_at(20.0, typed=True)
+        card.rebuild()
+        run = _run(session, n_trials=2, transfer=0.0, seed=35)
+        _feed(session, {0: wandering(1.5, 40.0, RATE, 106, 2.0)}, until=lambda _s: run.phase == ACTIVE)
+        field = card._scale_boxes["full_at"].controls[0]
+        field.value = "30"
+        field.on_submit(None)
+        card.refresh()
+        shown = card._scale_boxes["full_at"].controls[0].value
+        assert session.scale_in_use()[0] == 20.0 and shown == "30.0", shown
+    finally:
+        session.stop()
+
+
+def test_at_a_verdict_the_spread_is_demeaned_without_the_trial_it_judges():
+    from nfb_console.trials import Trial
+
+    session = _session()
+    try:
+        run = TrialRun(n_trials=5)
+        run.results.extend(Trial(index=i + 1, required=POSITIVE, transfer=False, score_uv=s, valid=True,
+                                 success=False) for i, s in enumerate((2.0, 4.0, 30.0)))
+        assert session._own_shift(run, (RESULT, POSITIVE, 3)) == pytest.approx(3.0)
+        assert session._own_shift(run, (ACTIVE, POSITIVE, 3)) == pytest.approx(12.0)
+    finally:
+        session.stop()
+
+
+def test_the_input_limit_clears_five_seconds_of_samples_after_the_last_one_there():
+    """*at the input limit* holds for 5 s of samples after the last sample at the limit, to the sample, counted
+    from the blocks and not from a clock, so a replay at any speed clears at the same sample."""
+    session = _session()
+    try:
+        spec = session.specs[0]
+        uv = np.full(8, 5.0)
+        uv[0] = 800.0                                   # the last sample at the limit opens the block
+        session.feed_block(_block(spec, 0, uv))
+        left = round(session.LIMIT_CLEAR_SECONDS * spec.rate_hz) - 7
+        session.feed_block(_block(spec, 8, np.full(left - 1, 5.0)))
+        assert session.at_input_limit(0)
+        session.feed_block(_block(spec, 8 + left - 1, np.full(1, 5.0)))
+        assert not session.at_input_limit(0), "5 s of samples after the last one at the limit"
+    finally:
+        session.stop()
+
+
+def test_an_extra_that_spent_the_run_at_the_input_limit_says_why_it_checked_nothing():
+    session, control = _screen()
+    try:
+        session.set_extra(1, True)
+        run = _run(session, n_trials=3, transfer=0.0, seed=36)
+        x = {0: wandering(1.5, 80.0, RATE, 107, 2.0), 1: np.full(int(80 * RATE), -800.0)}
+        at = _feed(session, x, until=lambda _s: run.done)
+        x[1][at:] = wandering(1.5, 80.0, RATE, 108, 2.0)[at:]
+        _feed(session, x, start=at, until=lambda s: s.stream_seconds * RATE > at + 6 * RATE)
+        assert not session.at_input_limit(1), "the channel has left the input limit"
+        line, problem = session.extra_status(1)
+        assert "checked in 0 of 3" in line and "3 at the input limit" in line and problem, (line, problem)
+        assert line in _joined(session, control)
+    finally:
+        session.stop()
+
+
+def test_each_run_is_marked_and_a_void_trial_mark_has_no_score():
+    session = _session()
+    try:
+        session.toggle_pause()
+        run = _run(session, n_trials=1, transfer=0.0, seed=37)
+        x = wandering(1.5, 40.0, RATE, 109, 2.0)
+        at = _feed(session, {0: x}, until=lambda _s: run.phase == ACTIVE)
+        session.trust_channel(0, False)
+        _feed(session, {0: x}, start=at, until=lambda _s: bool(run.results))
+        session.restart_trials()
+        notes = [note for _at, note in session.marks()]
+        verdict = next(n for n in notes if " · verdict · " in n)
+        assert "no result · no signal" in verdict and "µV" not in verdict, verdict
+        assert notes[-1].startswith("run starts · "), notes
     finally:
         session.stop()

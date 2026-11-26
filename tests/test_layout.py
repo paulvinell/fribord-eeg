@@ -29,7 +29,7 @@ from nfb_console.protocols import BY_CODE
 from nfb.stream import Block
 
 from conftest import counts, plausible_eeg, text_width
-from harness import (FED_SECONDS, SCREENS, StubDevice, StubPage, built_screen, replay, screen_params,
+from harness import (FED_SECONDS, OTHER_SCREENS, SCREENS, StubDevice, StubPage, built_screen, replay, screen_params,
                      toolbar)
 
 BOLD = {ft.FontWeight.W_500, ft.FontWeight.W_600, ft.FontWeight.W_700, ft.FontWeight.BOLD}
@@ -257,6 +257,14 @@ def test_launcher_layout():
 @pytest.mark.parametrize("fed", [False, True], ids=["cold", "fed"])
 def test_screen_layout(module: str, code: str, channels: int, fed: bool):
     _page, control = built_screen(module, code, channels, fed)
+    faults = [f"{rule.__name__}: {fault}" for rule in RULES for fault in rule(control)]
+    assert not faults, "\n".join(faults)
+
+
+@pytest.mark.parametrize("module,code,channels", screen_params(OTHER_SCREENS))
+def test_other_screen_layout(module: str, code: str, channels: int):
+    """The screens that read another device go through the same rules, as they open."""
+    _page, control = built_screen(module, code, channels, False)
     faults = [f"{rule.__name__}: {fault}" for rule in RULES for fault in rule(control)]
     assert not faults, "\n".join(faults)
 

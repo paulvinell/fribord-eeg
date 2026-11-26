@@ -181,3 +181,12 @@ def test_heavy_rejection_is_an_advisory_not_an_alarm():
     s.rejections[0] = 0.1
     sentry.tick(s, ADVISORY_SECONDS + 2)
     assert sentry.advice is None
+
+
+def test_a_single_channel_alarm_names_the_channel_not_the_reference():
+    """With one channel there is nothing to compare, so a lost channel is named as that channel."""
+    sentry, s = SignalSentry(), session_like(channels=(0,))
+    s.state[0] = False
+    sentry.tick(s, 0.0)
+    problem = sentry.tick(s, ALARM_SECONDS + 1)
+    assert problem is not None and "ch0" in problem and "reference" not in problem

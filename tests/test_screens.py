@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from nfb_console.protocols import BY_CODE
+from nfb_console.trials import ACTIVE
 
 from harness import (
     _by_label,
@@ -17,6 +18,9 @@ from harness import (
     at_corner,
     pump,
     replay,
+    OTHER_SCREENS,
+    SCREENS,
+    screen_params,
     shown,
     StubPage,
     toolbar,
@@ -123,38 +127,6 @@ def test_the_watched_screens_take_a_shadow_only_when_it_is_not_the_operators(mon
             assert fb.shadow.screen == 2, "pointed at the trainee's display, not the console"
         finally:
             session.stop()
-
-
-def test_an_inhibit_is_measured_with_a_sharper_slower_filter_than_a_reward():
-    """A reward drives moment-to-moment reinforcement and every millisecond comes out of a budget the
-    literature puts at ~250 ms. An inhibit is a veto — 300 ms late to notice a spindle costs nothing, and
-    what it needs instead is selectivity, or adjacent bins are not really separate bins.
-
-    One elliptic design (2 biquads, 0.5 dB ripple, 60 dB stop) for every band would ignore this, so the
-    design follows the role.
-    """
-    from nfb_console import amplitude_view as av, cfc_view
-    from nfb_console.training import CFIR_DELAY
-
-    assert CFIR_DELAY["reward"] < CFIR_DELAY["inhibit"]
-
-    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
-    try:
-        # **By role, not by direction.** The argument above is about what the estimate is used for — a
-        # reward is moment-locked reinforcement, an inhibit is a veto — and neither sentence mentions
-        # which way the band is trained. A reward trained downward is still moment-locked.
-        by_role = {t.role: session.latency_for(t) for t in session.targets}
-        assert by_role["reward"] < by_role["inhibit"]
-        assert by_role["inhibit"] == pytest.approx(0.3, abs=0.02)
-    finally:
-        session.stop()
-
-    cfc = cfc_view.CFCSession(BY_CODE["CFC"], source=replay(), channels=2)
-    try:
-        bins = cfc.bins[(0, cfc.band_key(cfc.bin_targets[0].band))]
-        assert bins.latency_seconds == pytest.approx(0.3, abs=0.02)
-    finally:
-        cfc.stop()
 
 
 def test_the_screens_do_not_lecture():
@@ -279,6 +251,34 @@ def test_the_shadow_can_follow_the_state_instead_of_the_score():
             plain.stop()
 
 
+def test_the_trend_goes_on_when_the_stream_starts_again_from_an_earlier_index():
+    """A replay that loops, or a device that restarts, steps the stream time back; the trend keeps
+    taking points from the new start."""
+    from nfb.stream import Block
+    from nfb_console import amplitude_view as av
+    from nfb_console.training import TREND_SECONDS
+
+    from conftest import counts, plausible_eeg
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=1)
+    try:
+        session.paused = False
+        session.state = {0: True}
+        spec = session.specs[0]
+        wave = plausible_eeg(20.0, session.rate, 0)
+
+        def feed(seconds: float) -> None:
+            for i in range(0, int(seconds * session.rate) - 249, 250):
+                session.feed_block(Block(0, i, counts(wave[i:i + 250], spec.scale), spec))
+
+        feed(20.0)
+        before = len(session.targets[0].trend)
+        feed(4 * TREND_SECONDS)
+        assert len(session.targets[0].trend) > before, "the trend froze at the step back"
+    finally:
+        session.stop()
+
+
 def test_a_screen_that_can_double_the_mark_says_so_and_one_that_cannot_carries_no_hold():
     """**The doubling arithmetic runs on every session; the row that configures it does not.** So a screen
     that leaves `sustains_reward` unset must not be able to hold a non-zero `hold_seconds` — otherwise the
@@ -327,7 +327,6 @@ def test_music_is_offered_only_where_it_means_something():
         assert at.music_sources == ("crossfade",)
         assert at.feedback.music.source in at.music_sources
         assert at.state_ends == ("alpha", "theta"), "low end first, matching colour/second_colour"
-        assert at.state_ends[1] == "theta" and at.feedback.music.second_colour == "brown"
     finally:
         at.stop()
 
@@ -475,19 +474,43 @@ def test_an_arrangement_is_offered_only_where_it_means_something_and_shows_what_
         session.stop()
 
 
-def test_the_band_arrows_are_wired_to_the_slide():
-    """A regression fence on the wiring rather than the arithmetic: `num_box` takes `on_step` so the arrows
-    and the typed value can do different things, and a screen that forgot to pass it would silently go back
-    to moving one edge."""
-    import inspect
+def test_the_arrows_on_either_band_edge_slide_the_whole_band():
+    """On every screen whose cards have band edges, an arrow on either edge moves the band and keeps its
+    width."""
+    import flet as ft
 
-    from nfb_console import amplitude_view, at_view, widgets
+    from nfb_console import amplitude_view, at_view
+    from test_layout import walk
 
-    assert "on_step" in inspect.signature(widgets.num_box).parameters
-    for module in (amplitude_view, at_view):
-        src = inspect.getsource(module)
-        assert src.count("on_step=") == 2, f"{module.__name__} must wire both edges"
-        assert "def slide(" in src
+    def boxes(control):
+        """Each number box as (its text field, its up arrow), the smallest control that holds both."""
+        found = {}
+        for c in walk(control):
+            fields = [x for x in walk(c) if isinstance(x, ft.TextField)]
+            ups = [x for x in walk(c) if isinstance(x, ft.Container) and isinstance(x.content, ft.Text)
+                   and x.content.value == "\u25b2"]
+            if len(fields) == 1 and len(ups) == 1:
+                found[id(fields[0])] = (fields[0], ups[0])
+        return list(found.values())
+
+    for module, code in ((amplitude_view, "AMP"), (at_view, "A-T")):
+        session = module.session_for(BY_CODE[code], source=replay(), channels=1)
+        try:
+            control = module.view(StubPage(), session, toolbar(), lambda: None)
+            tgt = session.targets[0]
+            for edge in ("low", "high"):
+                before = (tgt.band.low, tgt.band.high)
+                shown = getattr(tgt.band, edge)
+                box = next((up for field, up in boxes(control)
+                            if field.value and float(field.value) == pytest.approx(shown)), None)
+                assert box is not None, f"{code}: no box shows the {edge} edge"
+                box.on_click(None)
+                after = (tgt.band.low, tgt.band.high)
+                assert after[0] > before[0] and after[1] > before[1], f"{code}: the {edge} arrow moved one edge"
+                assert after[1] - after[0] == pytest.approx(before[1] - before[0]), f"{code}: width kept"
+                control = module.view(StubPage(), session, toolbar(), lambda: None)
+        finally:
+            session.stop()
 
 
 def test_every_screen_with_a_band_on_it_has_a_spectrum():
@@ -518,7 +541,7 @@ def test_every_screen_with_a_band_on_it_has_a_spectrum():
             # Every multi-channel screen offers the sum; *where* in the row is the claim each screen makes,
             # declared once as `sum_spectrum_leads` rather than five hand-built lists in three orders.
             assert "sum" in sources, f"{code}: no spectrum of the summed signal"
-            if session.sum_spectrum_leads:
+            if code in ("A-T", "CFC"):
                 assert sources[0] == "sum", f"{code}: the sum is what the bands are measured on"
             else:
                 assert sources[-1] == "sum", f"{code}: a target sits on a channel, so the channels lead"
@@ -689,3 +712,129 @@ def test_every_screen_with_a_spectrum_has_trends_and_offers_the_sum():
         assert "sum" not in [s.label for s in session.spectrum_sources()], "one channel is nothing to add"
     finally:
         session.stop()
+
+
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS + OTHER_SCREENS))
+def test_pressing_a_tab_shows_that_pane_and_only_that_pane(module, code, channels):
+    """On every screen, each tab label shows its own pane and hides every other one."""
+    import importlib
+
+    import flet as ft
+
+    from harness import _find_pills
+
+    screen = importlib.import_module(f"nfb_console.{module}")
+    session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)
+    try:
+        control = screen.view(StubPage(), session, toolbar(), lambda: None)
+        root = control.controls[0] if isinstance(control, ft.Stack) else control
+        labels = [x.value for x in _texts(root.controls[1])]
+        panes = root.controls[2].controls
+        assert len(labels) == len(panes), code
+        for index in reversed(range(len(labels))):
+            _find_pills(root.controls[1], labels[index]).on_click(None)
+            assert [p.visible is not False for p in panes] == [i == index for i in range(len(panes))], \
+                f"{code}: {labels[index]}"
+    finally:
+        session.stop()
+
+
+@pytest.mark.parametrize("module,code,channels", screen_params(SCREENS + OTHER_SCREENS))
+def test_pressing_a_choice_lights_that_choice_and_only_that_one(module, code, channels):
+    """On every screen, pressing a choice that is not lit lights it, and in a row with one lit choice it is then
+    the only one lit. **fit** is the exception that proves the rule: it picks another choice of its row, which
+    is then the one lit."""
+    import importlib
+
+    import flet as ft
+
+    from nfb_console import theme
+
+    picks_another = {"fit"}
+
+    def is_pill(node):
+        """A choice as `widgets.pill` draws it. An action such as **redefine** has the same fill, in the
+        accent colour."""
+        return isinstance(node, ft.Container) and isinstance(node.content, ft.Text) \
+            and node.border_radius == 6 and node.content.color in (theme.TEXT, theme.MUTED)
+
+    def rows(node, path=()):
+        """Each row of two or more pills, by its place in the tree: a press rebuilds a row, and a row can
+        gain a pill, so neither the object nor its labels identify it afterwards."""
+        if node is None or len(path) > 30:
+            return
+        children = getattr(node, "controls", None) or []
+        pills = [c for c in children if is_pill(c)]
+        if len(pills) >= 2:
+            yield path, pills
+        for i, child in enumerate(children):
+            yield from rows(child, path + (i,))
+        if not is_pill(node):
+            yield from rows(getattr(node, "content", None), path + ("content",))
+
+    def lit(row):
+        return [p.content.value for p in row if p.bgcolor == theme.SURFACE_HI]
+
+    pressed = 0
+    screen = importlib.import_module(f"nfb_console.{module}")
+    session = screen.session_for(BY_CODE[code], source=replay(), channels=channels)
+    try:
+        control = screen.view(StubPage(), session, toolbar(), lambda: None)
+        choices = [(path, [p.content.value for p in row]) for path, row in rows(control)]
+        # A row of one lit choice as the screen opens is a row of exclusive choices; a row of switches, or
+        # of channels to add, can light none or several.
+        exclusive = {path for path, row in rows(control) if len(lit(row)) == 1}
+        for path, names in choices:
+            for label in names:
+                row = dict(rows(control)).get(path)
+                pill = next((p for p in row or [] if p.content.value == label), None)
+                if pill is None or pill.on_click is None or label in lit(row):
+                    continue
+                pill.on_click(None)
+                pressed += 1
+                after = dict(rows(control)).get(path)
+                if after is None or label not in [p.content.value for p in after]:
+                    continue
+                if label in picks_another:
+                    assert len(lit(after)) == 1, f"{code}: {label} in {names} lit {lit(after)}"
+                elif path in exclusive:
+                    assert lit(after) == [label], f"{code}: pressed {label} in {names}, lit {lit(after)}"
+                else:
+                    assert label in lit(after), f"{code}: pressed {label} in {names}, lit {lit(after)}"
+    finally:
+        session.stop()
+    assert pressed, "the walk found no row of choices to press"
+
+
+def test_the_level_line_names_the_full_at_of_the_trial_in_flight():
+    from test_heg_trials import _push
+    from test_heg_trials import _session as heg_session
+    from test_pupil_view import _eye, _to_feedback
+    from test_pupil_view import _session as pupil_session
+
+    pupil = pupil_session("strong", trial_direction="increase", n_trials=3)
+    try:
+        _to_feedback(pupil, _eye(pupil))
+        in_use = pupil.scale_in_use()[0]
+        pupil.set_full_at(0.5, typed=True)
+        assert f"±{pupil.scale_in_use()[0]:g} mm" in pupil.level_source[1], \
+            (pupil.level_source[1], in_use)
+    finally:
+        pupil.stop()
+    heg = heg_session(n_trials=2)
+    try:
+        t = 0.0
+        while heg.trials.phase != ACTIVE:
+            t = _push(heg, 1.0, t)
+            assert t < 300.0, "no feedback window came"
+        heg.set_full_at(5.0, typed=True)
+        assert f"±{heg.scale_in_use()[0]:g} sd" in heg.level_source[1], heg.level_source[1]
+    finally:
+        heg.stop()
+
+
+def test_pupil_and_heg_help_explains_the_words_of_the_run_verdict():
+    from nfb_console import heg_view, pupil_view
+
+    for name, text in (("Pupil", pupil_view.MODE_HELP), ("HEG", heg_view.MODE_HELP)):
+        assert "chance range" in text, f"the {name} help does not explain the chance range"

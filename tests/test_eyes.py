@@ -93,21 +93,14 @@ def test_a_weight_that_makes_the_untested_half_larger_is_not_used():
     assert result.weights.rotation == (0.0,)
 
 
-def test_a_gain_the_table_cannot_show_is_no_gain():
-    from nfb.dsp.eyes import _smaller
-
-    assert not _smaller(4.98, 5.0)
-    assert _smaller(4.8, 5.0)
-
-
 def test_blinks_that_do_not_reach_the_training_channel_are_not_subtracted():
+    """Blinks on an extra channel alone give no blink term; the rotation weight is still used."""
     rot = {"y": (0.10, 0.0), "x1": (1.0, 0.0)}
     blink = {"y": 0.0, "x1": 2.0}
     result = _fit(_channels(rot, blink, seed=8, level_uv=0.5))
     assert result.rotations_used
     assert result.weights.rotation[0] > 0.08
-    without, with_ = result.sizes["rest"]
-    assert np.isfinite(without) and np.isfinite(with_)
+    assert not result.blinks_used and result.weights.blink_channel is None, result.sizes
 
 
 def test_weights_that_make_the_rest_larger_are_not_used():
@@ -171,13 +164,18 @@ def test_a_glance_that_does_not_return_is_handed_to_the_rotation_weight():
 
 
 def test_an_invalid_extra_sample_is_reported_and_stops_a_blink():
-    sub = EyeSubtractor(_weights())
-    y = np.zeros(10)
-    x = np.zeros((1, 10))
+    """The samples reported valid are those where every extra sample is valid, and an invalid one ends the
+    blink in progress."""
+    sub = EyeSubtractor(_weights(threshold=60.0, samples=int(0.4 * RATE)))
+    x = np.where(np.arange(int(2 * RATE)) >= int(RATE), 200.0, 0.0)
+    at = int(RATE) + 20
+    sub.process(0.1 * x[:at], x[None, :at])
+    assert sub.in_blink, "the step is taken for a blink"
     valid = np.ones(10, dtype=bool)
     valid[4] = False
-    _out, ok = sub.process(y, x, valid)
+    _out, ok = sub.process(0.1 * x[at:at + 10], x[None, at:at + 10], valid)
     assert list(ok) == list(valid)
+    assert not sub.in_blink
 
 
 def test_without_a_blink_channel_the_rotation_weight_applies_always():

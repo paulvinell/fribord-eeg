@@ -10,7 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from conftest import counts
+from conftest import counts, wandering
+from harness import _block, _limited_spec
 
 from nfb.dsp import ArtifactGate, ArtifactGates, ArtifactPolicy
 from nfb.dsp.artifact import JUDGE_FLOOR_HZ
@@ -177,13 +178,9 @@ def test_rate_and_percent_are_reported_separately():
     assert gate.rate < 0.01, "long over by the end of the run"
 
 
-def test_there_is_no_threshold_log_because_a_replay_reproduces_it():
-    """A log of the live threshold would only be needed with two implementations of the gate. We have one
-    implementation, so replaying re-derives the same
-    thresholds and the same rejections — a log would be a second copy of something reproducible, and the
-    failure mode of those is that they disagree."""
-    assert not hasattr(ArtifactGate(SPEC), "log")
-
+def test_a_replay_reproduces_the_thresholds_and_the_rejections():
+    """The gate is deterministic: the same signal gives the same thresholds and the same rejections, so a
+    replay of a recording re-derives what the live session did."""
     x = sine(10.0, 20.0, 30.0)
     x[2000:2100] += 400.0
     runs = []
@@ -339,10 +336,6 @@ def test_a_railed_stretch_does_not_leave_its_step_in_a_slow_filter():
 
 # --- the input limit -------------------------------------------------------------------------
 
-def _limited_spec():
-    return ChannelSpec(index=0, rate_hz=RATE, unit="µV", scale=800.0 / 32767, input_range=800.0)
-
-
 def test_partly_railed_block_rejected():
     """An electrode that drifts onto the rail. The judged band removes the drift, so the gate saw nothing
     and stored a rail sample as the last clean value, and every later stand-in carried it."""
@@ -402,3 +395,60 @@ def test_override_cannot_accept_a_railed_sample():
         assert abs(held) < 0.98 * spec.input_range, "and no rail sample is kept as the last clean value"
     finally:
         session.stop()
+
+
+def test_the_signal_pane_does_not_say_nothing_is_rejected_while_a_block_is_held():
+    from nfb.dsp.artifact import ArtifactGates, ArtifactPolicy
+
+    gates = ArtifactGates(policy=ArtifactPolicy(enabled=False))
+    spec = _limited_spec()
+    uv = np.zeros(8)
+    uv[3] = -800.0
+    judged = gates.feed(_block(spec, 0, uv))
+    assert not judged.accepted, "the block at the input limit is held"
+    assert "holding" in gates.describe(), f"the pane says {gates.describe()!r}"
+    assert gates.percent > 0, "the held block is counted where the pane counts"
+
+
+def test_a_blink_after_a_partly_railed_first_block_is_still_rejected():
+    from nfb.dsp.artifact import ArtifactGate
+
+    spec = _limited_spec()
+    tt = np.arange(int(3 * RATE)) / RATE
+    x = 8.0 * np.sin(2 * np.pi * 10.0 * tt) + wandering(1.5, 4.0, RATE, 99, 2.0)[:len(tt)]
+    blink = slice(int(1.0 * RATE), int(1.0 * RATE) + 8)
+    x[blink] += 120.0
+    x[:4] = -800.0                                      # the first block is half on the input limit
+    gate = ArtifactGate(spec)
+    judged = [gate.feed(_block(spec, i, x[i:i + 8])) for i in range(0, len(x) - 7, 8)]
+    assert not judged[0].accepted
+    assert not judged[blink.start // 8].accepted, \
+        f"a 120 µV blink is accepted at a threshold of {judged[blink.start // 8].threshold:.0f} µV"
+
+
+def test_with_rejection_off_a_sample_at_the_input_limit_still_trains_nothing():
+    from nfb.dsp.artifact import ArtifactGate, ArtifactPolicy
+
+    spec = _limited_spec()
+    gate = ArtifactGate(spec, ArtifactPolicy(enabled=False))
+    uv = np.full(8, 5.0)
+    assert gate.feed(_block(spec, 0, uv)).accepted
+    uv[5] = 800.0
+    judged = gate.feed(_block(spec, 8, uv))
+    assert not judged.accepted
+    assert max(abs(v) for v in judged.fed.values) < 0.98 * spec.input_range
+
+
+def test_in_clamp_mode_a_sample_at_the_input_limit_holds_the_block():
+    from nfb.dsp.artifact import ArtifactGate, ArtifactPolicy
+
+    spec = _limited_spec()
+    gate = ArtifactGate(spec, ArtifactPolicy(mode="clamp"))
+    tt = np.arange(int(2 * RATE)) / RATE
+    x = 8.0 * np.sin(2 * np.pi * 10.0 * tt)
+    for i in range(0, len(x) - 7, 8):
+        gate.feed(_block(spec, i, x[i:i + 8]))
+    uv = np.full(8, 5.0)
+    uv[5] = -800.0
+    judged = gate.feed(_block(spec, len(x), uv))
+    assert not judged.accepted, "a zero in place of the input limit is no signal either"

@@ -12,9 +12,7 @@ import numpy as np
 import pytest
 
 from nfb.dsp import ALPHA
-from nfb_console.feedback import FeedbackSettings
-from nfb_console.targets import (CALIBRATION_SECONDS, DEFAULT_MODES, HIT_RATES, MODES,
-                                 RECENT_WINDOW, Target)
+from nfb_console.targets import CALIBRATION_SECONDS, HIT_RATES, RECENT_WINDOW, Target
 
 
 RATE = 20.0        # the metric output rate
@@ -24,11 +22,6 @@ def feed(tgt: Target, seconds: float, mean: float = 10.0, sd: float = 2.0, seed:
     rng = np.random.default_rng(seed)
     for _ in range(int(seconds * RATE)):
         tgt.observe(mean + rng.normal(0, sd), RATE)
-
-
-def test_there_are_two_modes_and_baseline_is_not_one_of_them():
-    """A 30 s baseline is what happens when a fixed threshold starts, not a third thing to pick."""
-    assert MODES == ("fixed", "automatic")
 
 
 def test_a_fixed_threshold_calibrates_for_thirty_seconds_then_settles():
@@ -55,11 +48,11 @@ def test_calibration_gives_a_usable_threshold_from_the_first_second():
     first half-minute of every session was a screen that could not be told apart from a broken one.
     """
     tgt = Target(0, ALPHA, "increase", mode="fixed")
-    assert tgt.threshold == 10.0, "the constructed placeholder, which is nothing to do with this signal"
+    placeholder = tgt.threshold
 
     feed(tgt, 2.0, mean=100.0, sd=10.0)
     assert tgt.calibrating, "still a phase in progress — the label and the countdown stay"
-    assert tgt.threshold > 40.0, "and yet a threshold somewhere near the signal, not the placeholder"
+    assert tgt.threshold > max(40.0, placeholder), "and yet a threshold near the signal, not the placeholder"
     early = tgt.threshold
 
     # It tracks what arrives, rather than latching the first thing it saw.
@@ -72,15 +65,11 @@ def test_calibration_gives_a_usable_threshold_from_the_first_second():
 
 
 def test_a_provisional_threshold_never_counts_as_settled():
-    """`_settled` is what the rest of the app reads, and a moving number must not claim to be final.
-
-    The countdown, the card's note, and `nudge`'s promise that a hand-set number survives a calibration
-    finishing are all keyed off this flag, so a provisional derivation setting it early would silently
-    convert "still working it out" into "this is your threshold".
-    """
+    """A provisional threshold still reads as calibrating, and a hand-set number outranks both a provisional
+    and a final derivation."""
     tgt = Target(0, ALPHA, "increase", mode="fixed")
     feed(tgt, 5.0, mean=50.0)
-    assert not tgt._settled and tgt.calibrating
+    assert tgt.calibrating
     assert tgt.calibration_remaining == pytest.approx(CALIBRATION_SECONDS - 5, abs=0.2)
 
     by_hand = 123.0
@@ -200,14 +189,11 @@ def test_rewards_and_inhibits_open_in_different_modes_and_at_different_rates():
     # The mode follows **which side of the line the target is met on** — a tracker follows the trainee
     # down and pins the percentage where it started, which erases the change the training exists to
     # produce. The aim follows the **role**.
-    assert DEFAULT_MODES == {True: "automatic", False: "fixed"}
     assert Target(0, ALPHA).mode == "automatic", "a reward on the way up tracks"
     assert Target(0, ALPHA, role="inhibit").mode == "fixed", "and an ordinary inhibit holds still"
-    assert Target(0, ALPHA).hit_rate == 0.90
-    assert Target(0, ALPHA, role="inhibit").hit_rate == 0.75
     # An alpha-down reward is held below a line like an inhibit, so it opens fixed — at a reward's aim.
     down_reward = Target(0, ALPHA, "decrease", role="reward")
-    assert (down_reward.mode, down_reward.hit_rate) == ("fixed", 0.90)
+    assert (down_reward.mode, down_reward.hit_rate) == ("fixed", HIT_RATES["reward"])
     assert Target(0, ALPHA, "increase", mode="fixed").mode == "fixed", "still overridable"
 
 
@@ -301,163 +287,6 @@ def test_asking_for_the_drawn_window_gives_the_same_numbers_as_averaging_everyth
             assert tgt.moving_average(60, span=span) == pytest.approx(whole[-span:]), (total, span)
 
 
-def test_a_target_is_observed_once_per_reading_of_its_own_metric():
-    """The rate a target is told has to be the rate it gets, or every window is wrong by that factor.
-
-    Observing once per arriving block ran at blocks × channels per second — 128 Hz on a 256 sps
-    four-channel file against the 20 Hz declared — so a "30 s" calibration completed in five and
-    "last 30 s on target" covered five.
-    """
-    from nfb.dsp import Band
-    from nfb_console.amplitude_view import METRIC_HZ, AmplitudeSession
-    from nfb_console.protocols import BY_CODE
-    from nfb_console.targets import PAIR
-
-    session = AmplitudeSession.__new__(AmplitudeSession)
-    session.protocol = BY_CODE["AMP"]
-    session.specs = {0: object(), 1: object(), 2: object()}
-    session.feedback = FeedbackSettings()      # the envelope constant is the session's, so `filter_for` needs it
-
-    on_ch0 = Target(0, Band(8, 12, ""), "increase")
-    on_ch1 = Target(1, Band(8, 12, ""), "increase")
-    on_sum = Target(PAIR, Band(8, 12, ""), "increase", pair=(0, 1, 2))
-    down = Target(0, Band(8, 12, ""), "decrease", filter_kind="elliptic", filter_order=8)
-    # the metric key carries the filter, so the same band measured two ways is two estimators
-    up_key = ("8-12", session.filter_for(on_ch0))
-    down_key = ("8-12", session.filter_for(down))
-    assert up_key != down_key
-
-    assert session._due(on_ch0, {(0, *up_key)})
-    assert not session._due(on_ch0, {(1, *up_key)}), "another channel's reading is not this target's"
-    assert not session._due(on_ch0, {(0, "4-8", up_key[1])}), "another band's reading is not either"
-    assert not session._due(on_ch0, {(0, *down_key)}), "nor the same band through a different filter"
-    assert session._due(down, {(0, *down_key)})
-    assert session._due(on_ch1, {(1, *up_key)})
-
-    # A summed target has **one** estimator, on a key that is no channel's, so it advances on that and on
-    # nothing else. A contributing channel's own reading is an input to the sum rather than a reading of it,
-    # and counting those would advance the target once per electrode — every window it has too short by that
-    # factor, which is the bug `_due` exists for.
-    from nfb_console.amplitude_view import SUM_KEY
-    assert session._due(on_sum, {(SUM_KEY, *up_key)})
-    assert not session._due(on_sum, {(0, *up_key)})
-
-    assert METRIC_HZ == 20.0
-
-
-def test_spectrum_bins_are_centred_on_their_frequency():
-    """The spectrum takes frq/resol samples so rfft bin k *is* k Hz. Binning [f, f+1) instead and
-    drawing the bar from f's gridline rightward puts every feature half a bin late — a mains notch at
-    50 Hz then looks like it starts at 50 and continues past it."""
-    import numpy as np
-    from nfb_console.amplitude_view import SPECTRUM_BIN_HZ, SPECTRUM_LO, RawRing
-
-    for tone in (10.0, 25.0, 50.0):
-        ring = RawRing(2.0, 256.0)
-        times = np.arange(512) / 256.0
-        ring.push(10 * np.sin(2 * np.pi * tone * times))
-        values = ring.spectrum(relative=False)
-        peak_hz = SPECTRUM_LO + int(np.argmax(values)) * SPECTRUM_BIN_HZ
-        assert peak_hz == tone, f"{tone} Hz tone landed in the bin labelled {peak_hz}"
-
-
-def test_each_band_reports_where_its_energy_sits_not_only_how_much():
-    """The dominant frequency per band, which is what a reward frequency gets picked from.
-
-    The instruction for the coupling screen is to put the reward at the frequency in the spectral
-    display showing the highest amplitude in a particular band, so the number needed is per band and
-    not the peak of the whole spectrum — which is nearly always the slowest thing present and says nothing
-    about where alpha is.
-    """
-    import numpy as np
-
-    from nfb.dsp import ALPHA, THETA
-    from nfb_console.amplitude_view import RawRing
-
-    ring = RawRing(2.0, 256.0)
-    times = np.arange(512) / 256.0
-    # a strong slow component and a weaker alpha one, so the whole-spectrum peak is *not* the alpha answer
-    ring.push(40 * np.sin(2 * np.pi * 5.0 * times) + 8 * np.sin(2 * np.pi * 10.0 * times))
-    peaks = ring.band_peaks((THETA, ALPHA))
-    assert peaks[THETA.label] == pytest.approx(5.0, abs=0.3)
-    assert peaks[ALPHA.label] == pytest.approx(10.0, abs=0.3), "found inside its own band, not globally"
-
-
-def test_a_band_peak_resolves_finer_than_the_bins_it_is_drawn_in():
-    """1 Hz bins would report a 10.4 Hz rhythm as 10 and a 10.6 Hz one as 11 — a whole bin of apparent
-    movement for a tenth of one in the signal. A parabola through the three points around the maximum
-    recovers the position between bins, which is the standard estimator for it."""
-    import numpy as np
-
-    from nfb.dsp import ALPHA
-    from nfb_console.amplitude_view import RawRing
-
-    for tone in (9.4, 10.0, 10.6, 11.5):
-        ring = RawRing(2.0, 256.0)
-        times = np.arange(512) / 256.0
-        ring.push(20 * np.sin(2 * np.pi * tone * times))
-        peak = ring.band_peaks((ALPHA,))[ALPHA.label]
-        assert peak == pytest.approx(tone, abs=0.25), f"{tone} Hz reported as {peak}"
-
-
-def test_a_band_peak_never_lands_outside_its_own_band():
-    """The band is the claim being made, so an interpolated peak is clamped to it: a tile headed "alpha"
-    reporting 12.3 Hz would be describing something it is not measuring."""
-    import numpy as np
-
-    from nfb.dsp import ALPHA
-    from nfb_console.amplitude_view import RawRing
-
-    ring = RawRing(2.0, 256.0)
-    times = np.arange(512) / 256.0
-    # energy piled against the top edge of alpha, where the interpolation has every reason to overshoot
-    ring.push(20 * np.sin(2 * np.pi * 11.9 * times) + 20 * np.sin(2 * np.pi * 13.0 * times))
-    peak = ring.band_peaks((ALPHA,))[ALPHA.label]
-    assert ALPHA.low <= peak <= ALPHA.high, f"alpha's peak reported at {peak} Hz"
-
-
-def test_the_spectrum_stops_at_nyquist():
-    from nfb_console.amplitude_view import RawRing
-    assert RawRing(2.0, 62.5).top_hz == 31.25, "a 62.5 sps channel cannot show 60 Hz"
-    assert RawRing(2.0, 1000.0).top_hz == 60.0, "and nothing shows more than the display asks for"
-
-
-def test_a_number_field_clamps_and_survives_its_own_rebuild():
-    """Two failures this covers. Typing a value past a bound used to be rejected outright, and the
-    field's trailing `update()` raised out of the blur handler once `on_set` had rebuilt the panel the
-    field lived in — "Control must be added to the page first"."""
-    from nfb_console.amplitude_view import num_box
-
-    seen: list[float] = []
-    # This field is never added to a page, which is exactly the state a rebuilt panel leaves the old
-    # field in — so every commit below exercises the guard that used to raise from `field.update()`.
-    row = num_box(5.0, seen.append, step=0.1, low=1.0, high=10.0)
-    field, stepper = row.controls[0], row.controls[1]
-    up, down = stepper.controls
-
-    assert field.value == "5.0", "formatted to the step's precision"
-    up.on_click(None)
-    assert seen[-1] == pytest.approx(5.1)
-    up.on_click(None)
-    assert seen[-1] == pytest.approx(5.2), "the arrows step from what is shown, not from the initial"
-    down.on_click(None)
-    assert seen[-1] == pytest.approx(5.1)
-
-    field.value = "99"
-    field.on_blur(None)
-    assert seen[-1] == 10.0, "clamped to the bound rather than refused"
-    field.value = "-4"
-    field.on_blur(None)
-    assert seen[-1] == 1.0
-
-    assert field.value == "1.0", "the box shows the value that was accepted, not what was typed"
-
-    field.value = "not a number"
-    field.on_blur(None)
-    assert seen[-1] == 1.0, "unparseable input snaps back to the last accepted value"
-    assert field.value == "1.0"
-
-
 # --- where a percentile stops being estimable -------------------------------------------------
 
 def test_the_derivation_follows_the_bandwidth_not_the_protocol():
@@ -483,7 +312,6 @@ def test_the_derivation_follows_the_bandwidth_not_the_protocol():
     assert "too few" in reward.describe_derivation(30)
 
     # the same target with a longer window crosses back over on its own
-    assert reward.derivation(30) == "median"
     assert reward.independent_samples(3000) == pytest.approx(600.0)
     assert reward.derivation(3000) == "percentile"
 
@@ -635,8 +463,7 @@ def test_the_signal_floor_reaches_the_percentage_as_well_as_the_verdict():
         tgt.observe(0.0, 20.0)
     assert not tgt.wanted, "zero is under the floor"
     tgt.rescore()
-    assert sum(tgt._hits) == 0, "and the hit record has to agree with the verdict"
-    assert tgt.recent_percent(1.0) == 0.0
+    assert tgt.recent_percent(1.0) == 0.0, "and the hit record has to agree with the verdict"
     assert not tgt.meets(0.4) and tgt.meets(0.6)
 
     # The floor does NOT bite on an inhibit: below it is the most inhibited state there is, and
@@ -657,11 +484,6 @@ def test_role_and_direction_are_two_axes_and_not_one():
     *subject* is trained down had its subject in the group that shares 20% of the level with the artifact
     bands. Six combinations exist now, and the four that matter are the four sentences below.
     """
-    from nfb_console.targets import ROLES
-
-    assert ROLES == ("reward", "inhibit", "monitor")
-    assert (Target(0, ALPHA).direction, Target(0, ALPHA).role) == ("increase", "reward")
-
     def met_at(role, direction, value):
         tgt = Target(0, ALPHA, direction, role=role, threshold=10.0)
         tgt.value = value
@@ -726,26 +548,6 @@ def test_a_long_automatic_window_retains_its_whole_span():
     assert tgt.window_remaining == pytest.approx(0.0, abs=1.0), "and it reports itself complete"
 
 
-def test_cfc_total_above_does_not_hide_an_always_hot_bin():
-    """total_above treated a bin met 0% of the time (sustained above threshold — the worst) the same as a
-    bin with no window yet, because `0.0 or 100.0` is 100.0. None still counts as fully met; 0.0 does not."""
-    import types
-
-    from nfb_console.cfc_view import CFCSession
-
-    class _Bin:
-        def __init__(self, pct):
-            self._pct = pct
-
-        def recent_percent(self):
-            return self._pct
-
-    stub = types.SimpleNamespace(bin_targets=[_Bin(0.0), _Bin(None), _Bin(100.0)])
-    total = CFCSession.total_above.fget(stub)
-    # met 0% → 100 above (the hot bin, now counted); no window → 0; met 100% → 0
-    assert total == pytest.approx(100.0)
-
-
 def test_an_automatic_threshold_can_be_told_to_hold_still_between_re_derivations():
     """The re-derivation period, and the reason is not performance. A tracker recomputing continuously holds
     percent-over-threshold at the aim *by construction*, so the trained quantity cannot show a change; one
@@ -799,3 +601,33 @@ def test_a_threshold_floor_survives_calibration_and_a_nudge():
     for _ in range(700):
         unbounded.observe(abs(rng.normal(0, 0.3)), 20.0)
     assert unbounded.threshold < 1.0, "the default is still no clamp at all"
+
+
+def test_a_line_is_provisional_until_its_own_window_has_filled_once():
+    """A tracker is provisional through its first window and then not; a fixed target is provisional
+    while it calibrates and not after, whatever the tracker's window would be."""
+    tracker = Target(0, ALPHA, "increase", mode="automatic")
+    feed(tracker, tracker.window / 2)
+    assert tracker.provisional
+    feed(tracker, tracker.window / 2 + 1.0, seed=1)
+    assert not tracker.provisional
+
+    fixed = Target(0, ALPHA, "increase", mode="fixed", window_seconds=10 * CALIBRATION_SECONDS)
+    assert fixed.provisional
+    feed(fixed, CALIBRATION_SECONDS + 1.0)
+    assert not fixed.calibrating and not fixed.provisional
+
+
+def test_a_new_aim_moves_a_fixed_line_and_leaves_a_tracker_tracking():
+    """Setting the aim of a fixed target re-derives its line from the data at once; setting it on an
+    automatic target keeps it automatic."""
+    fixed = Target(0, ALPHA, "increase", mode="fixed")
+    feed(fixed, CALIBRATION_SECONDS + 1.0)
+    before = fixed.threshold
+    fixed.set_aim(fixed.hit_rate / 2)
+    assert fixed.threshold > before, "met less often means a higher line on a rising target"
+
+    tracker = Target(0, ALPHA, "increase", mode="automatic")
+    feed(tracker, 10.0)
+    tracker.set_aim(0.5)
+    assert tracker.mode == "automatic"

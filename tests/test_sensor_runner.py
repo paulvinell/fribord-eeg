@@ -73,3 +73,13 @@ def test_a_start_after_a_release_aside_waits_its_turn():
             what="the new reader")
     assert old.closed
     runner.release()
+
+
+def test_a_running_reader_describes_its_source_and_a_choice_of_none_releases_it():
+    """While a source runs, the runner says what the source says. Choosing no source ends the reader."""
+    gate = threading.Event()
+    gate.set()
+    runner = _running(gate)
+    assert runner.describe() == runner.source.describe()
+    assert runner.attach(PupilChoice(kind="off")) is False
+    assert not runner.running and runner.source is None

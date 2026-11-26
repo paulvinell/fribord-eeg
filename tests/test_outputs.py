@@ -105,3 +105,57 @@ def test_the_programs_outside_the_eeg_sessions_apply_their_outputs_on_the_output
     finally:
         pupil.stop_outputs()
     assert set(threads) == {"outputs"}
+
+
+def _level_program(wanted: bool):
+    """A program built on `LevelOutputs`, its outputs recorded and its pump never started."""
+    from types import SimpleNamespace
+
+    from nfb_console.feedback import FeedbackSettings
+    from nfb_console.outputs import LevelOutputs
+
+    class Program(LevelOutputs):
+        def __init__(self):
+            self.feedback = FeedbackSettings()
+            self._level, self.state_balance = 0.9, 0.1
+            self.target = SimpleNamespace(role="reward", wanted=wanted)
+            self.cues: list[str] = []
+            self.shown: list[float] = []
+            self._init_outputs()
+            self.display = SimpleNamespace(apply=lambda on, screen, low, high, x: self.shown.append(x),
+                                           release=lambda: None)
+            self.output_volume = SimpleNamespace(apply=lambda *a: None, release=lambda: None)
+            self.music = SimpleNamespace(apply=lambda *a, **k: None, release=lambda: None)
+
+        def channel_targets(self, channel):
+            return [self.target]
+
+        def cue(self, name, volume=None):
+            self.cues.append(name)
+
+    return Program()
+
+
+def test_the_shadow_follows_the_state_only_when_it_is_set_to():
+    """With a state on offer, the shadow still follows the level unless its setting names the state."""
+    program = _level_program(wanted=True)
+    program._drive_outputs()
+    program.feedback.shadow.follows = "state"
+    program._drive_outputs()
+    assert program.shown == [program._level, program.state_balance]
+
+
+def test_the_click_sounds_only_when_it_is_on_and_every_target_is_met():
+    """A program outside the EEG sessions clicks on the condition, and not while the click is off or a
+    target fails."""
+    failing = _level_program(wanted=False)
+    failing._drive_outputs()
+    assert failing.cues == []
+
+    met = _level_program(wanted=True)
+    met.feedback.click.enabled = False
+    met._drive_outputs()
+    assert met.cues == []
+    met.feedback.click.enabled = True
+    met._drive_outputs()
+    assert met.cues == [met.feedback.click.sound]

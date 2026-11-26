@@ -12,7 +12,7 @@ import random
 
 import pytest
 
-from nfb.hrv.compare import compare, delay, match_beats, rescue
+from nfb.hrv.compare import compare, contrast, delay, match_beats, rescue
 
 FOREHEAD_AT, REFERENCE_AT = 0.02, 0.13
 """Where in each heartbeat the two sites stamp it: the reference later, by pulse travel and radio."""
@@ -133,3 +133,14 @@ def test_a_beat_only_counts_as_one_site_where_both_were_recording():
     late_start = [f for f in forehead if f > 30.0]
     agreement = match_beats(late_start, reference)
     assert all(r > 29.5 for r in agreement.reference_only), "nothing from before the forehead began"
+
+
+def test_in_a_recording_shorter_than_the_start_the_contrast_is_against_its_first_third():
+    """When every beat lies inside the start, the first third of the beats is the start. A reference
+    pulse that halves after that third reads as half of what it was."""
+    beats = [1.0 + 0.92 * k for k in range(26)]
+    f_wave = _wave(beats, FOREHEAD_AT, 30.0, 26.0)
+    r_wave = _wave(beats, REFERENCE_AT, 100.0, 26.0, height=lambda b: 1.0 if b < 8.0 else 0.5)
+    pairs = [(b + FOREHEAD_AT, b + REFERENCE_AT) for b in beats[1:-2]]
+    got = contrast(f_wave, r_wave, pairs, start_s=30.0)
+    assert got.late == pytest.approx(0.5, abs=0.08)

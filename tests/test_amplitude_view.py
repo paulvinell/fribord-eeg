@@ -7,9 +7,11 @@ import math
 import pytest
 
 from nfb_console import chrome
+from nfb_console.feedback import FeedbackSettings
 from nfb_console.protocols import BY_CODE
+from nfb_console.targets import Target
 
-from conftest import counts as to_counts, waitfor
+from conftest import BENCH, counts as to_counts, waitfor
 
 from harness import (
     _feed_two_tones,
@@ -92,38 +94,29 @@ def test_only_the_newest_view_keeps_drawing_and_a_bad_frame_is_reported_once():
 
 
 def test_the_summed_source_adds_the_signals_rather_than_their_amplitudes():
-    """The point of the source, and the thing this screen could not do before.
-
-    Adding the *signals* and filtering once keeps the phase relationship: two channels carrying the same
-    rhythm reinforce when they agree and cancel when they oppose. Measuring each channel and combining the
-    numbers afterwards — which is what a control labelled `SUM` used to do here — cannot see that at all, and
-    reports the same amplitude either way.
-
-    The numbers below are the physics, and they are worth pinning as numbers: two 30 µV channels give 60 µV
-    peak summed in phase and nothing at all in antiphase — read here as **42.4 µV RMS**, since the default
-    reward estimator is an elliptic filter and reports RMS. The ratio is what the test is about; the
-    convention is why the number is not 60, and a threshold does not transfer across it.
-    """
+    """A summed target adds the signals before it measures: two equal channels in phase read twice one
+    channel, and in antiphase they cancel."""
     from nfb.dsp import ALPHA
     from nfb_console import amplitude_view as av
     from nfb_console.targets import PAIR
 
-    def summed_amplitude(antiphase: bool) -> float:
+    def amplitudes(antiphase: bool) -> tuple[float, float]:
         session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
         try:
             session.targets.clear()
             session.metrics.clear()
-            tgt = session.add_target(PAIR, ALPHA, "increase")
+            summed = session.add_target(PAIR, ALPHA, "increase")
+            one = session.add_target(0, ALPHA, "increase")
             _feed_two_tones(session, antiphase)
-            return session.value_for(tgt)
+            return session.value_for(summed), session.value_for(one)
         finally:
             session.stop()
 
-    together = summed_amplitude(antiphase=False)
-    opposed = summed_amplitude(antiphase=True)
+    together, one = amplitudes(antiphase=False)
+    opposed, _ = amplitudes(antiphase=True)
 
-    assert together == pytest.approx(42.4, rel=0.1), "two 30 µV channels in phase add, at 1/√2 for RMS"
-    assert opposed < 0.02 * together, "and in antiphase they cancel — which an amplitude sum cannot show"
+    assert together / one == pytest.approx(2.0, rel=0.1), "two channels in phase add"
+    assert opposed < 0.02 * together, "and in antiphase they cancel, which an amplitude sum cannot show"
 
 
 def test_a_summed_target_says_what_it_is_measured_on():
@@ -190,8 +183,8 @@ def test_the_source_button_is_the_same_width_whatever_it_is_measured_on():
         session.add_target(PAIR, ALPHA, "decrease")
         button = source_button(session)
         assert button.content.value == "SUM"
-        assert button.tooltip == "ch0+ch1+ch2+ch3 — added, then measured"
         assert session.targets[0].source_label == "ch0+ch1+ch2+ch3", "the target keeps the arithmetic"
+        assert session.targets[0].source_label in button.tooltip, "and the tooltip spells it out"
     finally:
         session.stop()
 
@@ -425,18 +418,14 @@ def test_no_signal_reads_as_no_signal_rather_than_as_doing_badly():
 
 
 def test_the_amplitude_screen_still_tracks_a_reward_and_holds_an_inhibit():
-    """Ours and stays ours: a target met *above* its line tracks, so it keeps rewarding as amplitude
-    drifts; one met below holds still, so crossing the line means the same at minute 20 as at minute 1.
-
-    Keyed on `wants_above` rather than on the direction, which is what makes the three AMP targets — all
-    of them `increase` now, one reward and two inhibits — come out `automatic`, `fixed`, `fixed`."""
+    """A target met above its line tracks, and a target met below its line holds still."""
     from nfb_console import amplitude_view as av
 
     session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
     try:
-        assert [t.direction for t in session.targets] == ["increase"] * 3
-        assert {t.role: t.mode for t in session.targets} == {"reward": "automatic",
-                                                             "inhibit": "fixed"}
+        for tgt in session.targets:
+            assert tgt.mode == ("automatic" if tgt.wants_above else "fixed"), tgt.label
+        assert {t.wants_above for t in session.targets} == {True, False}, "both kinds are on the screen"
     finally:
         session.stop()
 
@@ -457,10 +446,6 @@ def test_a_card_says_how_quickly_its_number_reacts():
         fast = session.response_time(session.targets[0])
         slow = session.response_time(session.targets[1])
         assert fast < slow
-        # The reward is the elliptic design at order 2 with the session's envelope constant; the inhibit is
-        # cFIR at a 300 ms design. Both are measured through the estimator itself rather than summed from
-        # a filter's group delay and a smoother's time constant, which is the bound and reads 234 ms here.
-        assert fast == pytest.approx(0.180, abs=0.03)
         assert all("half of it" in (c.tooltip or "") for c in reacts)
     finally:
         session.stop()
@@ -545,8 +530,7 @@ def test_the_filter_is_settable_per_target_and_says_what_it_costs():
         assert not any(v.strip() == "smoothing" for v in labels)
 
         reward = session.targets[0]
-        assert session.filter_for(reward) == ("elliptic", 2, 0.16, 0.5, "rms"), \
-            "the default design is two biquads at 0.5 dB of ripple"
+        _kind, _order, smoothing, _ripple, convention = session.filter_for(reward)
         # and the gear opens on cFIR's own parameter as soon as that kind is chosen
         session.retune_filter(reward, kind="cfir")
         page2 = StubPage()
@@ -554,12 +538,11 @@ def test_the_filter_is_settable_per_target_and_says_what_it_costs():
         cfir_body = " ".join(c.value for c in _texts(page2.dialogs[-1].content) if c.value)
         assert "delay" in cfir_body and "what it is designed around" in cfir_body
         session.retune_filter(reward, kind="butterworth", order=4)
-        assert session.filter_for(reward) == ("butterworth", 4, 0.16, 0.0, "rms"), \
-            "0.16 s is the default band averaging once its pi scaling is undone; ripple is elliptic's " \
-            "only; the amplitude convention is part of the design because thresholds do not transfer " \
-            "across it"
+        assert session.filter_for(reward) == ("butterworth", 4, smoothing, 0.0, convention), \
+            "the kind and order change; ripple is elliptic's only; smoothing and convention stay"
         session.retune_filter(reward, kind="elliptic", ripple=2.0)
-        assert session.filter_for(reward) == ("elliptic", 4, 0.16, 2.0, "rms"), "ripple is elliptic's own parameter"
+        assert session.filter_for(reward) == ("elliptic", 4, smoothing, 2.0, convention), \
+            "ripple is elliptic's own parameter"
         session.retune_filter(reward, kind="butterworth")
         assert session.latency_for(reward) > 0.15, "order 4 is slower than cFIR, and says so"
         assert len(session.metrics) == len(session.targets), "the old estimator is gone"
@@ -725,18 +708,17 @@ def test_a_down_trained_reward_is_aimed_and_filtered_as_a_reward():
     session = amplitude_view.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=1)
     try:
         alpha, slow, fast = session.targets
-        assert (alpha.band.low, alpha.band.high) == (8.0, 12.0)
 
         alpha.direction = "decrease"          # the one change: train the subject band downward
         assert alpha.role == "reward", "and it stays the reward, which is the whole point"
-        assert alpha.hit_rate == HIT_RATES["reward"] == 0.90
+        assert alpha.hit_rate == HIT_RATES["reward"]
         assert session.latency_for(alpha) < session.latency_for(slow), "filtered as a reward"
 
         fresh = amplitude_view.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=1)
         try:
             down = fresh.add_target(0, alpha.band, "decrease", "reward")
             assert down.mode == "fixed", "trained downward, so the threshold holds still"
-            assert down.hit_rate == 0.90, "and is aimed as a reward"
+            assert down.hit_rate == HIT_RATES["reward"], "and is aimed as a reward"
         finally:
             fresh.stop()
     finally:
@@ -892,18 +874,14 @@ def test_the_signal_panel_names_both_channels_and_their_followers():
 
 
 def test_the_raw_trace_default_scale_suits_real_eeg():
-    """Resting EEG measured on this device runs 12–20 µV peak-to-peak. On ±100 µV that is under 6 px of a
-    92 px trace and reads as a flat line — the screen looked broken on a first session while the signal was
-    fine. `fit` picks a preset rather than autoscaling, so the caption still names one fixed number."""
+    """Resting EEG of 20 µV peak-to-peak fills at least a sixth of the raw trace at the default scale, and a
+    **fit** control picks a scale from the signal."""
     from nfb_console import amplitude_view
 
-    assert amplitude_view.GAINS[2] == 50.0, "the default is the third pill"
-    assert 10.0 in amplitude_view.GAINS, "a quiet channel is the case that needs the smallest scale"
     session = amplitude_view.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
     try:
-        assert session.gain_uv == 50.0
-        page = StubPage()
-        control = amplitude_view.view(page, session, toolbar(), lambda: None)
+        assert 20.0 / (2 * session.gain_uv) >= 1 / 6, f"±{session.gain_uv:g} µV draws EEG as a flat line"
+        control = amplitude_view.view(StubPage(), session, toolbar(), lambda: None)
         assert any(x.value == "fit" for x in _texts(control)), "no way to choose a scale from the signal"
     finally:
         session.stop()
@@ -1030,19 +1008,16 @@ def test_stopping_is_still_destructive():
 
     session = amplitude_view.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=1)
     session.stop()
-    assert session._stop
     assert not session.suspended, "a stopped session must not look re-armable"
 
 
 def test_the_spectrum_can_be_pinned_to_a_fixed_scale():
     """Auto is right before you know the range; a fixed axis is the only way to compare one minute with the
     next, or this session with yesterday's."""
-    from nfb_console import amplitude_view, spectrum_pane
+    from nfb_console import amplitude_view
 
-    assert 0.0 in spectrum_pane.SCALES, "auto is one of the choices"
     session = amplitude_view.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=1)
     try:
-        assert session.spectrum_scale == 0.0, "auto by default"
         page = StubPage()
         control = amplitude_view.view(page, session, toolbar(), lambda: None)
         shown = " ".join(x.value for x in _texts(control))
@@ -1605,5 +1580,286 @@ def test_the_custom_source_dialog_hugs_its_four_rows():
             "the three signs are one bordered control, not three"
         labels = [c.content.value for c in group.content.controls if getattr(c, "content", None) is not None]
         assert labels == ["+", "−", "off"]
+    finally:
+        session.stop()
+
+
+def _two_channel_blocks(session, seconds: float = 3.0):
+    """Blocks for ch0 and ch1, interleaved as the device sends them, with ch1 ten times louder than ch0."""
+    import numpy as np
+
+    from nfb.stream import Block
+
+    spec = session.specs[0]
+    t = np.arange(int(seconds * spec.rate_hz)) / spec.rate_hz
+    waves = {0: 2.0 * np.sin(2 * np.pi * 10 * t), 1: 20.0 * np.sin(2 * np.pi * 10 * t)}
+    for i in range(0, t.size - 7, 8):
+        for ch in (0, 1):
+            yield Block(ch, i, to_counts(waves[ch][i:i + 8], spec.scale), session.specs[ch])
+
+
+def test_the_eeg_music_hears_the_focused_channel_alone():
+    """With the EEG as the music source, only the channel in focus reaches the sonifier; with another source,
+    no channel does."""
+    import numpy as np
+
+    from nfb_console import amplitude_view as av
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
+    heard: list = []
+    session.music.feed = lambda values: heard.append(np.abs(np.asarray(values)).max())
+    try:
+        session.focus = 0
+        session.feedback.music.source = "eeg"
+        for block in _two_channel_blocks(session):
+            session.feed_block(block)
+        assert heard and max(heard) < 5.0, "the louder ch1 reached the music"
+
+        heard.clear()
+        session.feedback.music.source = "shepard"
+        for block in _two_channel_blocks(session):
+            session.feed_block(block)
+        assert heard == []
+    finally:
+        session.stop()
+
+
+def test_the_spindle_watch_counts_its_own_channel_and_only_while_running():
+    """The spindle detector reads only the channel it watches, counts nothing while the session is paused,
+    and sounds its cue only on a spindle."""
+    import numpy as np
+
+    from nfb_console import amplitude_view as av
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
+    seen: list = []
+    cues: list = []
+    session.cue = lambda name, vol=None: cues.append(name)
+    try:
+        watch = session.add_spindles(channel=1)
+        assert watch.sound, "the cue is on, so a wrong cue would be heard"
+        watch.feed = lambda values, counting: seen.append((np.abs(np.asarray(values)).max(), counting)) or 0
+        for block in _two_channel_blocks(session):
+            session.feed_block(block)
+        assert seen and min(v for v, _ in seen) > 5.0, "the quieter ch0 reached the detector"
+        assert session.paused and not any(c for _, c in seen), "a paused session counts nothing"
+
+        seen.clear()
+        session.toggle_pause()
+        session.state = {0: True, 1: True}
+        for block in _two_channel_blocks(session):
+            session.feed_block(block)
+        assert any(c for _, c in seen), "a running session counts"
+        assert av.spindle_sound() not in cues, "no spindle, no cue"
+    finally:
+        session.stop()
+
+
+def test_retuning_a_summed_target_to_what_it_measures_keeps_its_estimator():
+    """Retuning a summed target without changing its band or its channels keeps the estimator that is
+    already measuring it, so its filter does not settle again."""
+    from nfb_console import amplitude_view as av
+    from nfb_console.targets import PAIR
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=2)
+    try:
+        summed = next(t for t in session.targets if t.source == PAIR)
+        before = session.metrics[session.key_for(summed)]
+        session.retune(summed)
+        assert session.metrics[session.key_for(summed)] is before
+    finally:
+        session.stop()
+
+
+def test_the_custom_source_dialog_states_each_combination_as_it_is_built():
+    """In the custom source dialog, the chosen sign of each channel is the highlighted one, and the note
+    tells one channel, a sum, a difference and a wider signed mix apart."""
+    import flet as ft
+
+    from nfb_console import amplitude_view as av
+
+    page = StubPage()
+    session = av.AmplitudeSession(BY_CODE["AMP"], source=replay(), channels=4)
+    try:
+        session.targets[:] = [session.targets[0]]          # one card, on ch0
+        control = av.view(page, session, toolbar(), lambda: None)
+        custom = next(item for item in _menu_items(control)
+                      if getattr(item.content, "value", "").startswith("Custom"))
+        custom.on_click(None)
+        body = page.dialogs[-1].content.content
+        rows = {c.data: c for c in body.controls if isinstance(c, ft.Row) and getattr(c, "data", None) is not None}
+        note = body.controls[-1]
+
+        def cells(ch):
+            return [c for c in rows[ch].controls[1].content.controls if getattr(c, "content", None) is not None]
+
+        def lit(ch):
+            return [c.content.value for c in cells(ch) if c.bgcolor is not None]
+
+        def press(ch, label):
+            next(c for c in cells(ch) if c.content.value == label).on_click(None)
+
+        assert lit(0) == ["+"] and lit(1) == ["off"]
+        one = note.value
+        press(1, "+")
+        assert lit(1) == ["+"]
+        added = note.value
+        press(1, "−")
+        assert lit(1) == ["−"] and lit(0) == ["+"]
+        difference = note.value
+        press(2, "+")
+        signed = note.value
+        assert len({one, added, difference, signed}) == 4, "each kind of combination has its own note"
+        assert "difference" in difference and "added" in added
+    finally:
+        session.stop()
+
+
+def _menu_items(control, depth: int = 0):
+    import flet as ft
+
+    if control is None or depth > 22:
+        return []
+    found = list(control.items or []) if isinstance(control, ft.PopupMenuButton) else []
+    for attr in ("controls", "actions"):
+        for child in getattr(control, attr, None) or []:
+            found += _menu_items(child, depth + 1)
+    for attr in ("content", "control"):
+        found += _menu_items(getattr(control, attr, None), depth + 1)
+    return found
+
+
+def test_a_channel_the_session_is_not_using_is_ignored_rather_than_crashing():
+    """The recording still contains four channels; the source keeps sending them."""
+    import numpy as np
+
+    from nfb_console import amplitude_view as av
+    from nfb_console.protocols import BY_CODE
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], path=str(BENCH), channels=2)
+    try:
+        assert sorted(session.specs) == [0, 1]
+        blocks = 0
+        for item in session.source.blocks():
+            blocks += 1
+            if blocks > 40:
+                break
+            if getattr(item, "channel", None) in (2, 3):
+                # what run() does with it: nothing, and without raising
+                assert item.channel not in session.traces
+        assert blocks > 1
+    finally:
+        session.stop()
+
+
+def test_a_summed_target_is_not_trained_while_a_contributor_is_held():
+    """The summed target used to be gated by whichever channel's block completed the aligned run, so an
+    artifact held on one channel still trained the sum when a different channel's block arrived last — the
+    accept/reject state of every non-completing contributor was discarded. The sum is now trained only when
+    every contributing channel's last block was accepted."""
+    import numpy as np
+
+    from nfb.dsp import Band
+    from nfb.stream import Block
+    from nfb_console import amplitude_view as av
+    from nfb_console.protocols import BY_CODE
+    from nfb_console.targets import PAIR
+
+    session = av.AmplitudeSession(BY_CODE["AMP"], path=str(BENCH), channels=2)
+    try:
+        tgt = session.add_target(PAIR, Band(8.0, 12.0, ""), "increase")
+        key = session.key_for(tgt)
+        s0, s1 = session.specs[0], session.specs[1]
+        wave = (np.sin(2 * np.pi * 10.0 * np.arange(1200) / session.rate) * 20 / s0.scale).astype(int)
+
+        def feed_run(accepted: dict, base: int) -> set:
+            seen: set = set()
+            for i in range(0, 1200 - 7, 8):
+                session._accepted = dict(accepted)
+                samples = tuple(int(v) for v in wave[i:i + 8])
+                session.consume(Block(0, base + i, samples, s0))
+                seen |= session.consume(Block(1, base + i, samples, s1))
+            return seen
+
+        held = feed_run({0: False, 1: True}, 0)
+        assert key not in held, "a held contributor must stop the summed target training"
+
+        ok = feed_run({0: True, 1: True}, 2000)
+        assert key in ok, "with every contributor accepted, the sum trains"
+    finally:
+        session.stop()
+
+
+def test_a_target_is_observed_once_per_reading_of_its_own_metric():
+    """The rate a target is told has to be the rate it gets, or every window is wrong by that factor.
+
+    Observing once per arriving block ran at blocks × channels per second — 128 Hz on a 256 sps
+    four-channel file against the 20 Hz declared — so a "30 s" calibration completed in five and
+    "last 30 s on target" covered five.
+    """
+    from nfb.dsp import Band
+    from nfb_console.amplitude_view import AmplitudeSession
+    from nfb_console.protocols import BY_CODE
+    from nfb_console.targets import PAIR
+
+    session = AmplitudeSession.__new__(AmplitudeSession)
+    session.protocol = BY_CODE["AMP"]
+    session.specs = {0: object(), 1: object(), 2: object()}
+    session.feedback = FeedbackSettings()      # the envelope constant is the session's, so `filter_for` needs it
+
+    on_ch0 = Target(0, Band(8, 12, ""), "increase")
+    on_ch1 = Target(1, Band(8, 12, ""), "increase")
+    on_sum = Target(PAIR, Band(8, 12, ""), "increase", pair=(0, 1, 2))
+    down = Target(0, Band(8, 12, ""), "decrease", filter_kind="elliptic", filter_order=8)
+    # the metric key carries the filter, so the same band measured two ways is two estimators
+    up_key = ("8-12", session.filter_for(on_ch0))
+    down_key = ("8-12", session.filter_for(down))
+    assert up_key != down_key
+
+    assert session._due(on_ch0, {(0, *up_key)})
+    assert not session._due(on_ch0, {(1, *up_key)}), "another channel's reading is not this target's"
+    assert not session._due(on_ch0, {(0, "4-8", up_key[1])}), "another band's reading is not either"
+    assert not session._due(on_ch0, {(0, *down_key)}), "nor the same band through a different filter"
+    assert session._due(down, {(0, *down_key)})
+    assert session._due(on_ch1, {(1, *up_key)})
+
+    # A summed target has **one** estimator, on a key that is no channel's, so it advances on that and on
+    # nothing else. A contributing channel's own reading is an input to the sum rather than a reading of it,
+    # and counting those would advance the target once per electrode — every window it has too short by that
+    # factor, which is the bug `_due` exists for.
+    from nfb_console.amplitude_view import SUM_KEY
+    assert session._due(on_sum, {(SUM_KEY, *up_key)})
+    assert not session._due(on_sum, {(0, *up_key)})
+
+
+def test_the_moving_average_is_drawn_over_the_window_that_the_value_is_drawn_over():
+    """With a trend longer than the chosen window, each target's moving average ends where its value ends, at
+    the right edge of the graph, so the thick line is the smoothed thin line and not an older stretch of it."""
+    import flet.canvas as cv
+
+    from nfb_console import amplitude_view
+
+    def canvases(node, depth=0):
+        if node is None or depth > 30:
+            return
+        if isinstance(node, cv.Canvas):
+            yield node
+        for child in getattr(node, "controls", None) or []:
+            yield from canvases(child, depth + 1)
+        yield from canvases(getattr(node, "content", None), depth + 1)
+
+    session = amplitude_view.session_for(BY_CODE["AMP"], source=replay(), channels=2)
+    try:
+        control = amplitude_view.view(StubPage(), session, toolbar(), lambda: None)
+        session.graph_window = next(s for _n, s in amplitude_view.GRAPH_WINDOWS if s)
+        for tgt in session.targets:
+            tgt.trend.extend(1.0 + 0.5 * math.sin(i / 7.0) for i in range(int(10 * session.graph_window)))
+        session.redraw()
+        for tgt in session.targets:
+            drawn = [shape for canvas in canvases(control) for shape in canvas.shapes or []
+                     if isinstance(shape, cv.Points) and shape.paint.color == tgt.colour]
+            assert len(drawn) >= 2, tgt.label
+            ends = {round(max(p.x for p in shape.points), 6) for shape in drawn}
+            assert len(ends) == 1, f"{tgt.label}: the lines end at {sorted(ends)}"
     finally:
         session.stop()

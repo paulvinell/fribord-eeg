@@ -50,6 +50,15 @@ def test_a_second_the_feed_never_delivered_is_a_hole_not_a_clean_second():
     assert missing == pytest.approx(8 / 12)
 
 
+def test_an_observation_with_no_samples_does_not_fill_a_hole():
+    """A second in which the feed delivered no samples is missing, even when an empty block arrived."""
+    log = QualityLog()
+    feed(log, 0, 1)
+    log.observe(0, 5.5, 0, 0, False)
+    feed(log, 0, 1, start=9)
+    assert all(np.isnan(cells[0]) for cells in log.series(0)[1:9]), "seconds 1 to 8 are holes"
+
+
 def test_the_span_is_a_worst_case_summary_not_an_average_when_it_is_drawn():
     """A five-second dropout has to survive being drawn two hours wide, so a pixel takes the worst
     cell inside it rather than the mean."""

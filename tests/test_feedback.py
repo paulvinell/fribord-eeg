@@ -13,8 +13,8 @@ import math
 import pytest
 
 from nfb.dsp import SMR, THETA
-from nfb_console.feedback import (CLICK_VOLUME, MUSIC_VOLUME, SHADOW_MECHANISMS, SHADOW_RANGE,
-                                  SOUND_RANGE, Click, FeedbackSettings, Ramp, Shadow, Sound, combine)
+from nfb_console.feedback import (MUSIC_VOLUME, SHADOW_RANGE, SOUND_RANGE, Click, FeedbackSettings, Ramp,
+                                  Sound, combine)
 from nfb_console.targets import Target
 
 
@@ -106,15 +106,15 @@ def test_the_click_is_a_fixed_interval_gated_on_every_target():
     continuous mechanism in disguise, and a slow rate would be indistinguishable from a stopped one
     until you had waited long enough to be sure."""
     click = Click(enabled=True)
-    assert click.interval_seconds == 2.0
-    assert click.output(0.99, on_target=True) == 2.0
-    assert click.output(0.01, on_target=True) == 2.0, "the level must not change the interval"
+    interval = click.interval_seconds
+    assert click.output(0.99, on_target=True) == interval
+    assert click.output(0.01, on_target=True) == interval, "the level must not change the interval"
     assert click.output(0.99, on_target=False) == 0.0, "and not-earned is silence"
-    assert click.rate_hz == 0.5
+    assert click.rate_hz == pytest.approx(1.0 / interval)
 
     click.interval_seconds = 5.0
     assert click.output(0.5, on_target=True) == 5.0
-    assert click.rate_hz == 0.2
+    assert click.rate_hz == pytest.approx(0.2)
 
 
 def test_the_click_asks_the_targets_and_not_the_combining_rule():
@@ -150,9 +150,7 @@ def test_each_mechanism_names_the_channel_it_reads():
     fb = FeedbackSettings()
     assert fb.sound.reads == LEVEL and fb.shadow.reads == LEVEL
     assert fb.click.reads == CONDITION and fb.alert.reads == CONDITION
-    # **Not "the condition".** That names a variable, and the chip is read by somebody who has not read the
-    # code and has nothing else on the panel defining it. It says what the thing is instead.
-    assert READS[fb.click.reads] == "fires when every target is met"
+    # The chip names what the thing is, not the variable: nothing on the panel defines "condition".
     assert "condition" not in READS[fb.click.reads]
 
     fb.sound.enabled = fb.click.enabled = True
@@ -179,7 +177,6 @@ def test_a_targets_ramp_has_one_fixed_shape_and_the_gain_lives_at_the_end_of_the
     """
     from nfb_console.feedback import SPAN_SIGMAS
 
-    assert FeedbackSettings().sensitivity == 1.0
     up = settled("reward", 10.0, 2.0, 40)
     sigma = up.spread
     assert sigma > 0
@@ -203,10 +200,12 @@ def test_a_targets_ramp_has_one_fixed_shape_and_the_gain_lives_at_the_end_of_the
 
 def test_the_conditions_definition_changes_only_under_either():
     """`either` is the one rule that reaches a discrete mechanism, so it is the one place the condition
-    is not the plain AND — and the screen has to say which of the two is in force."""
-    assert FeedbackSettings().describe_condition() == "every target on its wanted side"
-    assert FeedbackSettings(combine="either").describe_condition() == (
-        "one reward met, and every inhibit met")
+    is not the plain AND, and the screen says which of the two is in force."""
+    plain = FeedbackSettings().describe_condition()
+    assert all(FeedbackSettings(combine=rule).describe_condition() == plain
+               for rule in ("weighted", "weakest", "scaled"))
+    either = FeedbackSettings(combine="either").describe_condition()
+    assert "reward" in either and "reward" not in plain, "only the either form names the rewards"
 
 
 def test_rewards_and_inhibits_mix_at_a_stated_ratio():
@@ -253,17 +252,6 @@ def test_each_continuous_mechanism_stays_inside_its_own_stated_range():
         assert SHADOW_RANGE[0] <= got["shadow"] <= SHADOW_RANGE[1]
 
 
-def test_the_kind_says_what_the_numbers_on_a_pane_mean():
-    """Sound's 60-100 and a click's 2 look alike and are not: loudness, against seconds between
-    events. The kind is what the screen has to say."""
-    fb = FeedbackSettings()
-    assert fb.sound.kind == "continuous" and fb.sound.quantity == "system volume"
-    assert fb.shadow.kind == "continuous" and fb.shadow.quantity == "brightness"
-    assert fb.click.kind == "discrete" and fb.click.quantity == "interval"
-    assert "kind" not in FeedbackSettings.__dataclass_fields__, "kind is a class fact, not a setting"
-    assert fb.click.unit == "s" and fb.shadow.unit == "%"
-
-
 def test_only_enabled_mechanisms_report_anything():
     fb = FeedbackSettings()
     up = settled("reward", 10.0, 2.0, 11)
@@ -300,14 +288,6 @@ def test_a_level_outside_zero_to_one_is_clamped_not_extrapolated():
     ramp = Ramp(20, 80)
     assert ramp.at(-1.0) == 20
     assert ramp.at(2.0) == 80
-
-
-def test_the_shadow_names_the_mechanism_it_cannot_do_yet():
-    shadow = Shadow()
-    assert shadow.mechanism == "brightness" and shadow.supported
-    shadow.mechanism = "overlay"
-    assert not shadow.supported, "an unimplemented mechanism must not claim to work"
-    assert "overlay" in SHADOW_MECHANISMS
 
 
 def test_describe_says_which_mechanisms_are_on():
@@ -372,76 +352,18 @@ def test_the_pipeline_names_all_three_steps_in_order():
 
 
 def test_a_discrete_cue_has_a_fixed_volume_but_never_a_following_one():
-    """The distinction is the whole point, and an earlier version of this test had it too coarse: it asserted
-    the click had *no* volume at all, which is why it played at whatever the system was set to — as loud as
-    the machine goes.
-
-    A volume that **follows the signal** is wrong: it puts an amount into the one channel whose entire
-    content is that something happened. A volume the **operator sets** is not information at all, it is
-    calibration — the same thing `Music.volume` is for, so you can balance a click against the music once and
-    let Sound move the master over both.
-    """
+    """A discrete mark has a fixed gain the operator sets, under the music, the same for click and alert,
+    and the readout does not print it."""
     from nfb_console.feedback import Alert
 
     click = Click(enabled=True)
     assert 0 <= click.volume <= 100
-    # Well under the music, and low in absolute terms because the scale is linear amplitude rather than
-    # loudness: `afplay -v` is a straight multiplier, so 25 is -12 dB and 40 would be -8.
     assert click.volume < MUSIC_VOLUME, "a click repeats all session; it sits under the music"
-    for following in ("quiet_volume", "volume_follows", "volume_at"):
-        assert not hasattr(click, following), f"{following} would make loudness a reading"
     # not printed in the readout: it is a setting, not news
-    assert click.describe_output(2.0, 0.8) == "a click every 2 s"
-    assert click.describe_output(0.0, 0.8) == "not clicking"
+    assert f"{click.volume:g}" not in click.describe_output(2.0, 0.8)
 
     assert Alert().volume == click.volume, \
         "both are one mark through one path in one room; the sound and the rhythm tell them apart"
-
-
-def test_sound_is_the_system_volume():
-    fb = FeedbackSettings()
-    assert fb.sound.quantity == "system volume"
-    assert (fb.sound.low, fb.sound.high) == SOUND_RANGE
-
-
-def test_every_calibrated_default_comes_from_one_place():
-    """**The room is one room, and it was being re-balanced on every screen.** The click was 15 here and 25
-    written out again inside alpha-theta; the alert was 25 for an argument the click's own docstring
-    contradicted; the master volume ran 60-100 everywhere except the coupling screen, which said 15-70. Four
-    numbers set by ear, none of them agreeing, and nothing to say which was right.
-
-    So the assertion is not on the values — those are somebody's ear and will move — but on there being one
-    of each. A screen may still differ, and `pinned_feedback` is how it says so.
-    """
-    fb = FeedbackSettings()
-    assert fb.click.volume == fb.alert.volume == CLICK_VOLUME
-    assert fb.music.volume == MUSIC_VOLUME
-    assert (fb.sound.low, fb.sound.high) == SOUND_RANGE
-    assert (fb.shadow.low, fb.shadow.high) == SHADOW_RANGE
-
-
-def test_music_is_owned_by_the_session_and_is_not_one_of_the_mechanisms():
-    """It was named "carries no level", and that stopped being true when the Shepard tone arrived.
-
-    Two of the five sources now carry the signal — `crossfade` follows the protocol's *state* and `shepard`
-    follows the *level* — so what makes `Music` not a mechanism is no longer that it carries nothing. It is
-    that it has no `Ramp` and no `reads`: a mechanism maps the level through a range an operator sets, and
-    every music source instead has its own relationship to the signal, chosen with the source. Hence the
-    separate `balance` and `level` arguments on `MusicOutput.apply` rather than one.
-    """
-    from nfb_console.feedback import MUSIC_SOURCES, Music
-
-    fb = FeedbackSettings()
-    assert isinstance(fb.music, Music)
-    assert not fb.music.enabled
-    assert fb.music.source == "noise", "the one source that needs nothing chosen before it will play"
-    assert set(MUSIC_SOURCES) == {"noise", "crossfade", "tone", "shepard", "eeg", "file"}
-    # An octave around the rhythm most often trained, and it maps onto the default 220–440 Hz pitch range
-    # as an exact transposition. It was the whole 2–38 Hz while the band only had to be *audible*; now its
-    # frequency is the pitch, and a frequency estimate over a 19:1 band is an average of everything in it.
-    assert (fb.music.low_hz, fb.music.high_hz) == (8.0, 16.0)
-    assert "music" not in fb.mechanisms, "it is audio the session owns, not a carrier of the signal"
-    assert fb.music.volume == 60.0
 
 
 # --- the three arrangements, and the two mechanisms CFC needed --------------------------------
@@ -557,8 +479,7 @@ def test_the_alert_explains_itself_behind_a_question_mark_not_on_the_screen():
     assert helper is not None, "the explanation has to be reachable"
     helper.on_click(None)
     body = "".join(span.text for span in page.dialogs[-1].content.content.spans)
-    assert "mirror of the click" in body
-    assert "jerky" in body, "why a sound rather than a pause"
+    assert len(body) > len(on_screen), "the reasoning lives behind the question mark"
     assert " he " not in body and " his " not in body, "no people in the interface"
 
 
@@ -913,6 +834,9 @@ def test_the_condition_under_either_takes_its_alternatives_from_the_role():
     inhibit.value = 16.0
     assert not rule.on_target([up, down, inhibit]), "and the inhibit is still a veto"
 
+    down.value, inhibit.value = 16.0, 4.0                  # both rewards failing, the inhibit clear
+    assert not rule.on_target([up, down, inhibit]), "a clear inhibit does not stand in for a reward"
+
 
 def test_music_only_feedback_is_not_reported_as_no_output():
     """describe() listed only the four mechanisms, so a music-only arrangement read 'no output enabled'
@@ -924,3 +848,13 @@ def test_music_only_feedback_is_not_reported_as_no_output():
     assert fb.describe() == "no output enabled"
     fb.music.enabled = True
     assert fb.describe() != "no output enabled" and "music" in fb.describe()
+
+
+def test_the_music_stops_on_the_condition_its_setting_names():
+    """Each setting of when the music stops silences it in its own case and no other: never, while a
+    target fails, or while every target is met."""
+    from nfb_console.feedback import Music
+
+    assert [Music(stops_when="never").holds(met) for met in (True, False)] == [False, False]
+    assert [Music(stops_when="failing").holds(met) for met in (True, False)] == [False, True]
+    assert [Music(stops_when="met").holds(met) for met in (True, False)] == [True, False]

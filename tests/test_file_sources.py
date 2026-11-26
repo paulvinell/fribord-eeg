@@ -18,7 +18,6 @@ from nfb_console.inputs import InputChoice, is_frame_recording
 
 from conftest import BENCH
 
-SAMPLE_EXPORT = Path("/Users/paul/personal/emotional-n-back/data/eeg/Amplitude.recording")
 FRAMES = BENCH
 """The generated bench recording rather than `sessions/latest.jsonl.gz`, which is gitignored — so the frame
 replay test was skipped on any clone that had not recorded one, which is every fresh one."""
@@ -55,13 +54,16 @@ def test_a_file_with_no_samples_is_an_error_not_an_empty_stream(tmp_path):
 
 
 def test_an_all_zero_column_is_reported_inactive(tmp_path):
-    """Exports pad unused channels with zeros, and a flat line is otherwise indistinguishable from a
-    working channel on a dead subject."""
+    """A column of zeros is a padded, unused channel: it reports the device's state for an open input, so a
+    screen says "no signal" for it and never shows it as a working channel at a flat 0 µV."""
+    from nfb.stream import NO_SIGNAL
+
     path = write(tmp_path, "Sampling rate: 100\n1.0\t0\n2.0\t0\n")
     src = SampleFileSource(path, loop=False, realtime=False)
     assert src.active == [True, False]
     by_channel = {b.channel: b for b in src.blocks() if isinstance(b, Block)}
     assert by_channel[0].valid and not by_channel[1].valid
+    assert by_channel[1].state == NO_SIGNAL, "an open input, not an over-range one"
 
 
 def test_ragged_rows_are_padded_rather_than_shifting_channels(tmp_path):
@@ -147,15 +149,6 @@ def test_a_looped_frame_recording_keeps_counting_without_a_seam():
         assert nxt.start_index == prev.end_index, "contiguous across the seam, no jump"
     assert blocks0[0].start_index == 0
     assert blocks0[-1].start_index > 30000, "must have played past the end of the file at least once"
-
-
-@pytest.mark.skipif(not SAMPLE_EXPORT.exists(), reason="no sample export on this machine")
-def test_the_real_export_reads_as_two_live_channels_at_256_hz():
-    src = SampleFileSource(SAMPLE_EXPORT, loop=False, realtime=False)
-    assert src.rate_hz == 256.0
-    assert len(src.channels()) == 4
-    assert src.active == [True, True, False, False]
-    assert src.seconds == pytest.approx(74.4, abs=0.1)
 
 
 def test_input_choice_dispatches_on_extension():

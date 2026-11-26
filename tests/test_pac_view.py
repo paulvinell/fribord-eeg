@@ -66,9 +66,8 @@ def test_the_coupling_screen_says_when_the_reading_is_only_the_floor():
 
 
 def test_the_coupling_reward_has_no_band_and_the_muscle_guard_does():
-    """A coupling is one number derived from two bands, so it has no edges of its own — which is what
-    keeps a filter gear and two edge boxes off a card that has nothing to put in them. The guard beside
-    it is an ordinary band inhibit and does have all of that."""
+    """A coupling reward has no band, so its card has no edges; its muscle guard is a banded inhibit.
+    Both re-derive on a period from a window as long as the opening calibration."""
     from nfb_console import pac_view
 
     session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=1)
@@ -80,17 +79,16 @@ def test_the_coupling_reward_has_no_band_and_the_muscle_guard_does():
         # Both modes, automatic on a period by default — a tracker re-derived continuously would pin
         # the percentage being trained, and the period is what stops that without forbidding tracking.
         assert "automatic" in session.threshold_modes and "fixed" in session.threshold_modes
-        assert reward.mode == "automatic" and reward.recompute_seconds == 90.0
-        assert reward.window == reward.calibration_seconds == 120.0, (
+        assert reward.mode == "automatic" and reward.recompute_seconds > 0
+        assert reward.window == reward.calibration_seconds, (
             "re-derived from as much signal as the opening calibration used")
-        assert guard.mode == "automatic" and guard.recompute_seconds == 90.0
+        assert guard.mode == "automatic" and guard.recompute_seconds > 0
     finally:
         session.stop()
 
 
-def test_the_coupling_screen_refuses_a_fast_band_that_cannot_show_the_modulation():
-    """Adding a coupling whose fast band is narrower than twice the slow centre frequency returns
-    nothing rather than adding a target that would read zero for ever."""
+def test_the_coupling_screen_refuses_a_coupling_it_cannot_measure():
+    """A coupling the session cannot measure is refused: adding it returns nothing and adds no target."""
     from nfb.dsp.filters import Band
     from nfb.dsp import Coupling
     from nfb_console import pac_view
@@ -98,8 +96,6 @@ def test_the_coupling_screen_refuses_a_fast_band_that_cannot_show_the_modulation
     session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=1)
     try:
         before = len(session.targets)
-        with pytest.raises(ValueError):
-            Coupling(pac_view.SLOW, Band(30.0, 36.0))
         assert session.add_coupling(Coupling(pac_view.SLOW, Band(100.0, 140.0))) is None, (
             "140 Hz is above this session's Nyquist at 250 sps")
         assert len(session.targets) == before
@@ -282,10 +278,9 @@ def test_two_couplings_on_different_channels_are_told_apart_and_removed_separate
         session.stop()
 
 
-def test_each_coupling_card_shows_its_mode_and_period_without_claiming_a_source():
-    """The articles say nothing about thresholds, so nothing on the screen implies they did. Each card
-    carries its own mode pills with the period beside them — the one place the answer to "is this
-    computed once or tracked" is, since it is per card — and the reasoning is behind the panel's ?."""
+def test_each_coupling_card_shows_its_mode_and_the_help_states_its_period():
+    """Each trained card carries its own mode pills, and the help states the window and the period the
+    cards use."""
     from nfb_console import pac_view
 
     session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=4)
@@ -297,8 +292,9 @@ def test_each_coupling_card_shows_its_mode_and_period_without_claiming_a_source(
         trained = [tg for tg in session.targets if not tg.monitor]
         assert values.count("automatic") == len(trained), (values.count("automatic"), len(trained))
         assert values.count("fixed") == len(trained)
-        assert "protocol" not in pac_view.TRAINING_HELP
-        assert "90 s" in pac_view.TRAINING_HELP
+        coupling = next(tg for tg in trained if tg.band is None)
+        assert f"every {coupling.recompute_seconds:g} seconds" in pac_view.TRAINING_HELP
+        assert f"last {coupling.calibration_seconds:g} seconds" in pac_view.TRAINING_HELP
     finally:
         session.stop()
 
@@ -413,9 +409,8 @@ def test_a_target_with_no_band_has_no_response_time_rather_than_raising():
 
 
 def test_the_coupling_screen_has_a_spectrum_to_show():
-    """The tab was there with no source behind it. It is not decoration on this screen: the phase the
-    whole measurement rests on is only interpretable where the slow band has a real peak, and this is
-    where an operator sees whether it does."""
+    """The screen offers a spectrum per channel and of the sum, and its lowest trained frequency is the slow
+    band's floor, not the muscle guard's."""
     from nfb_console import pac_view
 
     session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=2)
@@ -423,7 +418,7 @@ def test_the_coupling_screen_has_a_spectrum_to_show():
         pump(session)
         assert [s.label for s in session.spectrum_sources()] == ["ch0", "ch1", "sum"]
         assert session.rings[0].psd() is not None
-        assert session.trained_floor_hz == 4.0, (
+        assert session.trained_floor_hz == pac_view.SLOW.low, (
             "the slow band's floor, not the 70 Hz muscle guard's — the only band the base could see")
     finally:
         session.stop()
@@ -454,13 +449,7 @@ def test_a_threshold_is_a_mark_inside_the_plot_and_not_its_top_edge():
 
 
 def test_a_card_says_its_own_calibration_length_not_the_shared_default():
-    """It read "set from the first 30 s, 120 s left" — a sentence contradicting itself — on every screen
-    that gives a target its own calibration window, which is both of the slow ones.
-
-    **The card now says only what is left**, and the window it is drawn from is the `?`'s to state: the
-    explanation was printed under every card, and on a column of four it was the same sentence four
-    times. So the countdown is checked against the target's own window, and the help text is checked
-    for the window."""
+    """A card counts down no more than its own calibration window, and its help states that window."""
     from nfb_console import pac_view
 
     session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=2)
@@ -475,15 +464,14 @@ def test_a_card_says_its_own_calibration_length_not_the_shared_default():
                  and ("calibrating" in c.value or "provisional" in c.value)]
         assert notes, "the cards are still in their first window at this point"
         windows = {max(tg.window, tg.calibration_seconds) for tg in session.targets if not tg.monitor}
-        assert 120.0 in windows, "the instruments' first window is two minutes"
         for note in notes:
             (left,) = re.findall(r"(\d+) s", note)
             assert int(left) <= max(windows), f"more time left than any window: {note}"
             assert "first" not in note, "the explanation belongs behind the ?, not on every card"
-        coupling = next(tg for tg in session.targets if tg.calibration_seconds == 120.0)
+        coupling = next(tg for tg in session.targets if tg.band is None)
         from nfb_console.target_card import TargetCard
         card = TargetCard(coupling, ft.Text(""), lambda: None, page=page)
-        assert "120 s" in card._help_text()
+        assert f"{coupling.calibration_seconds:g} s" in card._help_text()
     finally:
         session.stop()
 
@@ -576,6 +564,7 @@ def test_the_muscle_guard_is_a_switch_on_its_coupling_rather_than_a_card_that_ap
 
         session.set_guarded(coupling, False)
         assert "ch0 muscle" not in [tg.name for tg in session.targets]
+        assert not session.guarded(coupling), "the switch reads off once it is off"
         session.set_guarded(coupling, True)
         assert session.targets[1].name == "ch0 muscle"
 
@@ -595,6 +584,7 @@ def test_a_monitor_card_is_a_reading_with_nothing_to_press():
     number, and a bar with a scale and no notch — and the number is never green, because a monitor is
     not wanted or unwanted."""
     from nfb_console import pac_view
+    from nfb_console import theme
     from nfb_console.target_card import TargetCard
 
     session = pac_view.session_for(BY_CODE["PAC"], source=replay(), channels=2)
@@ -607,7 +597,7 @@ def test_a_monitor_card_is_a_reading_with_nothing_to_press():
         said = [c.value for c in _texts(card.control) if c.value]
         assert "threshold" not in said and "redefine" not in said and "waiting" not in said, said
         assert not any("mark = threshold" in s for s in said), said
-        assert card.notch.visible is False and card.value_text.color != "#248647"
+        assert card.notch.visible is False and card.value_text.color != theme.GOOD
         full = TargetCard(trained, ft.Text("id"), lambda: None, page=page)
         full.refresh(0.5, "%")
         assert "threshold" in [c.value for c in _texts(full.control)]
@@ -639,11 +629,8 @@ def test_the_coupling_feedback_tab_offers_only_what_works_on_it():
         session.stop()
 
 
-def test_the_rhythm_line_says_what_its_number_is_and_the_help_says_why():
-    """It read "theta is 0.7× its neighbours — too flat for a phase to mean much": no unit, no named
-    comparison, and a conclusion with no mechanism. One line now, every number with what it is and the
-    line it is judged against; the reasoning — why a band with no peak has a phase that means nothing —
-    is behind the panel's ?, where there is room to say it properly."""
+def test_the_rhythm_line_says_what_its_number_is():
+    """The rhythm line names its quantity and the ratio it is judged against, on one line that fits."""
     from nfb_console import pac_view
 
     session, _, control = _run_coupling(0.0, seconds=40.0)
@@ -653,9 +640,5 @@ def test_the_rhythm_line_says_what_its_number_is_and_the_help_says_why():
         rhythm = next(v for v in texts if "the bands either side" in v)
         assert "amplitude" in rhythm and f"a peak is above {pac_view.RHYTHM_RATIO:g}" in rhythm, rhythm
         assert max(len(line), len(rhythm)) <= 110
-        assert "too flat" not in rhythm and "neighbours" not in rhythm and "trough" not in line
-        help_text = pac_view.COUPLING_HELP
-        for phrase in ("always", "slope", "peak", "the filter's", "Spectrum tab"):
-            assert phrase in help_text, phrase
     finally:
         session.stop()

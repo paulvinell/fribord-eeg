@@ -100,7 +100,9 @@ class ResonantHeart:
         of `lag_s` moves every stamp and the arrival with it, as a slow link does."""
         last = len(self.stamps) if until_s is None else bisect_right(self.stamps, until_s)
         first = bisect_right(self.stamps, (self.stamps[last - 1] if last else 0.0) - WINDOW_S)
-        keep = [i for i in range(first, last) if not any(a <= self.stamps[i] < b for a, b in holes)]
+        keep = list(range(first, last))
+        if holes:
+            keep = [i for i in keep if not any(a <= self.stamps[i] < b for a, b in holes)]
         if not keep:
             return BeatState(t=SWEEP_EPOCH + (self._t if until_s is None else until_s) + lag_s)
         newest = self.stamps[keep[-1]]

@@ -92,7 +92,7 @@ def test_each_heartbeat_is_measured_once():
 def test_a_device_not_chosen_is_named_and_nothing_is_compared():
     session = _session()
     session.heart_choice = types.SimpleNamespace(on=False)
-    assert session.missing() == ["no heart sensor: choose the HeartMath on the device screen"]
+    assert len(session.missing()) == 1, "one line, for the sensor that is not chosen"
     session.update(now=90.0)
     assert session.snapshot is None
 
@@ -100,7 +100,7 @@ def test_a_device_not_chosen_is_named_and_nothing_is_compared():
 def test_a_device_gone_quiet_is_named():
     session = _session()
     session.mendi.stale = True
-    assert session.missing() == ["headband: no readings for a while"]
+    assert len(session.missing()) == 1, "one line, for the sensor that went quiet"
 
 
 def test_a_heart_sensor_without_a_waveform_still_compares_beats():
@@ -216,7 +216,6 @@ def test_the_level_comes_from_the_scaling_chosen_on_the_feedback_tab():
     """The program once had a scale of its own, half at the start and full 30% above it, and none of the
     shared scalings. A ratio that drifted up held that scale at full for minutes."""
     session = _session()
-    assert session.strategy_id == "rolling_minmax", "the shared default"
     session.set_strategy("fixed_range", low=0.5, high=1.5)
     _spied(session)
     session.toggle_pause()
@@ -227,7 +226,9 @@ def test_the_level_comes_from_the_scaling_chosen_on_the_feedback_tab():
 
 def test_every_shared_mechanism_is_offered_and_the_shadow_follows_the_level():
     session = _session()
-    assert set(session.offers) == {"sound", "shadow", "click", "music"}
+    from nfb_console.training import TrainingSession
+
+    assert set(session.offers) == set(TrainingSession.offers), "every shared mechanism"
     calls = _spied(session)
     session.feedback.shadow.enabled = True
     session.toggle_pause()
@@ -292,3 +293,11 @@ def test_settings_survive_a_stop():
     assert new.strategy_id == "zscore" and new.strategy.window_s == 90.0
     assert not new.feedback.click.enabled
     assert new.restore_calibration(old.calibration()) > 0
+
+
+def test_intervals_that_do_not_vary_give_no_agreement_and_no_fault():
+    """A correlation over intervals with no spread has no value; the comparison says nothing and goes on."""
+    from nfb_console.pair_view import _correlation
+
+    assert _correlation([1.0] * 8, [0.9 + 0.01 * i for i in range(8)]) is None
+    assert _correlation([0.9 + 0.01 * i for i in range(8)], [1.0] * 8) is None

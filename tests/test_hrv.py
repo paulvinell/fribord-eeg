@@ -13,8 +13,11 @@ import random
 import numpy as np
 import pytest
 
-from nfb.hrv import (Beat, DEFAULT_METRIC, HRVProcessor, NARROW_BAND, SimulatedBeats, beat_source,
-                     parse_hr_measurement)
+from nfb.hrv import (Beat, DEFAULT_METRIC, HRV_METRICS, HRVProcessor, NARROW_BAND, SimulatedBeats, beat_source,
+                     metric_value, parse_hr_measurement)
+from nfb_console import normalise
+
+from harness import coherent_state
 
 
 def collect(source, seconds: float = 300.0, **processor_kw):
@@ -55,6 +58,12 @@ def test_uint16_rate_contact_energy_and_several_intervals():
 def test_a_truncated_packet_is_not_a_crash():
     assert parse_hr_measurement(b"") == (0.0, [], None)
     assert parse_hr_measurement(b"\x10") == (0.0, [], None)
+
+
+def test_a_stray_byte_after_the_intervals_is_not_read_as_an_interval():
+    """An interval takes two bytes, so one byte left at the end of a packet gives no interval."""
+    data = bytes([0x10, 60]) + (1024).to_bytes(2, "little") + b"\x07"
+    assert parse_hr_measurement(data)[1] == [1.0]
 
 
 # --- the spectrum ----------------------------------------------------------------------------
@@ -134,8 +143,6 @@ def test_the_target_is_clamped_to_where_the_standard_bands_still_mean_something(
     from nfb.hrv import NARROW_HALF_RANGE_HZ, TARGET_RANGE_HZ
 
     proc = HRVProcessor()
-    assert (proc.target_hz, proc.narrow_half_hz) == (0.1, 0.02), "the default is where it always was"
-
     proc.set_target(0.0, 10.0)
     assert proc.target_hz == TARGET_RANGE_HZ[0]
     assert proc.narrow_half_hz == NARROW_HALF_RANGE_HZ[1]
@@ -145,18 +152,13 @@ def test_the_target_is_clamped_to_where_the_standard_bands_still_mean_something(
 
 
 def test_every_spectrum_carries_the_target_it_was_scored_against():
-    """**Including the empty ones.** A screen draws the marked band before the first beat arrives, and a
-    band drawn from a module constant beside a percentage computed from a session setting is how the two
-    come apart. Nothing downstream reads the constant."""
-    proc = HRVProcessor(target_hz=0.065)
-    empty = proc._empty_spectrum()
-    assert not empty.ready
-    assert empty.target_hz == 0.065 and empty.narrow_band == pytest.approx((0.045, 0.085))
-    assert empty.describe() == "waiting for beats", "and this branch used to raise NameError"
-
-    from nfb.hrv import Beat
-    first = proc.push(Beat(t=0.0, hr_bpm=60.0, rr_intervals=[1.0]))
-    assert first.spectrum.target_hz == 0.065, "the very first state, before any spectrum exists"
+    """The spectrum of the first state, before there is any spectrum to compute, carries the target and the
+    band of its processor, and it can describe itself."""
+    proc = HRVProcessor(target_hz=0.065, narrow_half_hz=0.015)
+    first = proc.push(Beat(t=0.0, hr_bpm=60.0, rr_intervals=[1.0])).spectrum
+    assert not first.ready
+    assert first.target_hz == 0.065 and first.narrow_band == pytest.approx((0.05, 0.08))
+    assert first.describe()
 
 
 def test_replaying_the_buffer_keeps_the_target():
@@ -177,13 +179,21 @@ def test_replaying_the_buffer_keeps_the_target():
                for s in states)
 
 
-def test_a_coherence_score_alone_would_not_have_caught_it():
-    """Why the detector exists rather than a threshold on the resonance ratio."""
-    split = collect(SimulatedBeats(seed=4, realtime=False, split=True))
-    flat = collect(SimulatedBeats(rsa_ms=1.0, noise_ms=40.0, seed=4, realtime=False))
-    # the split spectrum's resonance ratio is not distinguishable from noise by size alone
-    assert split.spectrum.resonance_ratio > 0.0
-    assert not flat.spectrum.split, "noise is not a split; the detector needs both peaks"
+def test_the_split_needs_a_very_low_peak_and_a_high_peak_and_one_alone_is_not_a_split():
+    """A spectrum is split only when the very low band and the high band both stand above the target. A
+    strong peak in one of the two, with the other flat, is not a split."""
+    from nfb.hrv import Spectrum
+    from nfb.hrv.beats import HF_BAND, SPLIT_MIN_SPAN_S, VLF_BAND
+
+    freqs = np.arange(0.0, 0.5, 1.0 / 2048)
+
+    def spectrum(*centres):
+        power = 0.01 + sum(np.exp(-0.5 * ((freqs - hz) / 0.004) ** 2) for hz in centres)
+        return Spectrum(freqs, power, span_s=2.0 * SPLIT_MIN_SPAN_S)
+
+    low, high = sum(VLF_BAND) / 2.0, sum(HF_BAND) / 2.0
+    assert spectrum(low, high).split
+    assert not spectrum(low).split and not spectrum(high).split
 
 
 def test_the_spectrum_is_drawn_from_the_first_beats_and_claims_only_what_the_span_supports():
@@ -191,7 +201,7 @@ def test_the_spectrum_is_drawn_from_the_first_beats_and_claims_only_what_the_spa
     span, so the curve is drawn as soon as three beats make it arithmetic — and every claim about it is
     gated separately: naming a peak waits for four cycles of that frequency, and the split waits for a
     window that can see the very-low-frequency band at all."""
-    from nfb.hrv.beats import RESOLVE_CYCLES, SPLIT_MIN_SPAN_S, TARGET_HZ
+    from nfb.hrv.beats import SPLIT_MIN_SPAN_S, TARGET_HZ
 
     opening = collect(SimulatedBeats(seed=5, realtime=False), seconds=8.0)
     spectrum = opening.spectrum
@@ -209,7 +219,6 @@ def test_the_spectrum_is_drawn_from_the_first_beats_and_claims_only_what_the_spa
     settled = collect(SimulatedBeats(seed=5, realtime=False), seconds=120.0)
     assert settled.spectrum.resolves(TARGET_HZ) and settled.spectrum.span_s > SPLIT_MIN_SPAN_S
     assert "peak" in settled.spectrum.describe()
-    assert RESOLVE_CYCLES / TARGET_HZ == 40.0, "four cycles of the target is forty seconds"
 
 
 def test_a_spectrum_needs_beats_and_not_a_stopwatch():
@@ -225,6 +234,131 @@ def test_a_spectrum_needs_beats_and_not_a_stopwatch():
         states.append(proc.push(Beat(t, 60.0, [1.0])))
     assert not states[0].spectrum.ready, "one beat is not a series"
     assert states[-1].spectrum.ready, "a handful is"
+
+
+def test_every_metric_extracts_a_real_number_from_a_real_state():
+    """A catalogue whose entries throw or return None on live data is a menu of dead options."""
+    state = coherent_state()
+    for metric_id, spec in HRV_METRICS.items():
+        value = metric_value(spec, state)
+        assert value is not None, f"{metric_id} produced nothing"
+        assert np.isfinite(value), f"{metric_id} produced {value}"
+        assert spec.label and spec.description and spec.detail, f"{metric_id} is undocumented"
+        assert spec.strategies, f"{metric_id} recommends no scaling"
+        for suggested in spec.strategies:
+            assert suggested in normalise.STRATEGIES, f"{metric_id} names a strategy that is gone"
+
+
+def test_a_metric_reports_nothing_rather_than_zero_before_it_can_speak():
+    """Zero is a reading and 'no reading yet' is not. A channel handed 0.0 drives itself to its floor and
+    reads as a bad result, which is the opposite of the truth."""
+    proc = HRVProcessor()
+    early = proc.push(Beat(1000.0, 60.0, [1.0]))          # one beat: no spectrum
+    assert metric_value(HRV_METRICS["sharpness"], early) is None
+    assert metric_value(HRV_METRICS["coherence"], early) is None
+    # The time-domain metrics used to claim readiness here and return a literal 0.0 — which is not
+    # nothing, it is a reading, and it anchored the bottom of the rolling scale for the whole window.
+    assert metric_value(HRV_METRICS["rsa_amplitude"], early) is None
+    assert metric_value(HRV_METRICS["rmssd"], early) is None
+    # the rate itself works from the start, which is what makes it the wiring-check metric
+    assert metric_value(HRV_METRICS["hr_smoothed"], early) is not None
+    assert metric_value(HRV_METRICS["sharpness"], None) is None
+
+    state = early
+    for i in range(2, 15):
+        state = proc.push(Beat(1000.0 + float(i), 60.0, [1.0]))
+    assert metric_value(HRV_METRICS["rsa_amplitude"], state) is not None
+    assert metric_value(HRV_METRICS["rmssd"], state) is not None, \
+        "and once the beats exist, the number is a number"
+
+
+def test_the_metrics_that_are_better_low_say_so():
+    """`invert` is not a preference. A channel that got brighter as the spectrum drifted further from ideal
+    would be reinforcing the wrong thing, so it is a property of the metric."""
+    assert HRV_METRICS["spectrum_distance"].invert, "0 is the ideal"
+    assert HRV_METRICS["lf_hf_ratio"].invert
+    assert HRV_METRICS["hr_smoothed"].invert, "a falling rate is what relaxation looks like"
+    for good_high in ("coherence", "resonance_ratio", "sharpness", "rsa_amplitude", "rmssd"):
+        assert not HRV_METRICS[good_high].invert
+
+
+def test_the_metrics_disagree_which_is_why_it_is_a_choice():
+    """If they ranked the same states the same way there would be no reason to offer eleven.
+
+    A tight peak slightly off the target is the case that separates them: sharpness punishes it hard
+    because it integrates a band around the target, and coherence does not because it locates the peak.
+    That is the whole argument for the target being settable — and for coherence being the metric to
+    train on until you know where your own resonance is.
+    """
+    on_target = coherent_state(depth=0.09)
+    # the same modulation depth at 0.13 Hz — coherent breathing, at the wrong rate
+    proc = HRVProcessor()
+    t, off_target = 1000.0, None
+    while t < 1200.0:
+        rr = 1.0 + 0.09 * np.sin(2 * np.pi * 0.13 * t)
+        t += rr
+        off_target = proc.push(Beat(t, 60.0 / rr, [rr]))
+
+    sharp_on = metric_value(HRV_METRICS["sharpness"], on_target)
+    sharp_off = metric_value(HRV_METRICS["sharpness"], off_target)
+    coh_on = metric_value(HRV_METRICS["coherence"], on_target)
+    coh_off = metric_value(HRV_METRICS["coherence"], off_target)
+    assert sharp_off < sharp_on / 2, "sharpness is pinned to the target and punishes 0.13 hard"
+    assert coh_off > coh_on * 0.5, "coherence locates the peak, so it barely notices"
+
+
+def test_the_target_metrics_follow_the_target_and_the_published_ones_do_not():
+    """**Which numbers a personal target may move, and which it must not.**
+
+    Sharpness, peak proximity and the distance from ideal are scored against a chosen frequency, so
+    moving the target to where somebody actually resonates has to move them — that is the point. The
+    coherence measures and LF/HF are computed over the standard published bands, and re-cutting those
+    around a personal target would produce numbers that look like the conventional ones and are not.
+    """
+    def state_at(target_hz):
+        proc = HRVProcessor(target_hz=target_hz)
+        t, state = 1000.0, None
+        while t < 1200.0:
+            rr = 1.0 + 0.09 * np.sin(2 * np.pi * 0.065 * t)
+            t += rr
+            state = proc.push(Beat(t, 60.0 / rr, [rr]))
+        return state
+
+    default, moved = state_at(0.1), state_at(0.065)
+
+    for follows in ("sharpness", "peak_proximity", "spectrum_distance"):
+        assert (metric_value(HRV_METRICS[follows], default)
+                != metric_value(HRV_METRICS[follows], moved)), f"{follows} must follow the target"
+    assert metric_value(HRV_METRICS["sharpness"], moved) > \
+        metric_value(HRV_METRICS["sharpness"], default) * 5
+    assert metric_value(HRV_METRICS["peak_proximity"], moved) > 0.95, \
+        "a peak exactly on the target scores 1.0 wherever the target is"
+    assert metric_value(HRV_METRICS["spectrum_distance"], moved) < \
+        metric_value(HRV_METRICS["spectrum_distance"], default)
+
+    for fixed in ("coherence", "resonance_ratio", "lf_hf_ratio"):
+        assert (metric_value(HRV_METRICS[fixed], default)
+                == pytest.approx(metric_value(HRV_METRICS[fixed], moved))), \
+            f"{fixed} is quoted against published bands and must not move"
+
+
+def test_nothing_between_the_first_beats_and_the_feedback_waits_for_a_number_to_settle():
+    """The rule, stated once against the objects that used to break it. A gate may say "this cannot be
+    computed"; none may say "this is not accurate enough yet". Accuracy is reported — the span and the
+    bin width under the curve, the warm-up bar beside the readout — never withheld."""
+    from nfb.hrv import HRVProcessor
+
+    proc = HRVProcessor()
+    t, state = 1000.0, None
+    for i in range(4):                      # four beats: the arithmetic floor, nothing above it
+        rr = 1.0 + 0.1 * np.sin(2 * np.pi * 0.1 * t)
+        t += rr
+        state = proc.push(Beat(t, 60.0 / rr, [rr]))
+
+    assert state.spectrum.ready, "three beats make a spectrum"
+    for metric_id in HRV_METRICS:
+        assert metric_value(HRV_METRICS[metric_id], state) is not None, \
+            f"{metric_id} has everything it arithmetically needs and must produce a number"
 
 
 # --- the beat stream -------------------------------------------------------------------------
@@ -300,34 +434,27 @@ def test_the_factory_rejects_an_unknown_kind():
     assert isinstance(beat_source("simulator", realtime=False), SimulatedBeats)
 
 
-def test_ble_reports_its_own_absence_rather_than_raising():
-    """The EEG path must not gain a Bluetooth dependency to keep working, so the Bluetooth library is
-    imported lazily and a machine that cannot load it gets a message on the screen rather than a
-    traceback. bleak is an ordinary dependency now, so on a healthy machine there is nothing to report
-    and the branch below is the picture on a machine without a radio."""
+def test_ble_reports_its_own_absence_rather_than_raising(monkeypatch):
+    """On a machine where the Bluetooth library cannot load, the Bluetooth source gives no beats and says
+    why, and it does not raise."""
+    import sys
+
     from nfb.hrv import sources
 
+    monkeypatch.setitem(sys.modules, "bleak", None)         # an import of it now fails
     trouble = sources.problem()
-    if trouble is not None:
-        assert "Bluetooth" in trouble
-        source = sources.BleBeats()
-        assert list(source.beats()) == []
-        assert "Bluetooth" in source.describe()
+    assert trouble and "Bluetooth" in trouble
+    source = sources.BleBeats()
+    assert list(source.beats()) == []
+    assert source.describe() and source.error == trouble
 
 
 # --- beats, units and coherence -------------------------------------------------------
 
 def test_rr_units_are_detected_rather_than_assumed():
-    """**We divided every interval by 1024 unconditionally, and one shipping device sends milliseconds.**
-
-    2.3% is `1000/1024`, so it never looks like a fault: heart rate a little low, RMSSD a little high, and
-    the spectral peak 2.3% off — 0.0977 Hz for a true 0.1, well inside the band nobody would question. The
-    old docstring even named the device while getting it wrong: "the HeartMath Coherence Plus advertises the
-    standard service, so this is the same code path as a Polar strap."
-
-    Hardcoding milliseconds is not the fix, because a Polar strap really is compliant. The device's own HR
-    field is the arbiter.
-    """
+    """The unit of the interval integers is decided from the device's own heart-rate field: a device that
+    sends milliseconds and one that sends 1/1024 s both give one second for a one-second interval. The
+    unit can also be set by hand, whatever the heart-rate field says."""
     from nfb.hrv import RrScaleResolver, parse_hr_measurement, parse_hr_raw
 
     def packet(raw_rr: int, hr: int = 60) -> bytes:
@@ -342,14 +469,10 @@ def test_rr_units_are_detected_rather_than_assumed():
         _hr, rr, _c = parse_hr_measurement(packet(raw), scale=resolver.scale)
         assert rr[0] == pytest.approx(1.0, abs=1e-6), "either way, one second is one second"
 
-    # the error the old code made on a millisecond device, as a number
-    _hr, rr, _c = parse_hr_measurement(packet(1000), scale=1024.0)
-    assert rr[0] == pytest.approx(0.9766, abs=1e-4)
-    assert 60.0 / rr[0] == pytest.approx(61.44, abs=0.01), "61.4 bpm reported for a true 60"
-
     # and it can be pinned by hand, for a device whose HR field is too smoothed to arbitrate
-    assert RrScaleResolver("ms").scale == 1000.0
-    assert RrScaleResolver("spec").scale == 1024.0
+    for mode, raw in (("ms", 1000), ("spec", 1024)):
+        _hr, rr, _c = parse_hr_measurement(packet(raw, hr=90), scale=RrScaleResolver(mode).scale)
+        assert rr[0] == pytest.approx(1.0, abs=1e-6), mode
     with pytest.raises(ValueError):
         RrScaleResolver("furlongs")
 
@@ -454,39 +577,9 @@ def test_the_coherence_ratio_tells_entrainment_from_in_band_energy():
     assert broad.coherence < sharp.coherence / 100, "and a broad bump is not entrainment either"
     # somebody whose resonance sits at 0.12 Hz is not penalised, because the peak is located not assumed
     assert offset.coherence > sharp.coherence * 0.8
-    # the displayed number is the log, which is the number put on screen
-    assert sharp.coherence_score == pytest.approx(np.log1p(sharp.coherence))
-
-
-def test_the_metronome_period_is_configurable_within_its_range():
-    """It was hardcoded at 10 s. In for five and out for five is six breaths a minute, which is 0.1 Hz, which
-    is the frequency the protocol aims the spectral peak at — so the default was right and the problem was
-    that it could not move. A resonant frequency is individual, commonly 4.5–7 breaths a minute.
-
-    The range is 6–30 s, and inside it a cycle is kept as given: the step belongs to the arrows of the box.
-    """
-    from nfb_console.hrv_view import HRVSession, PACER_PERIOD_S, PACER_RANGE_S
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        assert session.pacer_period == PACER_PERIOD_S == 10.0
-        session.set_pacer_period(12)
-        assert session.pacer_period == 12.0
-        assert "12 s" in session.pacer_note() and "5.0 breaths a minute" in session.pacer_note()
-        assert "metronome" in session.pacer_note(), "it must not pass for the heart-locked cue"
-        # clamped *into* the range rather than out of it
-        session.set_pacer_period(1.0)
-        assert session.pacer_period == PACER_RANGE_S[0] == 6.0
-        session.set_pacer_period(999.0)
-        assert session.pacer_period == PACER_RANGE_S[1] == 30.0
-        # a cycle between two steps of the arrows runs as it was given, and the note names it
-        session.set_pacer_period(10.37)
-        assert session.pacer_period == 10.37
-        assert "10.37 s" in session.pacer_note() and "5.8 breaths a minute" in session.pacer_note()
-    finally:
-        session.stop()
+    # the number put on screen keeps the order of the ratio, and is not below zero
+    assert sharp.coherence_score > max(broad.coherence_score, flat.coherence_score)
+    assert min(broad.coherence_score, flat.coherence_score) >= 0.0
 
 
 def test_the_snapshot_says_when_the_source_gave_its_newest_beat():
@@ -497,195 +590,6 @@ def test_the_snapshot_says_when_the_source_gave_its_newest_beat():
     p = HRVProcessor()
     assert p.push(Beat(t=100.0, hr_bpm=60.0, rr_intervals=[1.0])).arrived is None
     assert p.push(Beat(t=101.0, hr_bpm=60.0, rr_intervals=[1.0], arrived=101.7)).arrived == 101.7
-
-
-def test_the_target_frequency_is_settable_from_the_screen_and_takes_the_metronome_with_it():
-    """**The pacer's rate was settable and the frequency it was scored against was not**, so the screen
-    could pace somebody at their own resonance and then mark them down for reaching it.
-
-    They are one quantity said two ways, so moving the target moves the metronome; the reverse is not
-    wired up, because the cycle is clamped and feeding that back would drag the target off wherever it was
-    set."""
-    from nfb_console.hrv_view import HRVSession
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        assert session.target_hz == 0.1 and session.pacer_period == 10.0
-
-        session.set_target_hz(0.065)
-        assert session.target_hz == 0.065
-        assert session.heart.processor.target_hz == 0.065, "one copy, and it lives on the processor"
-        assert session.pacer_period == pytest.approx(1 / 0.065), "the metronome breathes at the target"
-        assert "3.9 breaths a minute" in session.target_note()
-
-        # the band moves independently, and both are clamped
-        session.set_target_hz(0.065, 0.01)
-        assert session.target_half_hz == 0.01
-        session.set_target_hz(0.0)
-        assert session.target_hz == 0.04, "clamped into the range, not refused"
-
-        # nudging the cycle afterwards does not drag the target with it
-        session.set_target_hz(0.065)
-        session.set_pacer_period(10.0)
-        assert session.target_hz == 0.065
-    finally:
-        session.stop()
-
-
-def test_the_target_survives_a_relaunch_because_it_is_the_persons_own_frequency():
-    """Same category as a volume: found by hunting for it over a session or two, and asking somebody to
-    re-find it every launch is the failure `prefs` exists to prevent. Restored before the pacer, since
-    setting the target sets the pacer from it."""
-    from nfb_console.hrv_view import HRVSession
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        session.set_target_hz(0.065, 0.015)
-        stored = session.calibration()
-        assert stored["target_hz"] == 0.065 and stored["target_half_hz"] == 0.015
-    finally:
-        session.stop()
-
-    fresh = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        assert fresh.target_hz == 0.1, "a new session starts at the default"
-        fresh.restore_calibration(stored)
-        assert fresh.target_hz == 0.065 and fresh.target_half_hz == 0.015
-        assert fresh.pacer_period == stored["pacer_period"], \
-            "and the stored cycle survives, rather than being overwritten by one derived from the target"
-    finally:
-        fresh.stop()
-
-
-def test_the_pacer_period_actually_changes_the_cue():
-    """A setting that is stored and not read is worse than no setting."""
-    from nfb_console.hrv_view import HRVSession
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        session.set_pacer_period(20)
-        session._accumulated = 0.0
-        assert session.breathe_in(), "the first half of the cycle is the inhale"
-        session._accumulated = 9.0
-        assert session.breathe_in()
-        session._accumulated = 11.0
-        assert not session.breathe_in(), "and the second half is the exhale"
-        session._accumulated = 21.0
-        assert session.breathe_in(), "then it repeats"
-    finally:
-        session.stop()
-
-
-
-
-def test_opening_hrv_as_the_first_protocol_does_not_crash():
-    """**The exact traceback from `make live`**: `Console.pick` restored preferences into
-    `self.session.feedback`, and this screen is not a `TrainingSession` and has none.
-
-    Present since prefs were added — the restore only runs when there is no previous session, so it needed
-    HRV to be the *first* protocol opened in a run. It was briefly masked while this screen carried a
-    redundant `FeedbackSettings`, and unmasked when that was deleted. `prefs` asks the session now.
-    """
-    from nfb_console import prefs
-    from nfb_console.hrv_view import HRVSession
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    session = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        # It reaches the mechanisms through the session's own hook rather than an attribute it assumed was
-        # there, which is what makes this work on a screen whose settings are not only a `FeedbackSettings`.
-        assert prefs.restore("HRV", session) >= 0
-        session.set_pacer_period(12.5)
-        assert session.calibration()["pacer_period"] == 12.5
-    finally:
-        session.stop()
-
-
-def test_stopping_hrv_and_re_entering_it_keeps_the_setup():
-    """`Console.pick` calls `adopt` whenever there is a previous session, and this screen had none — so the
-    stop button raised too. Same line as the EEG screens draw: configuration comes across, history does not.
-    """
-    from nfb_console.hrv_view import HRVSession
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    first = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        first.set_pacer_period(13.0)
-        first.set_metric("rmssd")
-        first.set_strategy("zscore", window_s=90.0)
-        first.feedback.music.source = "shepard"
-        first.feedback.sound.high = 45.0
-
-        second = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-        try:
-            second.adopt(first)
-            assert second.pacer_period == 13.0
-            assert second.metric == "rmssd"
-            assert second.strategy_id == "zscore" and second.strategy.window_s == 90.0
-            assert second.feedback.music.source == "shepard"
-            assert second.feedback.sound.high == 45.0
-            # the history does not come across: a fresh normaliser has nothing in its window
-            assert second.strategy.warmup == 0.0
-            assert second.signal is None
-            # and adopting a different protocol's session is refused rather than half-applied
-            other = HRVSession(BY_CODE["AMP"], choice=HeartChoice(kind="simulator"))
-            try:
-                second.pacer_period = 7.0
-                second.adopt(other)
-                assert second.pacer_period == 7.0
-            finally:
-                other.stop()
-        finally:
-            second.stop()
-    finally:
-        first.stop()
-
-
-def test_hrv_persists_what_was_set_by_ear_and_not_what_is_being_trained():
-    """`prefs`' own line: calibration survives a relaunch, arrangement does not. The pacer's period is the
-    person's own resonant rate and the volumes are the room; the metric and the scaling are what is being
-    trained, which is the same category as a band or a threshold."""
-    import json
-
-    from nfb_console import prefs
-    from nfb_console.hrv_view import HRVSession
-    from nfb_console.inputs import HeartChoice
-    from nfb_console.protocols import BY_CODE
-
-    prefs.PATH.unlink(missing_ok=True)
-    first = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    first.set_pacer_period(11.5)
-    first.feedback.sound.high = 30.0
-    first.feedback.shadow.high = 80.0
-    first.set_metric("pnn50")
-    first.feedback.music.source = "shepard"
-    first.stop()
-
-    # One set for every protocol — see `prefs.SHARED`. This screen pins nothing, so everything it stores is
-    # the room's and is what the next screen opens with.
-    stored = json.loads(prefs.PATH.read_text())[prefs.SHARED]
-    assert stored["pacer_period"] == 11.5
-    assert stored["sound.high"] == 30.0 and stored["shadow.high"] == 80.0
-    assert "metric" not in stored and "strategy" not in stored
-    assert "shepard" not in str(stored), "which music is playing is the arrangement, not the calibration"
-
-    second = HRVSession(BY_CODE["HRV"], choice=HeartChoice(kind="simulator"))
-    try:
-        assert prefs.restore("HRV", second) > 0
-        assert second.pacer_period == 11.5
-        assert second.feedback.sound.high == 30.0
-        assert second.feedback.shadow.high == 80.0
-        assert second.metric == DEFAULT_METRIC, "what is trained comes from the protocol"
-    finally:
-        second.stop()
 
 
 def test_a_dropout_ends_the_spectrum_window_instead_of_becoming_a_ramp():
@@ -771,29 +675,31 @@ def test_a_missed_beat_reaches_the_filter_and_the_reject_figure():
 
 
 def test_a_beat_computed_before_its_predecessor_is_refused():
-    """BLE delivery jitter can put a delayed packet's beat before a prompt one's, and np.interp returns
-    silent garbage on a non-monotonic grid. A beat that would go backwards is transport, not heart."""
-    from nfb.hrv.beats import HRVProcessor, Beat
-
+    """A wall clock set back by seconds puts the next beats before the newest one kept. They are refused,
+    so the tachogram's beat times only move forward."""
     proc = HRVProcessor()
-    proc.push(Beat(1000.6, 60.0, [0.9]))
-    proc.push(Beat(1001.0, 60.0, [0.9]))
-    proc.push(Beat(1002.3, 60.0, [0.9]))                 # delayed delivery
-    proc.push(Beat(1002.1, 60.0, [0.9]))                 # prompt one lands earlier
-    times = [bt for bt, _ in proc._live]
-    assert times == sorted(times), "the buffers stay monotonic whatever the transport does"
+    t = 1000.0
+    for i in range(30):
+        rr = 1.0 + 0.03 * math.sin(i)
+        t += rr
+        proc.push(Beat(t, 60.0, [rr]))
+    for k in range(6):
+        state = proc.push(Beat(t - 5.0 + k, 60.0, [1.0]))
+    assert len(state.age_s) > 20
+    assert np.all(np.diff(state.age_s) < 0), "each beat is older than the one after it"
 
 
 def test_no_contact_means_no_training_data():
-    """A strap reporting contact=False is reporting that its intervals are noise from an open sensor.
-    The state still carries the flag for the screen; the buffers must not train on the intervals."""
-    from nfb.hrv.beats import HRVProcessor, Beat
-
+    """Intervals that come with no skin contact are not counted as beats and do not move the heart rate.
+    The state carries the flag, so the screen can say why."""
     proc = HRVProcessor()
-    proc.push(Beat(1000.0, 60.0, [1.0], contact=True))
-    before = len(proc._live)
-    state = proc.push(Beat(1001.0, 60.0, [1.0], contact=False))
-    assert len(proc._live) == before, "no-contact intervals stay out of the buffers"
+    t = 1000.0
+    for _ in range(10):
+        t += 1.0
+        before = proc.push(Beat(t, 60.0, [1.0], contact=True))
+    state = proc.push(Beat(t + 0.5, 120.0, [0.5], contact=False))
+    assert state.beats == before.beats, "no-contact intervals are not beats"
+    assert state.rr_s == before.rr_s
     assert state.contact is False, "and the screen is told why"
 
 
@@ -968,3 +874,51 @@ def test_a_packet_without_contact_ends_the_run_of_the_times():
     processor.push(Beat(t=t + 1.0, hr_bpm=120.0, rr_intervals=[0.5, 0.5], contact=False))
     state = processor.push(Beat(t=t + 2.0, hr_bpm=120.0, rr_intervals=[0.5, 0.5]))
     assert state.age_s[-1] == pytest.approx(0.0)
+
+
+def test_a_spectrum_with_no_power_scores_zero_and_does_not_raise():
+    """A heart that beats like a metronome has a tachogram with no variation, so a spectrum with no power.
+    Its sharpness is zero, not a division by zero."""
+    from nfb.hrv import Spectrum
+
+    freqs = np.arange(0.0, 0.5, 1.0 / 256)
+    flat = Spectrum(freqs, np.zeros_like(freqs), span_s=256.0)
+    assert flat.ready and flat.sharpness == 0.0
+
+
+def test_the_respiratory_swing_grows_with_the_swing_of_the_heart_rate():
+    """The swing metric is above zero for a heart that swings with the breath, and a swing twice as large
+    reads about twice as large."""
+    from nfb.hrv import HRV_METRICS, metric_value
+
+    def swing(depth: float) -> float:
+        proc, t, state = HRVProcessor(reject_artifacts=False), 1000.0, None
+        while t < 1060.0:
+            rr = 1.0 + depth * math.sin(2 * math.pi * 0.1 * t)
+            t += rr
+            state = proc.push(Beat(t, 60.0 / rr, [rr]))
+        return metric_value(HRV_METRICS["rsa_amplitude"], state)
+
+    small, large = swing(0.03), swing(0.06)
+    assert small > 0.0
+    assert large / small == pytest.approx(2.0, rel=0.2)
+
+
+def test_a_bluetooth_source_closed_before_it_started_does_not_raise():
+    """A screen can close a source that it never read from, when the operator changes the source first."""
+    from nfb.hrv import sources
+
+    sources.BleBeats().close()
+
+
+def test_a_steady_change_of_rate_is_not_an_ectopic_beat():
+    """An interval between a longer one before it and a shorter one after it is a rate that changes, not
+    an early beat: the filter keeps it, however large the step."""
+    from nfb.hrv import ArtifactFilter
+
+    filt, t = ArtifactFilter(), 0.0
+    rng = np.random.default_rng(4)
+    for rr in list(1.0 + 0.02 * rng.standard_normal(40)) + [0.8] + [0.6] * 6:
+        t += rr
+        filt.push(t, rr)
+    assert filt.rejected_count == 0

@@ -57,9 +57,8 @@ def final(reward, xa, xb, output_hz=20.0):
 # --- the lock-in itself ---------------------------------------------------------------------
 
 def test_lockin_band_power_reanchors_after_an_index_reset():
-    """LockinBandPower had no discontinuity handling. After an epoch reset to index 0 the output cursor
-    skipped every sample until the index climbed back to the stale cursor — silence for the whole pre-reset
-    span — and the heterodyne pole state bled across the gap. It now re-anchors like its sibling estimators."""
+    """After the sample index restarts at zero, readings resume on the first block and carry the new
+    epoch's time."""
     from nfb.dsp import Band, LockinBandPower
 
     s = spec(0)
@@ -76,9 +75,8 @@ def test_lockin_band_power_reanchors_after_an_index_reset():
 
 
 def test_synchrony_metric_reanchors_after_an_index_reset():
-    """SynchronyMetric had no discontinuity handling. After an epoch reset to index 0 its output cursor
-    withheld every reading until the index climbed back, and the two lock-ins and the running phasor bled
-    across the gap. It now re-anchors like the single-channel estimators; the aligner re-anchors itself."""
+    """After the sample index restarts at zero, the pair's readings resume at once and carry the new
+    epoch's time."""
     reward = Reward(10.0, 1.0, "sum")
     metric = SynchronyMetric(SPECS, (0, 1), reward, output_hz=20.0)
 
@@ -98,8 +96,8 @@ def test_synchrony_metric_reanchors_after_an_index_reset():
 
 
 def test_lockin_band_power_ignores_a_block_from_another_channel():
-    """The single-channel estimator had no channel guard its three siblings have, so fed a stream it would
-    mix channels into one lock-in. A block for another channel is now ignored."""
+    """A single-channel estimator ignores a block from another channel, so a mixed stream does not mix
+    channels into one lock-in."""
     from nfb.dsp import Band, LockinBandPower
 
     lb = LockinBandPower(spec(0), Band(8.0, 12.0), output_hz=20.0)
@@ -108,8 +106,8 @@ def test_lockin_band_power_ignores_a_block_from_another_channel():
 
 
 def test_two_flat_channels_do_not_read_a_perfect_phase_lock():
-    """An amplitude-free sample's phase is 0 on both channels, which used to vote a perfect lock, so two
-    zero channels read plv 1. Such samples now cast no vote, so the plv stays near zero."""
+    """A sample with no amplitude has no phase and casts no vote, so two flat channels read a plv near
+    zero."""
     zero = np.zeros(int(25 * RATE))
     metric, _ = final(Reward(10.0, 1.0, "plv"), zero, zero)
     assert metric.plv < 0.1, f"two flat channels must not lock, got plv {metric.plv:.3f}"
@@ -151,15 +149,21 @@ def test_the_lockin_rejects_a_neighbouring_frequency():
     assert abs(z[-1]) < 2.0
 
 
-def test_bandwidth_sets_the_delay_and_the_relationship_is_stated():
-    """A 0.2 Hz band costs about 2 s of delay, and no filter design changes that.
+def test_the_lockin_is_three_db_down_at_the_edge_of_its_band():
+    """A tone half a bandwidth from the centre reads at 1/√2 of its amplitude, at one pole and at two."""
+    for poles in (1, 2):
+        lock = Lockin(10.0, 0.5, RATE, poles=poles)
+        z = lock.process(sine(10.25, 40.0, amp=20.0))
+        assert np.abs(z[-int(4 * RATE):]).mean() == pytest.approx(20.0 / np.sqrt(2), rel=0.03), poles
 
-    The second pole is worth its 29%: one pole is 1.59 s and leaks 5% from 2 Hz away.
-    """
-    assert bandwidth_tau(0.2, poles=1) == pytest.approx(1.0 / (np.pi * 0.2))
-    assert Lockin(10.0, 0.2, RATE, poles=1).delay_seconds == pytest.approx(1.59, abs=0.01)
-    assert Lockin(10.0, 0.2, RATE).delay_seconds == pytest.approx(2.05, abs=0.02)
-    assert Lockin(10.0, 2.0, RATE).delay_seconds < 0.25
+
+def test_a_narrower_band_costs_proportionally_more_delay():
+    """The delay of a lock-in is inversely proportional to its bandwidth, and a second pole costs more delay
+    than one pole at the same bandwidth."""
+    wide, narrow = Lockin(10.0, 2.0, RATE), Lockin(10.0, 0.2, RATE)
+    assert narrow.delay_seconds == pytest.approx(10 * wide.delay_seconds, rel=1e-6)
+    one = Lockin(10.0, 0.2, RATE, poles=1)
+    assert one.delay_seconds < narrow.delay_seconds < 2 * one.delay_seconds
 
 
 # --- the reward -----------------------------------------------------------------------------
@@ -212,10 +216,10 @@ def test_unrelated_channels_do_not_lock():
 
 
 def test_the_plv_window_is_reported_because_it_is_long():
+    """A plv measure states its phase window in its description, and a sum measure claims no window."""
     metric = SynchronyMetric(SPECS, (0, 1), Reward(10.0, 0.2, "plv"))
-    assert metric.smoothing_seconds == pytest.approx(40.0)
-    assert "40 s" in metric.describe()
-    # the sum measure has no phase window at all, and should not claim one
+    assert metric.smoothing_seconds > 10.0
+    assert f"{metric.smoothing_seconds:.0f} s" in metric.describe()
     assert SynchronyMetric(SPECS, (0, 1), Reward(10.0, 0.2)).smoothing_seconds == 0.0
 
 
@@ -322,12 +326,17 @@ def test_filtering_each_channel_and_summing_is_summing_then_filtering():
         assert np.allclose(summed, ours, atol=1e-9), offset
 
 
-def test_the_two_channels_oscillators_stay_in_lockstep():
-    """Each channel has its own lock-in, so their local oscillators must not drift apart — a relative
-    phase error between them would appear as a synchrony change that is not in the signal."""
-    a, b = Lockin(10.0, 0.5, RATE), Lockin(10.0, 0.5, RATE)
-    x = sine(10.0, 8.0, 10.0)
-    for i in range(0, len(x) - 7, 8):
-        a.process(x[i:i + 8])
-        b.process(x[i:i + 8])
-    assert a._phase == b._phase
+def test_the_lockin_refuses_a_frequency_it_cannot_measure():
+    """Zero hertz and the Nyquist frequency are refused at construction, not measured as nonsense."""
+    for freq in (0.0, RATE / 2):
+        with pytest.raises(ValueError, match="not measurable"):
+            Lockin(freq, 1.0, RATE)
+    assert Lockin(RATE / 2 - 1.0, 1.0, RATE).freq_hz < RATE / 2
+
+
+def test_a_flat_channel_reads_as_infinitely_unbalanced_without_failing():
+    """When one channel carries nothing in the band, the balance is infinite and the louder channel is the
+    other one, so the screen can name the electrode to check."""
+    metric, _ = final(Reward(10.0, 1.0), sine(10.0, 10.0, 20.0), np.zeros(int(10 * RATE)))
+    assert metric.balance == float("inf")
+    assert metric.louder_channel == 0

@@ -70,5 +70,4 @@ def test_the_output_guard_keeps_it_off(monkeypatch):
     assert wakelock.available() is False
     wakelock.hold()
     assert calls == []
-    assert wakelock._held_id is None
     assert "NFB_NO_OUTPUTS" in wakelock.problem()

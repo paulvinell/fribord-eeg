@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 
 import flet as ft
+import pytest
 
 from nfb_console.protocols import BY_CODE
 from nfb_console.widgets import num_box
@@ -82,3 +83,51 @@ def test_no_number_box_on_a_trial_screen_commits_an_unedited_text():
             assert after == before, f"{code}: a blur with no edit changed a setting"
         finally:
             session.stop()
+
+
+def test_a_box_with_an_edit_in_progress_keeps_the_edit():
+    from nfb_console.widgets import num_box
+
+    box = num_box(1.0, lambda _v: None, step=0.1)
+    field, show = box.controls[0], box.data
+    show(2.0)
+    assert field.value == "2.0", "a value that moves on its own reaches an untouched box"
+    field.value = "7"
+    show(3.0)
+    assert field.value == "7", "the next frame does not write over a value being typed"
+
+
+def test_a_number_field_clamps_and_survives_its_own_rebuild():
+    """Two failures this covers. Typing a value past a bound used to be rejected outright, and the
+    field's trailing `update()` raised out of the blur handler once `on_set` had rebuilt the panel the
+    field lived in — "Control must be added to the page first"."""
+    from nfb_console.amplitude_view import num_box
+
+    seen: list[float] = []
+    # This field is never added to a page, which is exactly the state a rebuilt panel leaves the old
+    # field in — so every commit below exercises the guard that used to raise from `field.update()`.
+    row = num_box(5.0, seen.append, step=0.1, low=1.0, high=10.0)
+    field, stepper = row.controls[0], row.controls[1]
+    up, down = stepper.controls
+
+    assert field.value == "5.0", "formatted to the step's precision"
+    up.on_click(None)
+    assert seen[-1] == pytest.approx(5.1)
+    up.on_click(None)
+    assert seen[-1] == pytest.approx(5.2), "the arrows step from what is shown, not from the initial"
+    down.on_click(None)
+    assert seen[-1] == pytest.approx(5.1)
+
+    field.value = "99"
+    field.on_blur(None)
+    assert seen[-1] == 10.0, "clamped to the bound rather than refused"
+    field.value = "-4"
+    field.on_blur(None)
+    assert seen[-1] == 1.0
+
+    assert field.value == "1.0", "the box shows the value that was accepted, not what was typed"
+
+    field.value = "not a number"
+    field.on_blur(None)
+    assert seen[-1] == 1.0, "unparseable input snaps back to the last accepted value"
+    assert field.value == "1.0"

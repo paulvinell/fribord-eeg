@@ -193,7 +193,6 @@ def _visible_texts(control, out=None, hidden=False) -> list[str]:
 
 
 def test_the_button_shows_with_a_lit_extra_and_a_press_covers_the_window_with_the_dot():
-    from nfb_console import scp_view
     from test_scp_view import _screen
 
     session, control = _screen()
@@ -211,12 +210,12 @@ def test_the_button_shows_with_a_lit_extra_and_a_press_covers_the_window_with_th
         _press(overlay, "stop")
         session.redraw()
         assert not overlay.visible and session.eye_cal is None and session.eye_fit is None
-        assert scp_view.EyeOverlay
     finally:
         session.stop()
 
 
 def test_after_a_calibration_the_result_shows_until_closed_and_the_pill_switches_the_subtraction():
+    from nfb_console import scp_view
     from test_scp_view import _screen
 
     session, control = _screen()
@@ -228,7 +227,8 @@ def test_after_a_calibration_the_result_shows_until_closed_and_the_pill_switches
         seen = _visible_texts(overlay)
         for word in ("up-down", "left-right", "blinks", "rest", "without", "with"):
             assert word in seen, (word, seen)
-        assert "The program now subtracts the eye movements and the blinks." in seen, seen
+        assert session.eye_fit.rotations_used and session.eye_fit.blinks_used
+        assert scp_view.eye_sentence(session.eye_fit) in seen, seen
         _press(overlay, "close")
         session.redraw()
         assert not overlay.visible
@@ -358,5 +358,36 @@ def test_a_channel_at_the_limit_in_the_middle_stops_the_dot_and_continue_goes_on
         assert any("continue" in text for text in seen), seen
         _press(overlay, "continue")
         assert session.eye_cal.held is None and session.eye_cal.running
+    finally:
+        session.stop()
+
+
+def test_each_use_of_the_calibration_has_its_own_sentence():
+    """What the program subtracts after a calibration, by what it found: each outcome reads differently."""
+    from nfb.dsp.eyes import EyeFit, EyeWeights
+
+    from nfb_console import scp_view
+
+    weights = EyeWeights(rotation=(0.1,), blink=(0.1,), blink_channel=None, blink_sign=1.0, blink_threshold=1.0,
+                         blink_samples=10, rate_hz=RATE)
+    said = {scp_view.eye_sentence(EyeFit(weights, {}, rotations, blinks, rest_larger=larger))
+            for rotations, blinks, larger in ((True, True, False), (True, False, False), (False, True, False),
+                                              (False, False, False), (False, False, True))}
+    assert len(said) == 5, said
+
+
+def test_an_extra_forced_off_holds_the_calibration_and_names_it():
+    """An extra channel the operator marks as dead has no signal for the calibration, which holds and says
+    which channel."""
+    session = _session()
+    try:
+        session.toggle_pause()
+        session.set_extra(1, True)
+        session.start_calibration()
+        session.trust_channel(1, False)
+        channels = eye_channels(ROT, BLINK, seconds=CAL_S)
+        _feed(session, {0: channels[0][:int(5 * RATE)], 1: channels[1][:int(5 * RATE)]})
+        held = session.eye_cal.held
+        assert held and "ch1" in held and "no signal" in held, held
     finally:
         session.stop()

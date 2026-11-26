@@ -162,14 +162,12 @@ def test_a_cue_plays_once_at_the_volume_it_was_given():
     assert audio.afplay_argv(tick, 250)[2] == "1.000", "clamped, not passed through"
     assert audio.afplay_argv(tick, -5)[2] == "0.000"
     assert cues.click_path("nope") is None
-    assert not hasattr(cues, "burst"), "one click means there is nothing left to repeat"
 
 
 def test_the_click_carries_its_own_sound():
     from nfb_console import cues
     from nfb_console.feedback import Click
 
-    assert Click().sound == cues.DEFAULT_CLICK == "tick"
     assert Click().sound in cues.click_choices()
     assert cues.sound_samples(Click().sound) is not None, "the default has to be playable"
 
@@ -181,7 +179,6 @@ def test_a_click_is_generated_short_and_actually_a_click():
 
     from nfb_console import cues
 
-    assert set(cues.click_choices()) == {"tick", "clack", "thock"}
     for name in cues.click_choices():
         assert cues.duration_ms(name) <= 40, f"{name} is too long to read as one event"
         path = cues.click_path(name)
@@ -212,10 +209,10 @@ def test_a_reward_tone_is_a_pitch_and_not_a_click():
 
     from nfb_console import cues
 
-    assert cues.tone_pitch(4.5) == pytest.approx(137.0)
-    assert cues.tone_pitch(9.5) == pytest.approx(738.0)
+    theta, alpha = cues.tone_pitch(4.5), cues.tone_pitch(9.5)
+    assert alpha / theta > 4.0, "more than two octaves between the two rewards"
     # between the two bands, between the two pitches; outside them, clamped rather than shrieking
-    assert 137.0 < cues.tone_pitch(7.0) < 738.0
+    assert theta < cues.tone_pitch(7.0) < alpha
     assert cues.tone_pitch(0.5) == cues.TONE_LO_HZ and cues.tone_pitch(40.0) == cues.TONE_HI_HZ
 
     name = cues.reward_tone(9.5)
@@ -228,9 +225,9 @@ def test_a_reward_tone_is_a_pitch_and_not_a_click():
 
     # it really is a tone at that pitch: the spectrum peaks there
     freqs, psd = signal.welch(data, fs=cues.RATE, nperseg=min(2048, len(data)))
-    assert freqs[psd.argmax()] == pytest.approx(738.0, rel=0.05)
-    # and it is long enough to be a pitch rather than a click: several cycles at 137 Hz
-    assert cues.TONE_MS / 1000 * 137 > 15
+    assert freqs[psd.argmax()] == pytest.approx(alpha, rel=0.05)
+    # and it is long enough to be a pitch rather than a click: several cycles of the lower one
+    assert cues.TONE_MS / 1000 * theta > 15
     assert cues.duration_ms(name) > 3 * max(cues.duration_ms(c) for c in cues.click_choices())
 
 

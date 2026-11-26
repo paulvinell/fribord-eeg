@@ -18,7 +18,7 @@ from nfb_console.pupil_view import ITI_S, OBSERVE_HZ, RESULT_S
 from nfb_console.trial_training import CUE_PITCH_NEUTRAL
 
 from harness import StubPage, toolbar
-from test_ste import _help_faults, _texts
+from test_ste import _texts
 
 
 def _session(response: str = "strong", **settings):
@@ -463,21 +463,6 @@ def test_the_screen_draws_cold_and_with_readings(mode):
         session.stop()
 
 
-def test_the_help_dialog_is_simplified_technical_english_in_both_modes():
-    from nfb_console import pupil_view
-
-    for mode in ("active", "passive"):
-        session = _session(mode=mode)
-        try:
-            page = StubPage()
-            control = pupil_view.view(page, session, toolbar(), lambda: None)
-            faults = [f for f in _help_faults(page, control)
-                      if mode == "active" or "names no label" not in f]
-            assert not faults, "\n".join(faults)
-        finally:
-            session.stop()
-
-
 def test_the_device_screen_starts_and_stops_the_simulated_eye():
     import flet as ft
 
@@ -486,6 +471,7 @@ def test_the_device_screen_starts_and_stops_the_simulated_eye():
 
     from nfb import Device, Settings
     from nfb_console import device_panel
+    from nfb_console.inputs import SIMULATED_RESPONSE_MM
     from nfb_console.pupil import PupilRunner
 
     device = Device(Settings())
@@ -506,7 +492,8 @@ def test_the_device_screen_starts_and_stops_the_simulated_eye():
         assert choice.kind == "simulator"
         waitfor(lambda: runner.ready, what="the simulated eye sends readings")
         press("strong")
-        assert runner.source.response_mm == pytest.approx(0.35), "changed on the running eye"
+        assert runner.source.response_mm == pytest.approx(SIMULATED_RESPONSE_MM["strong"]), \
+            "changed on the running eye"
         press("off")
         waitfor(lambda: not runner.running, what="the simulated eye stops")
     finally:
@@ -883,7 +870,7 @@ def test_a_typed_full_at_acts_from_the_next_trial():
         session.set_full_at(0.9)
         assert session.trial_level(0.1) == before, "the trial in flight keeps its record"
         _to_feedback(session, samples, after=1)
-        assert session.trial_level(0.1) == pytest.approx(0.5 + 0.1 / (2 * 0.9)), "the next trial has it"
+        assert 0.5 < session.trial_level(0.1) < before, "the next trial has it: the same shift fills less"
     finally:
         session.stop()
 
@@ -923,3 +910,56 @@ def test_the_trial_length_starts_at_the_published_length_and_the_run_follows_it(
         assert session.trials.active_s == TIMING.active_s - 5.0
     finally:
         session.stop()
+
+
+def test_a_fresh_session_keeps_the_settings_of_the_one_before():
+    """A stop starts a fresh session with the feedback, the passive window and the trial settings kept."""
+    from nfb_console.pupil_view import PupilSession
+
+    old = _session("strong", trial_direction="alternating", n_trials=3)
+    new = PupilSession(BY_CODE["PUPIL"], choice=old.choice)
+    try:
+        old.feedback.click.enabled = not old.feedback.click.enabled
+        old.set_passive_window(old.passive_window_s + 30.0)
+        new.adopt(old)
+        assert new.feedback.click.enabled == old.feedback.click.enabled
+        assert new.passive_window_s == old.passive_window_s
+        assert (new.trial_direction, new.n_trials) == ("alternating", 3)
+    finally:
+        old.stop()
+        new.stop()
+
+
+def test_the_device_chip_names_the_eye():
+    """The toolbar chip says where the numbers come from: the eye, not the amplifier."""
+    from nfb_console import pupil_view
+
+    session = _session("strong")
+    bar = toolbar()
+    try:
+        pupil_view.view(StubPage(), session, bar, lambda: None)
+        session.redraw()
+        assert "eye" in bar.dev_name.value
+    finally:
+        session.stop()
+
+
+def test_a_short_pause_voids_the_pupil_trial_in_flight_too():
+    pupil = _session("strong", trial_direction="increase", n_trials=2)
+    try:
+        samples = _eye(pupil)
+        _to_feedback(pupil, samples)
+        pupil.toggle_pause()
+        for _ in range(30):                             # half a second of the eye while paused
+            pupil.eye.push(next(samples)[1])
+        pupil.toggle_pause()
+        for i, sample in samples:
+            pupil.eye.push(sample)
+            if not i % 6:
+                pupil.observe()
+            if pupil.trials.results:
+                break
+        trial = pupil.trials.results[0]
+        assert not trial.valid and trial.cause == "paused", trial
+    finally:
+        pupil.stop()

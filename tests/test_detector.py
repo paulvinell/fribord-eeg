@@ -53,3 +53,20 @@ def test_a_veto_lasts_past_the_clench_it_read():
         plain.process(x[i:i + 50])
     near = lambda found: [b for b in found if clench.start <= b[1] < clench.stop + int(RATE)]
     assert near(plain.found()) and not near(held.found())
+
+
+def test_the_veto_counts_the_bursts_it_removed_and_not_the_ones_it_kept():
+    """`vetoed` is the bursts the plain detector finds and the vetoed one does not."""
+    rng = np.random.default_rng(3)
+    x = pink(int(60 * RATE), RATE, rng)
+    plant(x, RATE, rng, Planted(40.0, (0.3, 0.6), 12.0))
+    clench = slice(int(30 * RATE), int(31 * RATE))
+    x[clench] += 60.0 * rng.standard_normal(int(RATE))
+    veto = np.zeros(len(x), dtype=bool)
+    veto[clench] = True
+    held, plain = LiveDetector(Wavelet(40.0, 6), RATE), LiveDetector(Wavelet(40.0, 6), RATE)
+    for i in range(0, len(x), 50):
+        held.process(x[i:i + 50], veto[i:i + 50])
+        plain.process(x[i:i + 50])
+    assert held.found(), "bursts away from the clench are kept"
+    assert held.vetoed(0) == len(plain.found()) - len(held.found()) > 0

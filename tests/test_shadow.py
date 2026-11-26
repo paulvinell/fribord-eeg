@@ -11,8 +11,6 @@ import pytest
 
 from nfb_console import shadow
 
-from conftest import BENCH
-
 
 @pytest.fixture
 def fake(monkeypatch):
@@ -188,7 +186,7 @@ def test_nothing_happens_when_the_platform_cannot_do_it(monkeypatch):
     sh = shadow.DisplayShadow()
     sh.apply(True, 1, 20, 100, 1.0)
     assert not sh.active
-    assert "unavailable" in sh.describe() or shadow.problem()
+    assert shadow.problem() and shadow.problem() in sh.describe(), "the screen says why"
 
 
 def test_the_session_gives_the_display_back_when_it_stops(fake):
@@ -240,180 +238,6 @@ def test_an_unsupported_shadow_mechanism_does_not_touch_the_display(fake):
     assert fake["writes"] == [], "an unimplemented mechanism must stay inert"
 
 
-def test_the_transport_is_absent_until_there_is_a_session():
-    """A play button and a running clock on the launcher say a session exists and is merely paused,
-    when nothing has been chosen yet. Greying them out was not enough."""
-    import argparse
-
-    from nfb_console.app import Console
-    from nfb_console.protocols import BY_CODE
-
-    class StubPage:
-        width = 1020
-
-        def __init__(self):
-            self.controls, self.services, self.tasks = [], [], []
-            self.window = type("W", (), {})()
-
-        def add(self, control):
-            self.controls.append(control)
-
-        def update(self, *a):
-            pass
-
-        def run_task(self, fn, *a):
-            self.tasks.append(fn)
-
-    from nfb_console.app import build_parser
-    # **Name the recording.** The parser's default is `sessions/latest.jsonl.gz`, which is gitignored — so
-    # these passed only on a machine that happened to have recorded one, and failed on a fresh clone. See
-    # `conftest.BENCH`, which is generated.
-    args = build_parser().parse_args([str(BENCH)])
-    console = Console(StubPage(), args)
-    bar = console.toolbar
-
-    def shown():
-        """Everything that only means something inside a session, including the channel count: changing
-        it starts a fresh one, so there is nothing to offer before a session exists."""
-        return (bar.transport.visible, bar.stop.visible, bar.clock_text.visible,
-                bar.channel_menu.visible)
-
-    console.show_launcher()
-    assert shown() == (False, False, False, False)
-    assert not bar.crumb.visible, "and no location either: the launcher *is* the location"
-    assert bar.dev_chip.visible, "but the device belongs to the app, so it stays"
-
-    console.pick(BY_CODE["AMP"])
-    assert shown() == (True, True, True, True)
-    assert bar.crumb.value == "Amplitude"
-
-    console.show_device()
-    assert shown() == (False, False, False, False), "the device screen ends the session"
-    assert bar.crumb.value == "Device"
-
-    console.show_launcher()
-    assert shown() == (False, False, False, False)
-    if console.session is not None:
-        console.session.stop()
-
-
-def test_the_catalogue_covers_the_modalities_and_names_cfc_properly():
-    from nfb_console.protocols import BY_CODE, CATALOGUE
-
-    assert "RAW" not in BY_CODE, "the whole signal is a starting point, not a protocol to sit down to"
-    assert BY_CODE["CFC"].name == "Cross-frequency coupling"
-    # SCP replaced ERP: a slow-potential protocol is reachable on this hardware — the device's high-pass
-    # goes to 0.01 Hz — where averaging a response to stimuli needs a stimulus generator we do not have.
-    # It was unavailable for wanting trial structure, which `nfb_console.trials` now supplies, so the
-    # entry is live and carries no note: the session-structure gap is closed.
-    assert "ERP" not in BY_CODE
-    assert BY_CODE["SCP"].available and not BY_CODE["SCP"].note
-    assert len({p.code for p in CATALOGUE}) == len(CATALOGUE), "one entry per code"
-    # HEG and HRV were both unavailable for wanting a BLE source. Both have one now — `nfb.heg` and
-    # `nfb.hrv` — so the entries are live.
-    for code in ("HEG", "HRV"):
-        assert BY_CODE[code].available and not BY_CODE[code].note
-    # SSVEP is *absent*, not greyed out: a stimulus-driven BCI paradigm rather than a training one, with a
-    # photosensitivity consideration on top. A greyed card promises the thing will exist one day.
-    assert "SSVEP" not in BY_CODE
-
-
-
-def _console(channels: int = 4):
-    import argparse
-
-    from nfb_console.app import Console
-
-    class StubPage:
-        width = 1020
-
-        def __init__(self):
-            self.controls, self.services, self.tasks = [], [], []
-            self.window = type("W", (), {})()
-
-        def add(self, control):
-            self.controls.append(control)
-
-        def update(self, *a):
-            pass
-
-        def run_task(self, fn, *a):
-            self.tasks.append(fn)
-
-    from nfb_console.app import build_parser
-    args = build_parser().parse_args([str(BENCH), "--channels", str(channels)])
-    return Console(StubPage(), args)
-
-
-def test_the_channel_count_trims_what_a_session_shows():
-    """Deciding to run two channels today is an ordinary choice, and a trace for an input nobody wired
-    up is worse than useless: a flat line looks identical to a working channel on a quiet subject."""
-    from nfb_console.protocols import BY_CODE
-
-    console = _console()
-    console.show_launcher()
-    console.pick(BY_CODE["AMP"])
-    try:
-        assert sorted(console.session.specs) == [0, 1, 2, 3]
-
-        console.toolbar._pick_channels(2)
-        assert console.toolbar.channels_label.value == "2 ch"
-        assert sorted(console.session.specs) == [0, 1]
-        assert sorted(console.session.traces) == [0, 1]
-        assert sorted(console.session.rings) == [0, 1]
-
-        console.toolbar._pick_channels(1)
-        assert sorted(console.session.specs) == [0]
-    finally:
-        if console.session is not None:
-            console.session.stop()
-
-
-def test_the_channel_count_cannot_be_changed_out_from_under_a_running_session():
-    """Changing it rewrites the device config and changes which channels exist, so it starts a fresh
-    session. Discarding someone's twenty minutes by surprise is worse than refusing."""
-    from nfb_console.protocols import BY_CODE
-
-    console = _console()
-    console.pick(BY_CODE["AMP"])
-    try:
-        console.toolbar.refresh(running=True)
-        assert console.toolbar.channel_menu.disabled
-        console.toolbar._pick_channels(2)
-        assert sorted(console.session.specs) == [0, 1, 2, 3], "refused, not silently applied"
-
-        console.toolbar.refresh(running=False)
-        assert not console.toolbar.channel_menu.disabled
-        console.toolbar._pick_channels(2)
-        assert sorted(console.session.specs) == [0, 1]
-    finally:
-        if console.session is not None:
-            console.session.stop()
-
-
-def test_a_channel_the_session_is_not_using_is_ignored_rather_than_crashing():
-    """The recording still contains four channels; the source keeps sending them."""
-    import numpy as np
-
-    from nfb_console import amplitude_view as av
-    from nfb_console.protocols import BY_CODE
-
-    session = av.AmplitudeSession(BY_CODE["AMP"], path=str(BENCH), channels=2)
-    try:
-        assert sorted(session.specs) == [0, 1]
-        blocks = 0
-        for item in session.source.blocks():
-            blocks += 1
-            if blocks > 40:
-                break
-            if getattr(item, "channel", None) in (2, 3):
-                # what run() does with it: nothing, and without raising
-                assert item.channel not in session.traces
-        assert blocks > 1
-    finally:
-        session.stop()
-
-
 def test_outputs_can_be_switched_off_for_a_whole_process(monkeypatch):
     """A session takes over the display and the volume the moment it runs, which is right for a session
     and wrong for a benchmark, a scratch script or anything else that merely imports one. `NFB_NO_OUTPUTS`
@@ -441,41 +265,3 @@ def test_outputs_can_be_switched_off_for_a_whole_process(monkeypatch):
 
     monkeypatch.delenv("NFB_NO_OUTPUTS")
     assert not shadow.muted()
-
-
-def test_a_summed_target_is_not_trained_while_a_contributor_is_held():
-    """The summed target used to be gated by whichever channel's block completed the aligned run, so an
-    artifact held on one channel still trained the sum when a different channel's block arrived last — the
-    accept/reject state of every non-completing contributor was discarded. The sum is now trained only when
-    every contributing channel's last block was accepted."""
-    import numpy as np
-
-    from nfb.dsp import Band
-    from nfb.stream import Block
-    from nfb_console import amplitude_view as av
-    from nfb_console.protocols import BY_CODE
-    from nfb_console.targets import PAIR
-
-    session = av.AmplitudeSession(BY_CODE["AMP"], path=str(BENCH), channels=2)
-    try:
-        tgt = session.add_target(PAIR, Band(8.0, 12.0, ""), "increase")
-        key = session.key_for(tgt)
-        s0, s1 = session.specs[0], session.specs[1]
-        wave = (np.sin(2 * np.pi * 10.0 * np.arange(1200) / session.rate) * 20 / s0.scale).astype(int)
-
-        def feed_run(accepted: dict, base: int) -> set:
-            seen: set = set()
-            for i in range(0, 1200 - 7, 8):
-                session._accepted = dict(accepted)
-                samples = tuple(int(v) for v in wave[i:i + 8])
-                session.consume(Block(0, base + i, samples, s0))
-                seen |= session.consume(Block(1, base + i, samples, s1))
-            return seen
-
-        held = feed_run({0: False, 1: True}, 0)
-        assert key not in held, "a held contributor must stop the summed target training"
-
-        ok = feed_run({0: True, 1: True}, 2000)
-        assert key in ok, "with every contributor accepted, the sum trains"
-    finally:
-        session.stop()

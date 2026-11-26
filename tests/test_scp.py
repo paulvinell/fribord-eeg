@@ -9,6 +9,8 @@ looks like a trainee having a bad day.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from nfb.dsp import SlowShift, shift_survival
@@ -17,6 +19,9 @@ from nfb.stream import Block, ChannelSpec
 from nfb_console import trials
 from nfb_console.trials import (ACTIVE, BASELINE, CUE, FEEDBACK_ON, ITI, NEGATIVE, POSITIVE,
                                 VERDICT, TrialRun)
+
+from harness import _block, _limited_spec
+from test_scp_view import BLOCK
 
 RATE = 250.0
 SPEC = ChannelSpec(0, RATE, "µV", 800.0 / 32767)
@@ -280,3 +285,17 @@ def test_slow_level_keeps_its_reading_grid_over_lost_samples():
     assert after[0].t >= (at + 20) / RATE and after[0].t > before[-1].t
     assert all(abs(((r.t - before[0].t) / stride) - round((r.t - before[0].t) / stride)) < 1e-6
                for r in after), "the readings stay on their grid"
+
+
+def test_after_a_seam_the_level_shows_nothing_until_a_sample_is_accepted():
+    import dataclasses
+
+    from nfb.dsp.scp import SlowShift
+
+    spec = _limited_spec()
+    metric = SlowShift(spec, output_hz=20.0)
+    metric.feed(_block(spec, 0, np.full(BLOCK, -300.0)), accepted=True)
+    assert math.isfinite(metric.level)
+    seam = dataclasses.replace(_block(spec, BLOCK, np.full(BLOCK, -100.0)), seam=True)
+    metric.feed(seam, accepted=False)
+    assert math.isnan(metric.level), f"the level after the seam is {metric.level:.0f} µV, the old signal"

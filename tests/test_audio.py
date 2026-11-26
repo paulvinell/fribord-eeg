@@ -262,14 +262,21 @@ def test_every_short_sound_goes_through_the_open_stream_and_not_a_process(monkey
 
 
 def test_with_no_stream_a_sound_falls_back_to_afplay(monkeypatch):
+    """A sound plays the slow way when the stream cannot open, and a failed open is not tried again for
+    every sound."""
+    tries = []
+
     def broken():
+        tries.append(1)
         raise RuntimeError("no device")
 
     stream, launched = _live(monkeypatch, broken)
     assert cues.play("tick")
     assert launched and launched[0][0] == "afplay", "the sound still plays, the slow way"
-    waitfor(lambda: stream.error, what="the failed open to be reported")
+    waitfor(lambda: stream.error and not any(t.name == "cue-stream-open" for t in threading.enumerate()),
+            what="the failed open to be reported")
     assert cues.play(cues.tone_at(440.0)) and len(launched) == 2
+    assert len(tries) == 1, "one failed open per process, not one per sound"
 
 
 def test_outputs_off_plays_nothing_on_either_path(monkeypatch):
@@ -441,3 +448,15 @@ def test_a_writer_is_running_before_anything_can_find_it(monkeypatch):
     finally:
         device.release.set()
         stream.stop()
+
+
+def test_the_buffer_running_dry_is_counted_even_when_the_host_does_not_flag_it():
+    """`write` reports an underflow only when PortAudio noticed one. Running less than a block ahead of
+    the device is a crackle either way, and the count is what says the fault is this process rather than
+    the speaker. Judged from the lead alone, so no thread and no clock are needed to test it."""
+    health = audio.Stream._health
+    rate, block = music.SAMPLE_RATE, music.BLOCK_SECONDS
+    assert health(int(2.0 * rate), 2.0 - 0.2) == "", "a fifth of a second of buffer is the healthy state"
+    assert health(int(2.0 * rate), 2.0 - block / 2) == "starved", "less than one block left to play"
+    assert health(int(0.2 * rate), 0.2 - block / 2) == "", "and not while the buffer is still filling"
+    assert health(int(9.0 * rate), 9.0 - audio.STALL_SECONDS - 1) == "dead"

@@ -11,7 +11,10 @@ from __future__ import annotations
 
 
 import flet as ft
+import numpy as np
 from nfb import ReplaySource, Settings, WaitingSource
+from nfb.hrv import Beat, HRVProcessor
+from nfb.stream import Block, ChannelSpec
 from nfb_console import chrome
 from nfb_console.protocols import BY_CODE
 
@@ -666,3 +669,35 @@ def stop_built_screens() -> None:
         _built.popitem()[1][2].stop()
     while _made:
         _made.popitem()[1][2].stop()
+
+
+def _limited_spec(index: int = 0) -> ChannelSpec:
+    """A 250 Hz channel in µV with the amplifier's input limit at 800 µV."""
+    return ChannelSpec(index=index, rate_hz=250.0, unit="µV", scale=800.0 / 32767, input_range=800.0)
+
+
+def _block(spec: ChannelSpec, start: int, uv) -> Block:
+    """A block of these microvolts on `spec`, starting at sample `start`."""
+    return Block(spec.index, start, tuple(to_counts(uv, spec.scale).tolist()), spec)
+
+
+def coherent_state(seconds: float = 200.0, depth: float = 0.09, jitter: float = 0.0):
+    """A `BeatState` from a tachogram modulated at 0.1 Hz — what this protocol is training toward."""
+    proc = HRVProcessor()
+    rng = np.random.default_rng(5)
+    t, state = 1000.0, None
+    while t < 1000.0 + seconds:
+        rr = 1.0 + depth * np.sin(2 * np.pi * 0.1 * t) + jitter * rng.standard_normal()
+        t += rr
+        state = proc.push(Beat(t, 60.0 / rr, [rr]))
+    return state
+
+
+class ListedPort:
+    """A serial port as the system lists it: a path, a vendor id and the strings the device reports."""
+
+    def __init__(self, device, vid, description="", manufacturer=None, product=None,
+                 serial_number=None):
+        self.device, self.vid = device, vid
+        self.description, self.manufacturer = description, manufacturer
+        self.product, self.serial_number = product, serial_number

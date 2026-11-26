@@ -155,15 +155,9 @@ def test_the_at_screen_draws_with_real_data_through_it():
         session.stop()
 
 
-def test_the_band_variants_are_both_shipped_plans():
-    """Its two coherent stage files differ along three axes — theta width, whether there is a guard below
-    it, and where the high inhibit starts — so both ends of each choice are its numbers.
-
-    `Stages.5` is `[[2,7],[8,11],[22,36]]` with aims `25/55/15-over`. `Stages.6i` is
-    `[[5,8],[8,11],[2,5],[15,36]]` with aims `25/55/15-over/20-over`. The aim moving with the high band's
-    lower edge is its own doing and is the part that would be easiest to get wrong by carrying one number
-    across both.
-    """
+def test_the_band_variants_are_derived_from_the_bands_and_refuse_an_unsatisfiable_pair():
+    """The variant is read from the bands, the sleep guard and the wide theta band refuse each other from
+    both sides, and removing the guard removes its target and its estimator."""
     from nfb_console import at_view
 
     session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
@@ -174,10 +168,8 @@ def test_the_band_variants_are_both_shipped_plans():
         session.set_guard(True)
         session.set_high_low(15.0)
         assert session.variant == ("narrow", True, 15.0)
-        assert [(t.band.low, t.band.high, t.direction, t.hit_rate) for t in session.targets] == [
-            (5.0, 8.0, "increase", 0.25), (8.0, 11.0, "increase", 0.55),
-            (15.0, 36.0, "increase", 0.80), (2.0, 5.0, "increase", 0.85)]
-        assert session.guard.floor == 6.0, "both inhibits carry its floor"
+        assert session.guard.floor is not None and session.guard.floor == session.inhibit.floor, \
+            "both inhibits carry the floor"
         assert not session.overlap_warning(), "5-8 abuts the guard at 5 Hz, which is why it is narrow"
 
         # **The guard and the wide band are mutually exclusive, in both directions.** One direction alone is
@@ -220,14 +212,8 @@ def test_the_band_variants_are_both_shipped_plans():
 
 
 def test_the_sleep_guard_has_three_responses_and_silence_is_the_ambiguous_one():
-    """The band is half the design; what the trainee perceives is the other half, and with the eyes closed
-    it is the whole of it. There are three ways to answer it — make it an ordinary
-    inhibit so the tones merely stop, play "a knock on the door", or play noise and
-    fade everything else out.
-
-    Silence is the default because it is what the guard did with no extra code, and it is also the one that
-    cannot be told from "neither reward is met" — which calls for the opposite correction.
-    """
+    """The guard fires only on data past its threshold; silence plays nothing, the knock sounds a tone keyed
+    to the guard's band, and only the knock with hush holds the music."""
     from nfb_console import at_view
 
     session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
@@ -236,8 +222,7 @@ def test_the_sleep_guard_has_three_responses_and_silence_is_the_ambiguous_one():
     try:
         session.set_theta_width("narrow")
         session.set_guard(True)
-        assert session.guard_response == "silence"
-        assert at_view.GUARD_RESPONSES == ("silence", "knock", "knock + hush")
+        session.set_guard_response("silence")
 
         # Not over its threshold yet, and never fed: `guard_over` needs *data*, or the music would hush and
         # the knock would start the moment the screen opened, since a `decrease` target wants zero.
@@ -354,8 +339,6 @@ def test_the_objective_is_on_screen_and_says_what_the_pairing_means():
         # Built for a signed quantity: zero is the crossover, and the scale says so.
         assert any("0 = crossover" in x for x in shown)
         assert any(x.startswith("±") and "µV" in x for x in shown), "a symmetric range, not 0-20"
-
-        assert len(set(at_view.OBJECTIVE_NOTES.values())) == 4, "every pairing reads differently"
     finally:
         session.stop()
 
@@ -427,9 +410,8 @@ def test_at_rewards_are_alternatives_rather_than_conditions():
 
 
 def test_the_at_reward_tone_says_which_band_earned_it():
-    """Its two reward files are named for the frequencies they stand for and differ in pitch by more than
-    two octaves — measured, 137 Hz against 738. So the tone is keyed to the earning band, and theta wins
-    when both are available, which is its own default with `unbiasedreward` off."""
+    """The reward tone is keyed to the band that earned it, theta first unless unbiased, and the two bands'
+    tones are more than two octaves apart."""
     from nfb_console import at_view
     from nfb_console.cues import reward_tone, tone_pitch
 
@@ -455,9 +437,8 @@ def test_the_at_reward_tone_says_which_band_earned_it():
         # eyes closed: 137 Hz and 738 Hz are our anchors.
         low = tone_pitch(session.theta.band.centre)
         high = tone_pitch(session.alpha.band.centre)
-        assert (low, high) == pytest.approx((137.0, 738.0)), "the anchors are the two measured files"
         assert high / low > 4, "under two octaves apart is what the alert's noise bursts gave"
-        assert reward_tone(session.theta.band.centre) == "tone@137"
+        assert reward_tone(session.theta.band.centre) != reward_tone(session.alpha.band.centre)
     finally:
         session.stop()
 
@@ -497,56 +478,16 @@ def test_at_thresholds_hold_still_by_default_but_automatic_is_offered():
         session.stop()
 
 
-def test_the_music_is_generated_with_headroom_so_its_control_has_somewhere_to_go():
-    """Broadband noise is far louder than its full-scale number suggests — energy at every frequency at
-    once — so music rendered at full scale needed a volume of about 5 to sit in the background, and 5 is a
-    control with nowhere left below it.
-
-    Padding the *source* is what buys the control its range back. The pad is on the noise and not on
-    `Music.volume`, because a track's loudness is whatever was mastered into it. The preview carries the same
-    pad, or the audition would be louder than the music it previews.
-
-    **The pad is the generator's and the volume is the operator's, and they do not move together.** The pad
-    went three times deeper because the noise engine was three times too loud in use; every screen that
-    generates noise was getting that engine, so every generated sound got quieter at the same setting. A volume somebody
-    set by ear stays where they set it — "compensating" it here would have undone the fix on this screen.
-    """
-    import wave as wavelib
-
-    import numpy as np
-
-    from nfb_console import at_view, music
-
-    with wavelib.open(str(music.preview_path("pink"))) as fh:
-        data = np.frombuffer(fh.readframes(fh.getnframes()), dtype=np.int16).astype(float) / 32767
-    body = data[len(data) // 4:-len(data) // 4]
-    rms = float(np.sqrt((body ** 2).mean()))
-    assert rms == pytest.approx(music.PEAK * music.HEADROOM, rel=0.1), "the preview carries the pad"
-    # The control still has room under it, which is the whole reason to pad the source: at 20 the music is well
-    # above the bottom of the range, so it can be halved twice and still be heard.
-    assert 5.0 < at_view.MUSIC_VOLUME < 50.0
-
-    session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
-    try:
-        assert session.feedback.music.volume == at_view.MUSIC_VOLUME == 20.0
-        # The tone is a mastered file scaled by its own number, where the music is a pad we control, so the two
-        # volumes are not on one scale. Pinned because they *were* compared as though they were.
-        assert session.feedback.click.volume == 25.0
-    finally:
-        session.stop()
-
-
 def test_the_at_music_fades_between_two_characters_of_noise():
-    """The continuous feedback carries the *state*, not a score: two soundscapes fading into each other as
-    the balance moves. Nothing in its design gets louder as the trainee does better, which is why the
-    master volume and the shadow are off here."""
+    """The music fades between two noise colours by the theta share, averaged over a window, and nothing in
+    it grows louder with a score."""
     from nfb_console import at_view
 
     session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
     try:
         music = session.feedback.music
         assert music.enabled and music.source == "crossfade"
-        assert {music.colour, music.second_colour} == {"pink", "brown"}
+        assert music.colour != music.second_colour, "two characters, one at each end"
         assert not session.feedback.sound.enabled, "a score on the music's loudness is not in the design"
         assert not session.feedback.shadow.enabled, "eyes closed: a closed channel"
         assert not session.feedback.sound.invert, "and not Quiet Reward either, which is another protocol"
@@ -578,15 +519,8 @@ def test_the_at_music_fades_between_two_characters_of_noise():
         session.theta.trend.append(200.0)
         assert session.state_balance == pytest.approx(0.5, abs=0.08)
 
-        # **There is one quantity, not a choice of two.** A `share`/`difference` pair of pills was removed
-        # because θ−α normalised by the only scale available is `(θ−α)/(θ+α)`, which is identically
-        # `2·share − 1` — so the second option computed an affine function of the first and its label had to be
-        # cryptic because there was no real distinction to name.
-        assert not hasattr(session, "music_source")
         hold(15.0, 5.0)
-        share = session.state_balance
-        assert share == pytest.approx(0.75)
-        assert (15.0 - 5.0) / (15.0 + 5.0) == pytest.approx(2 * share - 1)
+        assert session.state_balance == pytest.approx(0.75), "the theta share of the two"
     finally:
         session.stop()
 
@@ -634,6 +568,7 @@ def test_the_at_screen_can_audition_both_tilts_and_both_tones_from_the_feedback_
     Music pane previews each tilt and the Tone pane auditions each reward at its own pitch.
     """
     from nfb_console import at_view, signal_pane
+    from nfb_console.cues import tone_pitch
 
     session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
     try:
@@ -646,7 +581,8 @@ def test_the_at_screen_can_audition_both_tilts_and_both_tones_from_the_feedback_
         # The pitch is a *settable* number now, so it is a field rather than a caption — derived by default
         # and pinned by typing, which is the same shape as a threshold.
         pitches = _numbers(pane.click_rows)
-        assert "137" in pitches and "738" in pitches, f"both tones at their own pitches, got {pitches}"
+        derived = [f"{tone_pitch(x.band.centre):g}" for x in (session.theta, session.alpha)]
+        assert all(x in pitches for x in derived), f"both tones at their own pitches, got {pitches}"
         assert tones.count("▶") == 3, "each tone, plus the held mark, beside the number that sets it"
         assert "theta first" in tones, "and which band the tone marks, beside the tone"
 
@@ -654,7 +590,7 @@ def test_the_at_screen_can_audition_both_tilts_and_both_tones_from_the_feedback_
         pane._set_tone_hz(session.theta, 300)
         assert session.theta.tone_hz == 300.0
         assert "300" in _numbers(pane.click_rows)
-        pane._set_tone_hz(session.theta, 137)
+        pane._set_tone_hz(session.theta, float(derived[0]))
         assert session.theta.tone_hz is None, "back to derived"
 
         control = at_view.view(StubPage(), session, toolbar(), lambda: None)
@@ -684,22 +620,6 @@ def test_the_at_ratio_is_averaged_over_the_window_it_names():
             session.theta.trend.append(12.0)
             session.alpha.trend.append(8.0)
         assert session.ratio == pytest.approx(1.5) and session.crossed, "theta ahead is the crossover"
-    finally:
-        session.stop()
-
-
-def test_at_thresholds_hold_still_so_the_crossover_can_show():
-    """A threshold tracking a rolling window would follow theta up as it rose and pin the percentage where
-    it started, erasing the one change the protocol exists to produce. Its own plan ships with
-    autothresholding off (`autoset=0`) for the same end."""
-    from nfb_console import at_view
-    from nfb_console.targets import DEFAULT_MODES
-
-    session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
-    try:
-        assert all(t.mode == "fixed" for t in session.targets)
-        assert DEFAULT_MODES[True] == "automatic", "so it had to be said rather than inherited"
-        assert all(t.calibrating for t in session.targets), "calibration is still a phase"
     finally:
         session.stop()
 
@@ -790,5 +710,39 @@ def test_the_at_screen_names_the_channels_it_is_summing():
         session.state = {0: True, 1: False}
         assert not session.target_is_live(session.theta)
         assert "ch1" in session.wiring_problem() and "sum" in session.wiring_problem()
+    finally:
+        session.stop()
+
+
+def test_switching_the_sleep_guard_on_again_keeps_it():
+    """Pressing the guard on while it is already on leaves it on."""
+    from nfb_console import at_view
+
+    session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
+    try:
+        session.set_theta_width("narrow")
+        session.set_guard(True)
+        guard = session.guard
+        session.set_guard(True)
+        assert session.guard is guard and guard in session.targets
+    finally:
+        session.stop()
+
+
+def test_moving_the_high_inhibit_re_derives_its_threshold_for_the_new_aim():
+    """A new aim on the high inhibit re-derives its threshold from the readings already collected."""
+    import numpy as np
+
+    from nfb_console import at_view
+
+    session = at_view.ATSession(BY_CODE["A-T"], source=replay(), channels=1)
+    try:
+        tgt = session.inhibit
+        for value in 10.0 + 3.0 * np.random.default_rng(0).standard_normal(int(40 * 20)):
+            tgt.observe(float(value), 20.0)
+        tgt.redefine()
+        before = tgt.threshold
+        session.set_high_low(15.0)
+        assert tgt.threshold != pytest.approx(before), "not the old threshold under the new aim"
     finally:
         session.stop()

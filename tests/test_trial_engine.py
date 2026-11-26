@@ -10,7 +10,6 @@ run's own scores and nothing before the run is done.
 from __future__ import annotations
 
 import ast
-import inspect
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +57,41 @@ def test_a_hole_under_a_second_counts_its_readings_invalid():
     trial = _trial(active=hole).results[-1]
     assert not trial.valid, "missing readings count against the trial"
     assert trial.cause == "lost"
+
+
+def test_a_baseline_with_half_its_readings_is_enough():
+    """A baseline is thin only below half the readings it expects: one with exactly half valid gives the
+    trial a result."""
+    expected = int(BASELINE_S * HZ)
+    trial = _trial(baseline=lambda i: "ok" if i < expected // 2 else "rejected").results[-1]
+    assert trial.valid, trial.cause
+
+
+def _one_trial_with(at_active) -> TrialRun:
+    """One trial at 16 readings a second, a rate whose times are exact. In the feedback window the time of
+    each next reading is `at_active(t)` instead of the next tick."""
+    hz = 16.0
+    run = TrialRun(n_trials=1, transfer_fraction=0.0, seed=1, directions=(POSITIVE,), metric_hz=hz)
+    t, bent = 0.0, False
+    while not run.results:
+        run.feed(t, 0.0)
+        if run.phase == ACTIVE and not bent:
+            t, bent = at_active(t), True
+        else:
+            t += 1.0 / hz
+        assert t < 60.0
+    return run
+
+
+def test_a_reading_at_the_same_time_or_a_hole_of_one_second_does_not_cut_the_trial():
+    """A reading stamped at the time of the last one is no step back, and a hole of exactly the jump limit
+    is lost readings, not a gap: the trial keeps its result."""
+    from nfb_console.trials import JUMP_S
+
+    same = _one_trial_with(lambda t: t).results[0]
+    assert same.valid and same.cause is None, same
+    hole = _one_trial_with(lambda t: t + JUMP_S).results[0]
+    assert hole.cause != "gap" and hole.valid, hole
 
 
 def test_a_pause_over_a_second_leaves_a_void_cell():
@@ -177,32 +211,15 @@ def _ui(run):
     return session, ui
 
 
-def test_draw_fixation_prints_a_void_trial_through_verdict_line(monkeypatch):
-    from nfb_console import trial_training
-
-    seen = []
-    original = trial_training.verdict_line
-
-    def spy(last, *args, **kwargs):
-        seen.append(last)
-        return original(last, *args, **kwargs)
-
-    monkeypatch.setattr(trial_training, "verdict_line", spy)
-    session, ui = _ui(_void_run())
-    try:
-        ui.draw_fixation("")
-        assert [t for t in seen if not t.valid], "a void trial reaches the screen through verdict_line"
-    finally:
-        session.stop()
-
-
 def test_a_void_trial_shows_its_cause_and_an_action_under_the_circle():
+    """The first line names the share of rejected readings and the maximum; the second says what to do."""
     session, ui = _ui(_void_run())
     try:
         ui.draw_fixation("")
-        assert ui.verdict_text.value == "no result · the program rejects 25% of the readings · the maximum is 20%"
-        assert ui.verdict_detail.value and ui.verdict_detail.value != ui.verdict_text.value, \
-            "the second line says what to do"
+        trial = session.trials.last
+        shown = ui.verdict_text.value
+        assert f"{trial.cause_share:.0%}" in shown and f"{session.trials.reject_limit:.0%}" in shown, shown
+        assert ui.verdict_detail.value and ui.verdict_detail.value != shown, "the second line says what to do"
     finally:
         session.stop()
 
@@ -333,6 +350,17 @@ def test_chance_passes_the_range_in_the_cued_direction_in_one_run_of_twenty():
         assert 0.038 < count / runs < 0.062, f"{name}: past the range in {count} of {runs} runs with no skill"
 
 
+def test_a_run_with_the_fewest_trials_a_direction_needs_is_judged():
+    """A run in one direction with exactly the fewest trials a comparison needs still gets its comparison."""
+    from nfb_console.trial_training import MIN_PER_DIRECTION
+
+    run = TrialRun(n_trials=MIN_PER_DIRECTION, directions=(POSITIVE,))
+    run.results = [Trial(index=i + 1, required=POSITIVE, transfer=False, score_uv=5.0 + i, valid=True,
+                         success=True) for i in range(MIN_PER_DIRECTION)]
+    assert run.done
+    assert "chance range" in _summary(run), _summary(run)
+
+
 def test_one_direction_is_judged_against_zero():
     run, _ = _run_of(3, skill=1.5, directions=(POSITIVE,))
     assert "keep this strategy" in _summary(run), "a run in one direction has its own comparison"
@@ -366,12 +394,13 @@ def test_an_extra_channel_with_no_signal_does_not_check():
     assert "ch2 did not follow the cues" not in text
 
 
-def test_trial_summary_keeps_its_old_callers():
-    """`trial_summary(run, words, unit)` stays a call that works, for Pupil and HEG."""
-    from nfb_console.trial_training import trial_summary
-
-    assert "checks" in inspect.signature(trial_summary).parameters
-    assert trial_summary(TrialRun(), WORDS, "µV") == "no trials yet"
+def test_a_done_runs_words_follow_a_change_of_its_checks():
+    """The words of a done run stay the same frame after frame, and change when a chip pressed after the
+    end changes the extra channels."""
+    run, checks = _run_of(2, skill=2.0, extra=(2.0, 0.0))
+    first = _summary(run, checks)
+    assert _summary(run, checks) == first
+    assert _summary(run, {}) != first, "a chip pressed after the end is judged again"
 
 
 def _void_with(lost: int, rejected: int, thin: bool = False):
@@ -403,3 +432,58 @@ def test_a_void_trial_names_the_count_with_the_most_readings():
     assert more_lost.cause == LOST, more_lost
     assert more_lost.cause_share < more_lost.invalid_share, "the share of the named cause alone"
     assert _void_with(lost=3, rejected=20, thin=True).cause == THIN_BASELINE, "a cause that is not a count first"
+
+
+def _scripted_run(groups: dict[bool, tuple[list[float], list[float]]]) -> TrialRun:
+    """A done run with these scores: per transfer flag, the up scores and the down scores."""
+    from nfb_console.trials import NEGATIVE, Trial
+
+    trials = [(POSITIVE, transfer, s) for transfer, (up, down) in groups.items() for s in up]
+    trials += [(NEGATIVE, transfer, s) for transfer, (up, down) in groups.items() for s in down]
+    run = TrialRun(n_trials=len(trials))
+    run.results.extend(Trial(index=i + 1, required=d, transfer=tr, score_uv=s, valid=True, success=False)
+                       for i, (d, tr, s) in enumerate(trials))
+    return run
+
+
+def test_the_chance_level_is_split_over_the_groups_judged():
+    """A feedback group whose difference passes the 5% range and not the 2.5% one, beside a group without
+    feedback: with two groups, each is judged at 2.5%, so the run does not show control."""
+    from nfb_console.trial_training import trial_summary
+
+    spread = [-1.0, 0.0, 1.0, -0.5, 0.5]
+    run = _scripted_run({False: ([1.05 + e for e in spread], spread),
+                         True: ([0.1, -0.1, 0.2], [0.0, 0.1, -0.2])})
+    assert run.done
+    text = trial_summary(run, {POSITIVE: "up", "negative": "down"}, "µV")
+    assert "inside the chance range" in text and "past the chance range" not in text, text
+
+
+def test_keep_this_strategy_is_said_once_when_an_extra_channel_vouches():
+    said = []
+    for seed in range(10):
+        run, checks = _run_of(seed, skill=2.0, extra=(2.0, 0.0))
+        text = _summary(run, checks)
+        if "did not follow the cues" in text and "past the chance range" in text:
+            said.append(text.count("keep this strategy"))
+    assert said and all(n == 1 for n in said), said
+
+
+def test_the_verdict_line_of_a_down_trial_compares_the_shift_toward_the_cue():
+    from nfb_console.trial_training import AUTOMATIC, TrialScale, verdict_line
+    from nfb_console.trials import NEGATIVE, Trial
+
+    from test_scp_view import _session
+
+    session = _session()
+    try:
+        scale = TrialScale(20.0, 5.0, AUTOMATIC, AUTOMATIC, 5.0, 30.0)
+        down = Trial(index=1, required=NEGATIVE, transfer=False, score_uv=-8.0, valid=True, success=True,
+                     scale=scale)
+        assert verdict_line(down, session)[1].startswith("more than the 5.0 µV of succeeds at"), \
+            verdict_line(down, session)
+        short = Trial(index=2, required=NEGATIVE, transfer=False, score_uv=8.0, valid=True, success=False,
+                      scale=scale)
+        assert verdict_line(short, session)[1].startswith("less than"), verdict_line(short, session)
+    finally:
+        session.stop()
